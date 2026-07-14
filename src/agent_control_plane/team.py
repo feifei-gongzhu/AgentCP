@@ -1,0 +1,189 @@
+from __future__ import annotations
+
+import json
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+from collections.abc import Callable
+
+from .dashboard import render_dashboard
+from .drivers import DriverConfig, run_driver
+from .lifecycle import project_execution_lock, require_initialized_project
+from .schemas import now_iso
+from .scheduler import Scheduler
+from .store import ROOT, ProjectStore
+from .worker import WorkerError, apply_worker_output, build_worker_prompt
+from .runtime_secrets import RuntimeSecretStore
+
+
+TEAMS_DIR = ROOT / "teams"
+
+
+@dataclass
+class TeamMember:
+    name: str
+    type: str | None = None
+    backend: str = "codex"
+    role: str = "reason"
+    model: str | None = None
+    base_url: str | None = None
+    api_key_env: str | None = None
+    auth_mode: str = "auto"
+    profile: str | None = None
+    sandbox: str = "read-only"
+    dangerously_bypass_sandbox: bool = False
+    env: dict[str, str] | None = None
+    command: str | None = None
+    max_running: int = 1
+    priority: int = 0
+    extra: dict[str, Any] | None = None
+
+
+def load_team(name: str, store: ProjectStore | None = None) -> list[TeamMember]:
+    project_config = store.path / "team_config.json" if store is not None else None
+    path = (
+        project_config
+        if project_config is not None and project_config.exists() and name in {"default", "project"}
+        else TEAMS_DIR / f"{name}.json"
+    )
+    if not path.exists():
+        raise WorkerError(f"团队配置不存在: {path}")
+    data = json.loads(path.read_text(encoding="utf-8"))
+    members = []
+    for item in data.get("members", []):
+        if "type" in item and "backend" not in item:
+            item["backend"] = item["type"]
+        members.append(TeamMember(**item))
+    return sorted(members, key=lambda item: item.priority)
+
+
+def _run_member(
+    store: ProjectStore,
+    member: TeamMember,
+    timeout: int,
+    dry_run: bool,
+    context_suffix: str = "",
+    cancel_check: Callable[[], bool] | None = None,
+    progress_callback: Callable[[dict[str, Any]], None] | None = None,
+) -> dict[str, Any]:
+    prompt = build_worker_prompt(store, member.role)
+    if context_suffix:
+        prompt += "\n\n当前调度器候选状态（只读）：\n" + context_suffix
+    if dry_run:
+        return {
+            "member": member.name,
+            "role": member.role,
+            "status": "dry_run",
+            "prompt": prompt,
+            "created_at": now_iso(),
+        }
+    extra = dict(member.extra or {})
+    member_env = dict(member.env or {})
+    api_key_env = member.api_key_env
+    runtime_secret = RuntimeSecretStore.get(store.vendor, member.name)
+    if runtime_secret:
+        api_key_env = "AGENTCP_RUNTIME_API_KEY"
+        member_env[api_key_env] = runtime_secret
+    if (member.type or member.backend) == "container":
+        extra.setdefault("project_path", str(store.path.resolve()))
+        target_path = str(store.read_json("target.json").get("target_path", "")).strip()
+        if target_path:
+            extra.setdefault("target_path", target_path)
+            prompt += "\n\n容器内目标源码以只读方式挂载在 /target；项目证据目录位于 /workspace/evidence。"
+    payload = run_driver(DriverConfig(
+        type=member.type or member.backend,
+        model=member.model,
+        profile=member.profile,
+        base_url=member.base_url,
+        api_key_env=api_key_env,
+        auth_mode=member.auth_mode,
+        sandbox=member.sandbox,
+        env=member_env,
+        command=member.command,
+        extra=extra,
+        dangerously_bypass_sandbox=member.dangerously_bypass_sandbox,
+    ), prompt, timeout=timeout, cancel_check=cancel_check, progress_callback=progress_callback)
+    return {
+        "member": member.name,
+        "role": member.role,
+        "status": "ok",
+        "payload": payload,
+        "created_at": now_iso(),
+    }
+
+
+def run_team(
+    store: ProjectStore,
+    team_name: str,
+    timeout: int = 300,
+    dry_run: bool = False,
+    max_workers: int | None = None,
+) -> str:
+    with project_execution_lock(store):
+        require_initialized_project(store)
+        return _run_team_locked(store, team_name, timeout, dry_run, max_workers)
+
+
+def _run_team_locked(
+    store: ProjectStore,
+    team_name: str,
+    timeout: int = 300,
+    dry_run: bool = False,
+    max_workers: int | None = None,
+) -> str:
+    state = store.load_state()
+    if state.gate_status == "awaiting_approval" and not dry_run:
+        raise WorkerError("强制门禁正在等待用户批准，禁止启动新的并发批次。")
+    members = load_team(team_name, store)
+    if not members:
+        raise WorkerError(f"团队 {team_name} 没有成员")
+
+    results: list[dict[str, Any]] = []
+    if max_workers is not None and max_workers < 1:
+        raise WorkerError("max_workers 必须大于 0")
+    concurrency = min(len(members), max_workers or 8)
+    effective_timeout = min(timeout, max(1, state.gate_interval_minutes) * 60)
+    with ThreadPoolExecutor(max_workers=concurrency) as executor:
+        futures = {executor.submit(_run_member, store, member, effective_timeout, dry_run): member for member in members}
+        for future in as_completed(futures):
+            member = futures[future]
+            try:
+                results.append(future.result())
+            except Exception as exc:
+                results.append({
+                    "member": member.name,
+                    "role": member.role,
+                    "status": "error",
+                    "error": str(exc),
+                    "created_at": now_iso(),
+                })
+
+    store.append_jsonl("team_runs.jsonl", {
+        "team": team_name,
+        "dry_run": dry_run,
+        "created_at": now_iso(),
+        "results": results,
+    })
+
+    if dry_run:
+        preview = [
+            f"[{item['member']}/{item['role']}] prompt chars={len(item.get('prompt', ''))}"
+            for item in results
+        ]
+        return "\n".join(preview)
+
+    applied: list[str] = []
+    for item in results:
+        if item.get("status") != "ok":
+            applied.append(f"[{item.get('member')}] 失败: {item.get('error')}")
+            continue
+        try:
+            applied.append(f"[{item['member']}] {apply_worker_output(store, item['payload'])}")
+        except Exception as exc:
+            applied.append(f"[{item['member']}] 写回失败: {exc}")
+    gate = Scheduler(store).complete_subtask(
+        f"并发批次 {team_name} 完成，{len(results)} 个 Worker 已收敛"
+    )
+    render_dashboard(store)
+    return "\n".join(applied) + "\n\n" + gate

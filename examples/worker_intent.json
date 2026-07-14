@@ -1,0 +1,8 @@
+{
+  "kind": "intent",
+  "verb": "verify",
+  "target": "nodeIntegration 开启但尚未证明可达 XSS 注入点",
+  "evidence_sink": "evidence/nodeintegration_xss_reachability.txt",
+  "success_criteria": "能证明攻击者控制的输入进入开启 nodeIntegration 的渲染进程，并观察到可执行 JS 证据"
+}
+

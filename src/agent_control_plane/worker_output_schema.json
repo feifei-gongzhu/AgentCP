@@ -1,0 +1,45 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "kind": {
+      "type": "string",
+      "enum": ["fact", "intent", "decision", "none"]
+    },
+    "title": { "type": "string" },
+    "category": { "type": "string" },
+    "evidence": { "type": "string" },
+    "assets": { "type": "array", "items": { "type": "string" } },
+    "severity": { "type": "string" },
+    "confidence": { "type": "number", "minimum": 0, "maximum": 1 },
+    "impact_score": { "type": "number", "minimum": 0, "maximum": 1 },
+    "classification": { "type": "string", "enum": ["attack_surface", "risk_lead", "vulnerability"] },
+    "business_impact": { "type": "string" },
+    "reproduction_steps": { "type": "array", "items": { "type": "string" } },
+    "evidence_path": { "type": "string" },
+    "proposed_by": { "type": "string" },
+    "verb": { "type": "string" },
+    "target": { "type": "string" },
+    "evidence_sink": { "type": "string" },
+    "success_criteria": { "type": "string" },
+    "scope_check": { "type": "string" },
+    "scope_refs": { "type": "array", "items": { "type": "string" } },
+    "expected_business_impact": { "type": "string" },
+    "risk_level": { "type": "string", "enum": ["low", "medium", "high", "critical"] },
+    "requires_human_confirmation": { "type": "boolean" },
+    "parent_id": { "type": ["string", "null"] },
+    "chain_id": { "type": ["string", "null"] },
+    "sequence": { "type": "integer", "minimum": 0 },
+    "action": {
+      "type": "string",
+      "enum": ["continue", "stop_loss", "switch_target", "switch_phase", "request_confirmation"]
+    },
+    "reason": { "type": "string" },
+    "focus_cost": { "type": ["string", "null"] },
+    "counterfactual_hypothesis": { "type": ["string", "null"] },
+    "ignored_evidence": { "type": ["string", "null"] },
+    "override_rule": { "type": ["string", "null"] },
+    "serendipity_minutes": { "type": "integer", "minimum": 0 }
+  },
+  "required": ["kind"]
+}

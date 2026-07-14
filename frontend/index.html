@@ -1,0 +1,211 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>AgentCP · 安全研究控制平面</title>
+  <link rel="stylesheet" href="/frontend/styles.css">
+  <link rel="stylesheet" href="/frontend/extras.css">
+</head>
+<body>
+  <div class="shell">
+    <aside class="sidebar">
+      <div class="brand"><span class="brand-mark">A</span><div><strong>AgentCP</strong><small>BLACKBOARD V2.0</small></div></div>
+      <nav aria-label="控制台导航">
+        <a class="nav-item active" data-route-link="hub" href="#hub"><span>01</span>任务中心</a>
+        <a class="nav-item" data-route-link="config" href="#config"><span>02</span>项目配置</a>
+        <a class="nav-item" data-route-link="run" href="#run"><span>03</span>执行与结果</a>
+      </nav>
+      <div class="sidebar-foot">
+        <div class="pulse"><i></i><span id="connectionText">连接中</span></div>
+        <small>授权策略固定：authorized / *</small>
+      </div>
+    </aside>
+
+    <main>
+      <header class="topbar">
+        <div><p id="routeEyebrow" class="eyebrow">SECURITY RESEARCH ORCHESTRATOR</p><h1 id="projectTitle">任务中心</h1></div>
+        <div class="top-actions">
+          <label class="project-picker" data-route-action="hub">选择项目<select id="projectSelect" aria-label="选择项目"></select></label>
+          <button id="enterProjectButton" data-route-action="hub" class="button secondary" type="button">进入项目</button>
+          <button id="newTaskButton" data-route-action="hub" class="button primary" type="button">新建审计任务</button>
+          <button id="deleteProjectButton" data-route-action="hub" class="button danger" type="button">删除项目</button>
+          <button id="returnHubButton" data-route-action="config run" class="button ghost" type="button">返回任务中心</button>
+          <button id="backConfigButton" data-route-action="run" class="button ghost" type="button">返回项目配置</button>
+          <button id="refreshButton" data-route-action="config run" class="button ghost" type="button">立即刷新</button>
+          <button id="viewRunButton" data-route-action="config" class="button secondary" type="button" hidden>查看运行过程</button>
+          <button id="startAuditButton" data-route-action="config" class="button primary" type="button">开始审计</button>
+          <span id="gateBadge" data-route-action="config run" class="status-badge neutral">读取中</span>
+        </div>
+      </header>
+
+      <section id="task-hub" data-view="hub" class="hub-view">
+        <div class="hub-intro">
+          <p class="section-label">PROJECT WORKSPACE</p>
+          <h2>选择一个授权项目，或创建新的审计任务</h2>
+          <p class="subtle">任务中心只负责项目入口。进入项目后先完成目标、角色和黑板配置，再启动真实模型团队。</p>
+        </div>
+        <div id="projectCards" class="project-card-grid" aria-live="polite"></div>
+      </section>
+
+      <section id="target-setup" data-view="config" class="content-grid first-section" hidden>
+        <article class="panel span-3 target-panel">
+          <div class="panel-head">
+            <div><p class="section-label">TARGET ONBOARDING</p><h2>初始化与维护渗透目标</h2></div>
+            <span class="status-badge completed">authorized / *</span>
+          </div>
+          <p class="subtle">填写 URL、域名、IP、应用包或本地源码目录。授权策略固定为已授权，目标内容会同步写入 <code>target.json</code> 和 <code>目标信息.md</code>。</p>
+          <div class="target-form-grid">
+            <label>测试目标（每行一个）<textarea id="targetTargets" rows="5" placeholder="https://app.example.com&#10;api.example.com&#10;10.0.0.25"></textarea></label>
+            <div class="target-stack">
+              <label>本地目标目录（可选）<input id="targetPath" placeholder="/absolute/path/to/source"></label>
+              <label>项目类型<select id="targetProjectType"><option value="Web渗透">Web渗透</option><option value="客户端">客户端</option></select></label>
+              <label>业务与测试目标<textarea id="targetGoal" rows="3" placeholder="例如：验证账号体系、支付链路和管理后台的高价值风险"></textarea></label>
+            </div>
+            <label>不收范围（每行一个）<textarea id="targetOutOfScope" rows="4" placeholder="例如：第三方支付生产环境"></textarea></label>
+            <label>成功条件（每行一个）<textarea id="targetSuccessCriteria" rows="4" placeholder="例如：形成可复现证据链并说明业务影响"></textarea></label>
+            <label class="span-all">补充说明<textarea id="targetNotes" rows="3" placeholder="测试账号用途、版本、环境、特殊前置条件；不要填写密码或 API Key"></textarea></label>
+          </div>
+          <div class="target-actions">
+            <button id="saveTargetButton" class="button secondary" type="button">保存当前项目目标</button>
+            <div id="newProjectBox" class="new-project-box">
+              <label>新项目名称<input id="newProjectName" maxlength="80" placeholder="client-security-2026"></label>
+              <button id="createProjectButton" class="button primary" type="button">创建项目并使用以上目标</button>
+            </div>
+          </div>
+        </article>
+      </section>
+
+      <section id="project-configuration" data-view="config" class="content-grid core-config-grid" hidden>
+        <article class="panel span-3">
+          <div class="panel-head">
+            <div><p class="section-label">MODEL TEAM</p><h2>项目级角色配置</h2></div>
+            <div class="inline-actions"><button id="addRoleButton" class="button ghost small" type="button">添加角色</button><button id="saveTeamButton" class="button secondary small" type="button">保存并应用</button></div>
+          </div>
+          <p class="subtle">前端字段会直接进入后端 Driver。“密钥变量”可留空；真实 Key 填入“会话 API Key”，只保存在当前服务内存中。AgentCP 的 Claude 任务始终隔离用户级/本地级路由设置，不读取或改动 CCSwitch。</p>
+          <div class="table-wrap role-editor"><table><thead><tr><th>名称</th><th>职责</th><th>后端</th><th>模型</th><th>服务地址</th><th>密钥变量</th><th>鉴权</th><th>会话 API Key</th><th>沙箱</th><th>并发</th><th>优先级</th><th></th></tr></thead><tbody id="roleConfigBody"></tbody></table></div>
+        </article>
+        <article id="project-blackboard" class="panel span-3 blackboard-panel">
+          <div class="panel-head"><div><p class="section-label">TWO-TIER BLACKBOARD</p><h2>项目黑板知识库</h2></div><button id="copyBoard" class="button ghost small" type="button">复制</button></div>
+          <pre id="blackboardText">读取中…</pre>
+        </article>
+      </section>
+
+      <section id="overview" data-view="run" class="hero-grid" hidden>
+        <article id="gateApprovalCard" class="gate-approval-card" role="alert" aria-live="assertive" hidden>
+          <div class="gate-approval-head">
+            <div>
+              <p class="section-label">HARD GATE · HUMAN APPROVAL REQUIRED</p>
+              <div class="gate-approval-title"><span class="gate-warning-dot" aria-hidden="true"></span><h2>强制门禁：执行已暂停</h2></div>
+              <p id="gateApprovalReason" class="gate-approval-reason">正在读取控制器评估…</p>
+            </div>
+            <span id="gateApprovalRunBadge" class="status-badge blocked">awaiting_approval</span>
+          </div>
+          <div class="gate-objective-metrics" aria-label="门禁客观指标">
+            <div><span>当前阶段</span><strong id="gateApprovalPhase">—</strong></div>
+            <div><span>已用时间</span><strong id="gateApprovalElapsed">0 min</strong></div>
+            <div><span>资产 / 漏洞</span><strong id="gateApprovalAssets">0 / 0</strong></div>
+            <div><span>敏感线索</span><strong id="gateApprovalHighRisk">0</strong></div>
+            <div><span>上次发现</span><strong id="gateApprovalDiscovery">无</strong></div>
+            <div><span>运行状态</span><strong id="gateApprovalRun">无运行</strong></div>
+          </div>
+          <div class="gate-approval-footer">
+            <label class="gate-approval-note">审批备注（可选）
+              <textarea id="gateApprovalNote" rows="2" placeholder="可补充判断；留空时系统会自动写入以上客观指标"></textarea>
+            </label>
+            <div class="gate-approval-actions">
+              <button id="gateContinueButton" class="button primary" type="button">批准继续</button>
+              <button id="gateStopButton" class="button danger" type="button">止损结束</button>
+            </div>
+          </div>
+          <p class="gate-approval-help">批准继续会解除门禁并自动恢复已暂停运行；止损结束会解除门禁并终止对应运行。</p>
+        </article>
+        <article class="hero-card">
+          <div class="hero-copy"><p class="section-label">CURRENT OPERATION</p><h2 id="currentTask">读取项目状态…</h2><p id="goalText" class="subtle">正在连接中央黑板</p></div>
+          <div class="phase-block"><span>当前阶段</span><strong id="phaseValue">—</strong><small id="updatedValue">—</small></div>
+        </article>
+        <article class="decision-card"><p class="section-label">CONTROLLER DECISION</p><strong id="decisionValue">—</strong><p id="gateReason">尚无控制器评估</p></article>
+      </section>
+
+      <section data-view="run" class="metric-grid" aria-label="核心指标" hidden>
+        <article class="metric"><span>资产</span><strong id="assetMetric">0</strong><small id="assetMetricNote">目标与已发现资产去重</small></article>
+        <article class="metric"><span>事实</span><strong id="factMetric">0</strong><small id="factMetricNote">已提交到黑板</small></article>
+        <article class="metric"><span>漏洞</span><strong id="vulnMetric">0</strong><small id="vulnMetricNote">Guardian 已验证</small></article>
+        <article class="metric"><span>攻击面</span><strong id="coverageMetric">0%</strong><small id="coverageMetricNote">0/10 已观察</small></article>
+        <article class="metric"><span>当前运行</span><strong id="jobMetric">0%</strong><small id="jobMetricNote">暂无 Job</small></article>
+      </section>
+
+      <section id="automation" data-view="run" class="content-grid" hidden>
+        <article class="panel span-2">
+          <div class="panel-head"><div><p class="section-label">AUTOMATION</p><h2>并发任务队列</h2></div><span id="runBadge" class="status-badge neutral">idle</span></div>
+          <div id="runSummary" class="run-summary">暂无自动化运行</div>
+          <p class="runtime-visibility-note">调度心跳只证明 AgentCP Worker 存活；Claude stream-json 会实时显示工具名、脱敏参数、结果摘要和阶段输出。任务行会保留最近一次工具动作。</p>
+          <div id="runFailure" class="run-failure" role="alert" hidden></div>
+          <div class="table-wrap jobs-table"><table><thead><tr><th>Worker</th><th>角色</th><th>模型</th><th>当前在做什么</th><th>阶段</th><th>状态</th><th>尝试</th><th>运行信号 / 最近错误</th></tr></thead><tbody id="jobsBody"></tbody></table></div>
+        </article>
+        <article class="panel action-panel">
+          <div><p class="section-label">LAUNCH</p><h2>启动真实模型团队</h2></div>
+          <p class="subtle">Reason、Metacog、Reviewer 通过真实模型驱动并发执行，启动前会明确提示上下文发送范围。</p>
+          <label>团队<input id="teamInput" value="default"></label>
+          <div class="field-row"><label>并发数<input id="workersInput" type="number" min="1" max="12" value="3"></label><label>超时（秒）<input id="timeoutInput" type="number" min="30" max="3600" value="600"></label></div>
+          <button id="launchButton" class="button primary" type="button">启动一轮真实审计</button>
+          <button id="cancelButton" class="button danger" type="button" disabled>取消当前运行</button>
+        </article>
+        <article class="panel span-3">
+          <div class="panel-head"><div><p class="section-label">LIVE EVENTS</p><h2>运行事件流</h2></div><span id="eventsCount">0 条</span></div>
+          <div id="eventsList" class="event-list"></div>
+        </article>
+      </section>
+
+      <section id="intelligence" data-view="run" class="content-grid" hidden>
+        <article class="panel">
+          <div class="panel-head"><div><p class="section-label">攻击面</p><h2>十维覆盖</h2></div><strong id="verifiedCoverage">0 已验证</strong></div>
+          <div id="coverageList" class="coverage-list"></div>
+        </article>
+        <article class="panel span-2">
+          <div class="panel-head"><div><p class="section-label">ATTACK INTEL</p><h2>攻击面情报</h2></div><span id="attackIntelCount">0 条</span></div>
+          <div class="table-wrap"><table><thead><tr><th>类型</th><th>情报</th><th>价值说明</th><th>置信度</th></tr></thead><tbody id="attackIntelBody"></tbody></table></div>
+        </article>
+        <article class="panel span-3">
+          <div class="panel-head"><div><p class="section-label">RISK LEADS</p><h2>风险线索</h2></div><span id="riskLeadsCount">0 条</span></div>
+          <div class="table-wrap"><table><thead><tr><th>级别</th><th>线索</th><th>待验证危害</th><th>影响力</th><th>置信度</th></tr></thead><tbody id="riskLeadsBody"></tbody></table></div>
+        </article>
+        <article class="panel span-3">
+          <div class="panel-head"><div><p class="section-label">VERIFIED VULNS</p><h2>已验证漏洞</h2></div><span id="vulnerabilitiesCount">0 条</span></div>
+          <div class="table-wrap"><table><thead><tr><th>级别</th><th>漏洞</th><th>已验证危害</th><th>影响力</th><th>置信度</th></tr></thead><tbody id="vulnerabilitiesBody"></tbody></table></div>
+        </article>
+        <article class="panel span-3">
+          <div class="panel-head"><div><p class="section-label">INTENTS</p><h2>方向池</h2></div><span id="intentsCount">0 条</span></div>
+          <div class="table-wrap"><table><thead><tr><th>动作</th><th>目标</th><th>成功标准</th><th>风险</th><th>状态</th></tr></thead><tbody id="intentsBody"></tbody></table></div>
+        </article>
+        <article class="panel span-3">
+          <div class="panel-head"><div><p class="section-label">EVIDENCE CHAIN</p><h2>证据索引</h2></div><span id="evidenceCount">0 份</span></div>
+          <div class="evidence-grid">
+            <div class="table-wrap"><table><thead><tr><th>Fact</th><th>路径</th><th>大小</th><th>SHA-256</th><th></th></tr></thead><tbody id="evidenceBody"></tbody></table></div>
+            <pre id="evidencePreview">选择一份证据查看内容</pre>
+          </div>
+        </article>
+      </section>
+
+      <section id="control" data-view="run" class="content-grid" hidden>
+        <article class="panel action-panel">
+          <div><p class="section-label">HUMAN HINT</p><h2>注入人工判断</h2></div>
+          <label>Hint<textarea id="hintContent" rows="4" placeholder="例如：优先审计容器挂载和跨项目数据边界"></textarea></label>
+          <label>目标（可选）<input id="hintTarget" placeholder="模块、接口或文件"></label>
+          <label>优先级<input id="hintPriority" type="number" min="0" max="10" value="5"></label>
+          <button id="hintButton" class="button secondary" type="button">写入黑板</button>
+        </article>
+        <article class="panel action-panel">
+          <div><p class="section-label">HARD GATE</p><h2>控制器审批</h2></div>
+          <label>动作<select id="gateAction"><option value="continue">继续当前路径</option><option value="stop_loss">止损</option><option value="switch_target">切换目标</option><option value="switch_phase">切换阶段</option></select></label>
+          <label>审批理由<textarea id="gateReasonInput" rows="4" placeholder="必须包含客观指标或授权指令"></textarea></label>
+          <button id="approveButton" class="button secondary" type="button">提交审批</button>
+        </article>
+      </section>
+    </main>
+  </div>
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+  <script src="/frontend/app.js" defer></script>
+</body>
+</html>

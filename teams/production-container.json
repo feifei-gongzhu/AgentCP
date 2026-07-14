@@ -1,0 +1,50 @@
+{
+  "name": "production-container",
+  "members": [
+    {
+      "name": "reason-main",
+      "type": "codex",
+      "role": "reason",
+      "sandbox": "read-only",
+      "priority": 0,
+      "max_running": 1,
+      "env": {}
+    },
+    {
+      "name": "metacog-blindspot",
+      "type": "codex",
+      "role": "metacog",
+      "sandbox": "read-only",
+      "priority": 1,
+      "max_running": 1,
+      "env": {}
+    },
+    {
+      "name": "executor-container",
+      "type": "container",
+      "role": "executor",
+      "priority": 1,
+      "max_running": 3,
+      "env": {},
+      "extra": {
+        "image": "agentcp-worker:latest",
+        "worker_command": ["python3", "/opt/agentcp/entrypoint.py"],
+        "network": "bridge",
+        "cpus": "2",
+        "memory": "3g",
+        "pids_limit": 256,
+        "workspace_write": true,
+        "pass_env": ["OPENAI_API_KEY"]
+      }
+    },
+    {
+      "name": "reviewer-quality",
+      "type": "codex",
+      "role": "reviewer",
+      "sandbox": "read-only",
+      "priority": 2,
+      "max_running": 1,
+      "env": {}
+    }
+  ]
+}

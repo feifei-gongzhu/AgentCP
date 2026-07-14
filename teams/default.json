@@ -1,0 +1,61 @@
+{
+  "name": "default",
+  "members": [
+    {
+      "name": "reason-main",
+      "type": "codex",
+      "role": "reason",
+      "model": null,
+      "base_url": null,
+      "api_key_env": "OPENAI_API_KEY",
+      "profile": null,
+      "sandbox": "read-only",
+      "dangerously_bypass_sandbox": false,
+      "priority": 0,
+      "max_running": 1,
+      "env": {}
+    },
+    {
+      "name": "metacog-blindspot",
+      "type": "codex",
+      "role": "metacog",
+      "model": null,
+      "base_url": null,
+      "api_key_env": "OPENAI_API_KEY",
+      "profile": null,
+      "sandbox": "read-only",
+      "dangerously_bypass_sandbox": false,
+      "priority": 1,
+      "max_running": 1,
+      "env": {}
+    },
+    {
+      "name": "executor-primary",
+      "type": "codex",
+      "role": "executor",
+      "model": null,
+      "base_url": null,
+      "api_key_env": "OPENAI_API_KEY",
+      "profile": null,
+      "sandbox": "workspace-write",
+      "dangerously_bypass_sandbox": false,
+      "priority": 1,
+      "max_running": 2,
+      "env": {}
+    },
+    {
+      "name": "reviewer-quality",
+      "type": "codex",
+      "role": "reviewer",
+      "model": null,
+      "base_url": null,
+      "api_key_env": null,
+      "profile": null,
+      "sandbox": "read-only",
+      "dangerously_bypass_sandbox": false,
+      "priority": 2,
+      "max_running": 1,
+      "env": {}
+    }
+  ]
+}

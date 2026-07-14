@@ -1,0 +1,17 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "kind": {"type": "string", "enum": ["fact", "none"]},
+    "title": {"type": "string"},
+    "category": {"type": "string"},
+    "evidence": {"type": "string"},
+    "severity": {"type": "string"},
+    "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+    "business_impact": {"type": "string"},
+    "reproduction_steps": {"type": "array", "items": {"type": "string"}},
+    "evidence_path": {"type": "string"},
+    "reason": {"type": "string"}
+  },
+  "required": ["kind"]
+}

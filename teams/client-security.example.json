@@ -1,0 +1,50 @@
+{
+  "name": "client-security-example",
+  "members": [
+    {
+      "name": "host-reason",
+      "type": "codex",
+      "role": "reason",
+      "sandbox": "workspace-write",
+      "priority": 0,
+      "max_running": 1,
+      "env": {}
+    },
+    {
+      "name": "container-static-analysis",
+      "type": "container",
+      "role": "pentester",
+      "priority": 0,
+      "max_running": 2,
+      "env": {},
+      "extra": {
+        "image": "replace-with-your-worker-image:latest",
+        "worker_command": ["worker-agent", "--json"],
+        "network": "none",
+        "cpus": "2",
+        "memory": "2g",
+        "pids_limit": 256,
+        "workspace_write": true,
+        "pass_env": []
+      }
+    },
+    {
+      "name": "metacog-blindspot",
+      "type": "codex",
+      "role": "metacog",
+      "sandbox": "read-only",
+      "priority": 1,
+      "max_running": 1,
+      "env": {}
+    },
+    {
+      "name": "reviewer-quality",
+      "type": "codex",
+      "role": "reviewer",
+      "sandbox": "read-only",
+      "priority": 2,
+      "max_running": 1,
+      "env": {}
+    }
+  ]
+}

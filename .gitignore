@@ -1,0 +1,30 @@
+.DS_Store
+.pytest_cache/
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# Runtime project data may contain authorized targets, evidence and audit history.
+projects/
+
+# Local build and release artifacts.
+release/
+dist/
+build/
+
+# Local secrets and environment overrides.
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+
+# Editor and temporary files.
+.idea/
+.vscode/
+*.swp
+*.tmp
+*.log
