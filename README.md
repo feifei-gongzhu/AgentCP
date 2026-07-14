@@ -43,7 +43,8 @@ state.json
 推荐从 Web 控制台初始化目标：
 
 ```bash
-cd /Users/thorne/Documents/工程化渗透测试
+git clone https://github.com/feifei-gongzhu/AgentCP.git
+cd AgentCP
 python3 agentcp serve --host 127.0.0.1 --port 8765
 ```
 
@@ -58,7 +59,6 @@ python3 agentcp serve --host 127.0.0.1 --port 8765
 也可以继续使用 CLI：
 
 ```bash
-cd /Users/thorne/Documents/工程化渗透测试
 python3 agentcp init production-security
 python3 agentcp run-team production-security --team default --max-workers 4 --dry-run
 ```

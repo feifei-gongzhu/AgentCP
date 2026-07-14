@@ -38,10 +38,11 @@ Worker 不直接修改黑板，Worker 之间不直接通信。所有协作都通
 - Ollama：使用本地模型。
 - Docker：使用 Container Worker。
 
-## 3. 进入项目和准备 Python
+## 3. 获取项目并准备 Python
 
 ```bash
-cd "/Users/thorne/Documents/工程化渗透测试"
+git clone https://github.com/feifei-gongzhu/AgentCP.git
+cd AgentCP
 ```
 
 创建虚拟环境：
