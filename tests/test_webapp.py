@@ -22,6 +22,36 @@ def test_project_listing_only_returns_initialized_projects(
     assert webapp_module._project_names() == ["production-security"]
 
 
+def test_waf_analyst_role_can_be_saved_from_web_config(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    projects = tmp_path / "projects"
+    monkeypatch.setattr(store_module, "PROJECTS", projects)
+    store = ProjectStore("waf-config")
+    store.init()
+    config = {
+        "members": [{
+            "name": "waf-adaptive",
+            "role": "waf_analyst",
+            "type": "codex",
+            "model": None,
+            "base_url": None,
+            "api_key_env": None,
+            "auth_mode": "auto",
+            "sandbox": "read-only",
+            "max_running": 1,
+            "priority": 2,
+            "env": {},
+            "dangerously_bypass_sandbox": False,
+        }],
+    }
+
+    webapp_module._save_config(store, config)
+
+    assert store.read_json("team_config.json")["members"][0]["role"] == "waf_analyst"
+
+
 def test_frontend_assets_are_wired_to_control_api() -> None:
     root = Path(__file__).resolve().parents[1]
     index = (root / "frontend" / "index.html").read_text(encoding="utf-8")
@@ -54,7 +84,14 @@ def test_frontend_assets_are_wired_to_control_api() -> None:
     assert 'data-route-link="config"' in index
     assert 'data-route-link="run"' in index
     assert 'id="projectCards"' in index
+    assert 'id="hubFalsePositiveRate"' in index
+    assert "project-card-quality" in script
+    assert "quality_summary" in script
     assert 'id="startAuditButton"' in index
+    assert 'id="interventionType"' in index
+    assert "项目所有者指令" in index
+    assert "scope:\"project\"" in script
+    assert "controller_intervention_added" in (root / "src" / "agent_control_plane" / "webapp.py").read_text(encoding="utf-8")
     assert 'id="viewRunButton"' in index
     assert 'new Set(["hub","config","run"])' in script
     assert "renderProjectCards" in script
@@ -69,10 +106,17 @@ def test_frontend_assets_are_wired_to_control_api() -> None:
     assert 'id="jobMetricNote"' in index
     assert "pending_facts" in script
     assert "当前运行" in index
+    assert 'id="submitFindingReview"' in index
+    assert 'post("/api/findings/review"' in script
+    assert 'post("/api/directions/dismiss"' in script
+    assert "删除方向" in script
+    assert "长期误报率" in index
+    assert 'id="wafAssessmentsBody"' in index
     for action_id in (
         "deleteProjectButton", "saveTargetButton", "launchButton", "cancelButton",
-        "hintButton", "approveButton", "addRoleButton", "saveTeamButton", "copyBoard",
+        "hintButton", "addRoleButton", "saveTeamButton", "copyBoard",
         "gateContinueButton", "gateStopButton",
+        "submitFindingReview",
     ):
         assert f'"{action_id}"' in script
 
@@ -232,12 +276,13 @@ def test_gate_continue_resumes_paused_run_in_background(
 
     result = webapp_module._apply_gate_run_action(store, "continue", run_id)
 
-    assert result == {
-        "run_id": run_id,
-        "run_status": "running",
-        "resumed": True,
-        "cancelled": False,
-    }
+    assert result["run_id"] == run_id
+    assert result["previous_run_id"] == run_id
+    assert result["run_status"] == "running"
+    assert result["transition"] == "resumed"
+    assert result["resumed"] is True
+    assert result["started"] is False
+    assert result["cancelled"] is False
     assert started == [run_id]
     assert engine.db.get_run(run_id)["status"] == "running"
     engine.cancel(run_id, "test_cleanup")
@@ -261,8 +306,73 @@ def test_gate_stop_loss_cancels_paused_run(
     result = webapp_module._apply_gate_run_action(store, "stop_loss", run_id)
 
     assert result["cancelled"] is True
-    assert result["run_status"] == "cancelled"
-    assert engine.db.get_run(run_id)["status"] == "cancelled"
+    assert result["run_status"] == "stopped"
+    assert engine.db.get_run(run_id)["status"] == "stopped"
+
+
+def test_gate_continue_starts_next_iteration_after_completed_run(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    projects = tmp_path / "projects"
+    monkeypatch.setattr(store_module, "PROJECTS", projects)
+    monkeypatch.setattr(webapp_module, "PROJECTS", projects)
+    store = ProjectStore("next-iteration-project")
+    store.init()
+    engine = AutomationEngine(store)
+    completed_run_id = engine.start(max_workers=2, timeout=321)
+    engine.db.finish_run(completed_run_id, "completed")
+    Scheduler(store).complete_subtask("本轮已经完成")
+    started: list[str] = []
+    monkeypatch.setattr(
+        webapp_module,
+        "_start_background_run",
+        lambda _store, _engine, new_run_id: started.append(new_run_id),
+    )
+
+    _, result = webapp_module._approve_gate_and_transition(
+        store,
+        "continue",
+        "批准进入下一轮",
+        completed_run_id,
+    )
+
+    assert result["transition"] == "started_next_iteration"
+    assert result["started"] is True
+    assert result["previous_run_id"] == completed_run_id
+    assert result["run_id"] != completed_run_id
+    new_run = engine.db.get_run(str(result["run_id"]))
+    assert new_run["status"] == "running"
+    assert new_run["timeout_seconds"] == 321
+    assert new_run["max_workers"] == 2
+    assert started == [result["run_id"]]
+    assert store.load_state().gate_status == "running"
+    engine.cancel(str(result["run_id"]), "test_cleanup")
+
+
+def test_failed_gate_transition_restores_approval_gate(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    projects = tmp_path / "projects"
+    monkeypatch.setattr(store_module, "PROJECTS", projects)
+    monkeypatch.setattr(webapp_module, "PROJECTS", projects)
+    store = ProjectStore("gate-rollback-project")
+    store.init()
+    Scheduler(store).complete_subtask("需要用户批准")
+    monkeypatch.setattr(
+        webapp_module,
+        "_apply_gate_run_action",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("resume failed")),
+    )
+
+    with pytest.raises(RuntimeError, match="resume failed"):
+        webapp_module._approve_gate_and_transition(store, "continue", "批准", None)
+
+    state = store.load_state()
+    assert state.gate_status == "awaiting_approval"
+    assert state.current_decision == "request_confirmation"
+    assert "审批动作执行失败" in str(state.gate_reason)
 
 
 def test_web_team_config_rejects_sandbox_bypass(

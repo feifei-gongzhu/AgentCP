@@ -6,6 +6,7 @@ from urllib.parse import urlparse
 
 from .database import ControlDatabase
 from .lifecycle import project_execution_lock, require_initialized_project
+from .quality import QualityLedger
 from .store import ProjectStore
 
 
@@ -94,10 +95,10 @@ def _collect_metrics_locked(store: ProjectStore) -> dict[str, Any]:
     direction_total = len(directions) + duplicate_directions
     current_run = runs[-1] if runs else None
     current_jobs = [item for item in jobs if current_run and item.get("run_id") == current_run.get("id")]
-    terminal_statuses = {"completed", "failed", "cancelled"}
+    terminal_statuses = {"completed", "failed", "cancelled", "cancelling"}
     terminal_jobs = [item for item in current_jobs if item.get("status") in terminal_statuses]
     current_completed = sum(item.get("status") == "completed" for item in current_jobs)
-    current_failed = sum(item.get("status") in {"failed", "cancelled"} for item in current_jobs)
+    current_failed = sum(item.get("status") in {"failed", "cancelled", "cancelling"} for item in current_jobs)
     pending_facts = sum(
         item.get("status") == "completed"
         and not item.get("committed_at")
@@ -105,6 +106,7 @@ def _collect_metrics_locked(store: ProjectStore) -> dict[str, Any]:
         for item in current_jobs
     )
 
+    human_quality = QualityLedger().project_metrics(store)
     return {
         "project": store.vendor,
         "assets": {
@@ -126,6 +128,7 @@ def _collect_metrics_locked(store: ProjectStore) -> dict[str, Any]:
             "phenomena": phenomena,
             "vulnerabilities": vulnerabilities,
             "validation_rate": vulnerabilities / len(facts) if facts else 0.0,
+            "human_review": human_quality,
         },
         "directions": {
             "intents": len(intents),

@@ -3,6 +3,7 @@ from __future__ import annotations
 from .controller import Controller
 from .schemas import ControllerAction, Decision, GateStatus
 from .store import ProjectStore
+from .quality import QualityLedger
 
 
 class Scheduler:
@@ -19,6 +20,11 @@ class Scheduler:
             state.serendipity_used_minutes += minutes
 
         facts = self.store.read_jsonl("facts.jsonl")
+        verdicts = QualityLedger().latest_verdicts(self.store)
+        facts = [
+            {**item, "human_action": (verdicts.get(str(item.get("id"))) or {}).get("action")}
+            for item in facts
+        ]
         since_gate = state.elapsed_minutes - state.last_gate_elapsed_minutes
         gate_due = state.gate_interval_minutes > 0 and since_gate >= state.gate_interval_minutes
         decision = self.controller.evaluate(state, facts, gate_due=gate_due)
