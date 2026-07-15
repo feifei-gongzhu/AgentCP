@@ -35,7 +35,11 @@ class Controller:
             )
 
         has_recent_vulnerability = bool(
-            recent_facts and any(item.get("status") == "vulnerability" for item in recent_facts[-3:])
+            recent_facts and any(
+                item.get("status") == "vulnerability"
+                and item.get("human_action") not in {"refuted", "reclassified"}
+                for item in recent_facts[-3:]
+            )
         )
 
         if has_recent_vulnerability:

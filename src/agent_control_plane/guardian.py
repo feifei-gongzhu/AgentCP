@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from .evidence import BoundaryValidator, EvidenceNormalizer
 from .schemas import Fact, FactClassification, FactStatus, Intent
 
 
@@ -87,6 +88,10 @@ class Guardian:
         text = f"{fact.title} {fact.evidence}"
         impact_text = f"{fact.title} {fact.business_impact}".casefold()
         notes: list[str] = []
+        requested_vulnerability = (
+            fact.classification == FactClassification.VULNERABILITY.value
+            or fact.status == FactStatus.VULNERABILITY.value
+        )
 
         if any(word in text for word in GARBAGE_KEYWORDS):
             notes.append("命中低价值或垃圾洞关键词，降级为现象。")
@@ -109,28 +114,14 @@ class Guardian:
         if len(fact.business_impact.strip()) < 12:
             notes.append("未说明攻击者可造成的具体业务损失，不能升级为漏洞。")
 
-        if not fact.reproduction_steps:
-            notes.append("缺少可复核的复现步骤。")
-
+        metrics = EvidenceNormalizer().normalize(fact, project_root)
         if not fact.evidence_path.strip():
             notes.append("漏洞声明缺少可审计的证据落盘路径。")
-        elif project_root is not None:
-            evidence_path = Path(fact.evidence_path)
-            allowed_root = (project_root / "evidence").resolve()
-            resolved = (project_root / evidence_path).resolve() if not evidence_path.is_absolute() else evidence_path.resolve()
-            try:
-                resolved.relative_to(allowed_root)
-            except ValueError:
-                notes.append("证据路径必须位于当前项目 evidence/ 目录内。")
-            else:
-                if resolved.is_dir():
-                    has_evidence = any(item.is_file() and item.stat().st_size > 0 for item in resolved.rglob("*"))
-                    if not has_evidence:
-                        notes.append("证据目录为空，不能升级为漏洞。")
-                elif not resolved.is_file():
-                    notes.append("证据文件不存在，不能升级为漏洞。")
-                elif resolved.stat().st_size == 0:
-                    notes.append("证据文件为空，不能升级为漏洞。")
+        elif metrics.evidence_files_exist is not True:
+            notes.append("证据文件不存在、为空或不在当前项目 evidence/ 目录内。")
+        validator_result = BoundaryValidator().validate(fact, metrics)
+        fact.validator_result = validator_result
+        notes.extend(validator_result["reasons"])
 
         has_direct_harm = any(marker.casefold() in impact_text for marker in HARM_MARKERS)
         is_attack_surface_only = fact.category in ATTACK_SURFACE_CATEGORIES and not has_direct_harm
@@ -138,21 +129,28 @@ class Guardian:
         if is_attack_surface_only:
             notes.append("仅证明信息暴露或攻击面存在，未形成可利用的业务损害闭环。")
 
-        fact.quality_notes = notes
-        if notes or is_attack_surface_only:
-            fact.status = FactStatus.PHENOMENON.value
-            fact.classification = (
-                FactClassification.ATTACK_SURFACE.value
-                if is_attack_surface_only
-                else FactClassification.RISK_LEAD.value
-            )
-            fact.impact_score = min(max(float(fact.impact_score or 0.0), 0.0), 0.35 if is_attack_surface_only else 0.65)
-            fact.confidence = min(fact.confidence, 0.65 if is_attack_surface_only else 0.55)
-        else:
+        certified = requested_vulnerability and validator_result["certified"] and not notes
+        if certified:
             fact.status = FactStatus.VULNERABILITY.value
             fact.classification = FactClassification.VULNERABILITY.value
             fact.impact_score = max(min(float(fact.impact_score or 0.8), 1.0), 0.7)
             fact.confidence = max(fact.confidence, 0.8)
+        else:
+            if validator_result["certified"] and not requested_vulnerability:
+                notes.append("候选结果未声明为漏洞；Guardian 只降不升，保留为风险线索。")
+            fact.status = FactStatus.PHENOMENON.value
+            if metrics.waf_interference and not validator_result["factor_a"]:
+                fact.status = FactStatus.BLOCKER.value
+                fact.classification = FactClassification.INCONCLUSIVE.value
+            elif fact.classification == FactClassification.NEGATIVE_EVIDENCE.value:
+                fact.status = FactStatus.BLOCKER.value
+            elif is_attack_surface_only:
+                fact.classification = FactClassification.ATTACK_SURFACE.value
+            else:
+                fact.classification = FactClassification.RISK_LEAD.value
+            fact.impact_score = min(max(float(fact.impact_score or 0.0), 0.0), 0.35 if is_attack_surface_only else 0.65)
+            fact.confidence = min(fact.confidence, 0.65 if is_attack_surface_only else 0.55)
+        fact.quality_notes = list(dict.fromkeys(notes))
         return fact
 
     def review_intent(self, intent: Intent, target_config: dict) -> Intent:

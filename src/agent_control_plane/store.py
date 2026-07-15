@@ -130,7 +130,21 @@ class ProjectStore:
             self.write_text(BLACKBOARD_FILE, self._initial_blackboard())
         self.write_text("blackboard.md", self.read_text(BLACKBOARD_FILE))
         (self.path / DECISION_FILE).touch(exist_ok=True)
-        for name in ("facts.jsonl", "intents.jsonl", "hints.jsonl", "hint_events.jsonl", "evidence.jsonl", "decision_log.jsonl", "lessons.jsonl", "team_runs.jsonl"):
+        for name in (
+            "facts.jsonl",
+            "intents.jsonl",
+            "hints.jsonl",
+            "hint_events.jsonl",
+            "evidence.jsonl",
+            "negative_evidence.jsonl",
+            "human_verdicts.jsonl",
+            "refutation_memories.jsonl",
+            "waf_assessments.jsonl",
+            "waf_events.jsonl",
+            "decision_log.jsonl",
+            "lessons.jsonl",
+            "team_runs.jsonl",
+        ):
             (self.path / name).touch(exist_ok=True)
 
     def _initial_blackboard(self) -> str:
@@ -144,7 +158,13 @@ class ProjectStore:
             "last_discovery_at: null\n"
             "fact_count: 0\n"
             "vulnerability_count: 0\n"
+            "pending_human_review_count: 0\n"
+            "human_confirmed_count: 0\n"
+            "human_refuted_count: 0\n"
             "current_decision: continue\n"
+            "active_run_id: null\n"
+            "run_status: idle\n"
+            "control_version: 0\n"
             "gate_status: running\n"
             "---\n\n"
             "# 项目黑板\n\n"
@@ -249,7 +269,13 @@ class ProjectStore:
             f"serendipity_used_minutes: {state.serendipity_used_minutes}\n"
             f"fact_count: {state.fact_count}\n"
             f"vulnerability_count: {state.vulnerability_count}\n"
+            f"pending_human_review_count: {state.pending_human_review_count}\n"
+            f"human_confirmed_count: {state.human_confirmed_count}\n"
+            f"human_refuted_count: {state.human_refuted_count}\n"
             f"current_decision: {state.current_decision}\n"
+            f"active_run_id: {json.dumps(state.active_run_id, ensure_ascii=False)}\n"
+            f"run_status: {state.run_status}\n"
+            f"control_version: {state.control_version}\n"
             f"attack_surface_coverage: {json.dumps(state.attack_surface_coverage, ensure_ascii=False)}\n"
             "---"
         )

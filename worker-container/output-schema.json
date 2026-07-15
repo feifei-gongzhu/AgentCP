@@ -2,7 +2,7 @@
   "type": "object",
   "additionalProperties": false,
   "properties": {
-    "kind": {"type": "string", "enum": ["fact", "none"]},
+    "kind": {"type": "string", "enum": ["fact", "negative_evidence", "none"]},
     "title": {"type": "string"},
     "category": {"type": "string"},
     "evidence": {"type": "string"},
@@ -11,7 +11,18 @@
     "business_impact": {"type": "string"},
     "reproduction_steps": {"type": "array", "items": {"type": "string"}},
     "evidence_path": {"type": "string"},
-    "reason": {"type": "string"}
+    "reason": {"type": "string"},
+    "evidence_metrics": {"type": "object"},
+    "hypothesis": {"type": "string"},
+    "outcome": {"type": "string"},
+    "evidence_type": {"type": "string"},
+    "method": {"type": "string"},
+    "valid_until": {"type": "string"},
+    "network_context": {"type": "string"},
+    "identity_context": {"type": "string"},
+    "attempts": {"type": "integer"},
+    "evidence_paths": {"type": "array", "items": {"type": "string"}},
+    "invalidation_triggers": {"type": "array", "items": {"type": "string"}}
   },
   "required": ["kind"]
 }

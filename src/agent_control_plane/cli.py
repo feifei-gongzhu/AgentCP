@@ -155,7 +155,14 @@ def cmd_approve_gate(args: argparse.Namespace) -> None:
     if args.server:
         print(AutomationHttpClient(args.server).approve_gate(args.vendor, args.action, args.reason))
         return
-    print(Scheduler(ProjectStore(args.vendor)).approve(args.action, args.reason))
+    store = ProjectStore(args.vendor)
+    print(Scheduler(store).approve(args.action, args.reason))
+    if args.action == "stop_loss":
+        engine = AutomationEngine(store)
+        run = engine.db.latest_resumable_run()
+        if run:
+            engine.cancel(run["id"], "gate_stop_loss")
+            print(f"运行 {run['id']} 已进入 stopped 终结态")
 
 
 def cmd_automate(args: argparse.Namespace) -> None:
@@ -208,6 +215,9 @@ def cmd_automation_daemon(args: argparse.Namespace) -> None:
     try:
         while True:
             state = engine.store.load_state()
+            if state.current_decision == "stop_loss":
+                print("stop_loss 已锁定自动续跑；只有用户显式启动新 Run 才能恢复。")
+                return
             if state.gate_status == "awaiting_approval":
                 if args.once:
                     print("已到达强制门禁，等待用户批准。")
@@ -232,6 +242,9 @@ def _remote_daemon(args: argparse.Namespace) -> None:
     try:
         while True:
             state = client.project_state(args.vendor)["state"]
+            if state.get("current_decision") == "stop_loss":
+                print("stop_loss 已锁定自动续跑；只有用户显式启动新 Run 才能恢复。")
+                return
             if state.get("gate_status") == "awaiting_approval":
                 if args.once:
                     print("已到达强制门禁，等待用户批准。")

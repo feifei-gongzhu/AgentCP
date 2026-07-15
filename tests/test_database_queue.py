@@ -1,5 +1,7 @@
 from pathlib import Path
 
+import pytest
+
 from src.agent_control_plane.database import ControlDatabase
 
 
@@ -53,8 +55,23 @@ def test_cancelled_run_stops_queued_jobs(tmp_path: Path) -> None:
     run_id = database.create_run("vendor", "default", 30, 1)
     database.enqueue_job(run_id, "swarm", "reason", "reason", {})
     database.cancel_run(run_id, "user requested")
-    assert database.get_run(run_id)["status"] == "cancelled"
+    assert database.get_run(run_id)["status"] == "stopped"
     assert database.list_jobs(run_id)[0]["status"] == "cancelled"
+
+
+def test_stale_worker_write_is_rejected_after_stop_loss(tmp_path: Path) -> None:
+    database = ControlDatabase(tmp_path / "control.db")
+    run_id = database.create_run("vendor", "default", 30, 1)
+    database.enqueue_job(run_id, "swarm", "reason", "reason", {})
+    claimed = database.claim_job(run_id, "swarm", "worker-a")
+    assert claimed
+    database.stop_run(run_id, "user stop loss")
+    with pytest.raises(RuntimeError, match="控制版本"):
+        database.complete_job(
+            claimed["id"], "worker-a", {"payload": {"kind": "none"}},
+            control_version=claimed["control_version"],
+        )
+    assert database.event_count("stale_write_rejected") == 1
 
 
 def test_direction_is_deduplicated_and_leased(tmp_path: Path) -> None:
@@ -78,3 +95,41 @@ def test_direction_is_deduplicated_and_leased(tmp_path: Path) -> None:
     assert database.heartbeat_direction(direction_id, "reason-worker", lease_seconds=30)
     database.finish_direction(direction_id, "reason-worker", success=True)
     assert database.list_directions()[0]["status"] == "completed"
+
+
+def test_human_dismissal_cancels_direction_and_bound_running_job(tmp_path: Path) -> None:
+    database = ControlDatabase(tmp_path / "control.db")
+    intent = {
+        "id": "I-human-dismiss",
+        "verb": "inspect",
+        "target": "https://example.com/wrong-path",
+        "hypothesis": "错误方向",
+        "success_criteria": "不应继续",
+    }
+    direction_id, _ = database.register_direction(intent)
+    claimed_direction = database.claim_direction("R-human:executor")
+    run_id = database.create_run("vendor", "default", 60, 1)
+    job_id = database.enqueue_job(
+        run_id,
+        "swarm",
+        "executor",
+        "executor",
+        {"member": {}, "direction": claimed_direction},
+    )
+    claimed_job = database.claim_job(run_id, "swarm", "worker-1")
+    assert claimed_job is not None
+
+    dismissed = database.dismiss_direction(direction_id, "人工判断该假设不成立")
+
+    assert dismissed["status"] == "cancelled"
+    assert dismissed["terminal_reason"].startswith("human_dismissed:")
+    assert database.job_status(job_id) == "cancelling"
+    assert database.claim_direction("another-worker") is None
+    status = database.fail_job(
+        job_id,
+        "worker-1",
+        "human dismissed",
+        control_version=int(claimed_job["control_version"]),
+    )
+    assert status == "cancelled"
+    assert database.job_status(job_id) == "cancelled"

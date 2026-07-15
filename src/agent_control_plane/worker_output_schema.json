@@ -4,7 +4,7 @@
   "properties": {
     "kind": {
       "type": "string",
-      "enum": ["fact", "intent", "decision", "none"]
+      "enum": ["fact", "intent", "decision", "negative_evidence", "none"]
     },
     "title": { "type": "string" },
     "category": { "type": "string" },
@@ -13,11 +13,45 @@
     "severity": { "type": "string" },
     "confidence": { "type": "number", "minimum": 0, "maximum": 1 },
     "impact_score": { "type": "number", "minimum": 0, "maximum": 1 },
-    "classification": { "type": "string", "enum": ["attack_surface", "risk_lead", "vulnerability"] },
+    "classification": { "type": "string", "enum": ["attack_surface", "risk_lead", "vulnerability", "negative_evidence", "inconclusive"] },
     "business_impact": { "type": "string" },
     "reproduction_steps": { "type": "array", "items": { "type": "string" } },
     "evidence_path": { "type": "string" },
     "proposed_by": { "type": "string" },
+    "evidence_metrics": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "boundary_crossed": { "type": ["boolean", "null"] },
+        "unauthorized_capability_obtained": { "type": ["boolean", "null"] },
+        "data_leaked": { "type": ["boolean", "null"] },
+        "control_bypassed": { "type": ["boolean", "null"] },
+        "reproducible": { "type": ["boolean", "null"] },
+        "has_raw_request_response": { "type": ["boolean", "null"] },
+        "result_reliable": { "type": ["boolean", "null"] },
+        "waf_interference": { "type": "boolean" },
+        "response_codes": { "type": "array", "items": { "type": "integer" } },
+        "actual_result_summary": { "type": "string" },
+        "proof_refs": {
+          "type": "object",
+          "additionalProperties": { "type": "array", "items": { "type": "string" } }
+        },
+        "validator": { "type": "string" }
+      }
+    },
+    "hypothesis": { "type": "string" },
+    "outcome": { "type": "string" },
+    "evidence_type": {
+      "type": "string",
+      "enum": ["target_negative", "environment_blocked", "tooling_failed", "policy_blocked", "inconclusive"]
+    },
+    "method": { "type": "string" },
+    "valid_until": { "type": "string" },
+    "network_context": { "type": "string" },
+    "identity_context": { "type": "string" },
+    "attempts": { "type": "integer", "minimum": 1 },
+    "evidence_paths": { "type": "array", "items": { "type": "string" } },
+    "invalidation_triggers": { "type": "array", "items": { "type": "string" } },
     "verb": { "type": "string" },
     "target": { "type": "string" },
     "evidence_sink": { "type": "string" },
@@ -38,7 +72,10 @@
     "focus_cost": { "type": ["string", "null"] },
     "counterfactual_hypothesis": { "type": ["string", "null"] },
     "ignored_evidence": { "type": ["string", "null"] },
-    "override_rule": { "type": ["string", "null"] },
+    "override_rule": {
+      "type": ["string", "null"],
+      "description": "仅当项目所有者指令与不可覆盖边界冲突时填写：authorization_scope/checklist_red_line/hard_gate/immutable_boundary"
+    },
     "serendipity_minutes": { "type": "integer", "minimum": 0 }
   },
   "required": ["kind"]

@@ -1,4 +1,5 @@
 import json
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -9,6 +10,7 @@ from src.agent_control_plane import automation as automation_module
 from src.agent_control_plane.automation import AutomationEngine, _model_endpoint, _model_error_is_retryable
 from src.agent_control_plane.store import ProjectStore
 from src.agent_control_plane.scheduler import Scheduler
+from src.agent_control_plane.schemas import Hint
 from src.agent_control_plane.worker import WorkerError
 
 
@@ -209,7 +211,7 @@ def test_next_iteration_claims_committed_intent(
     assert executor_job["payload"]["direction"]["intent"]["target"] == "ipc://pushUpdate"
     assert "direction" not in reason_job["payload"]
     engine.run(second)
-    assert engine.db.list_directions()[0]["status"] == "completed"
+    assert engine.db.list_directions()[0]["status"] == "exhausted"
 
     Scheduler(store).approve("continue", "用户批准下一迭代")
     third = engine.start("intent", timeout=30, max_workers=1)
@@ -247,3 +249,173 @@ def test_direction_claim_prioritizes_human_confirmed_high_value_intents(
 
     assert claimed is not None
     assert claimed["intent"]["target"] == "FTP 匿名登录与 banner 信息收集"
+
+
+def test_active_negative_evidence_prunes_and_expiry_reopens_direction(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(store_module, "PROJECTS", tmp_path / "projects")
+    store = ProjectStore("negative-memory")
+    store.init()
+    engine = AutomationEngine(store)
+    direction_id, _ = engine.db.register_direction({
+        "kind": "intent",
+        "verb": "verify",
+        "target": "b2b.example.com:21",
+        "hypothesis": "FTP 允许匿名访问",
+        "success_criteria": "匿名登录后可以列出目录",
+        "risk_level": "medium",
+    })
+    negative = {
+        "id": "NE-1",
+        "hypothesis": "FTP 允许匿名访问",
+        "target": "b2b.example.com:21",
+        "method": "verify",
+        "reason": "tcp_filtered",
+        "evidence_type": "environment_blocked",
+        "valid_until": (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat(),
+    }
+    store.append_jsonl("negative_evidence.jsonl", negative)
+    engine._synchronize_negative_evidence()
+    assert engine.db.list_directions()[0]["status"] == "blocked"
+
+    rows = store.read_jsonl("negative_evidence.jsonl")
+    rows[-1]["valid_until"] = (datetime.now(timezone.utc) - timedelta(seconds=1)).isoformat()
+    (store.path / "negative_evidence.jsonl").write_text(
+        "\n".join(json.dumps(item, ensure_ascii=False) for item in rows) + "\n",
+        encoding="utf-8",
+    )
+    engine._synchronize_negative_evidence()
+    reopened = next(item for item in engine.db.list_directions() if item["id"] == direction_id)
+    assert reopened["status"] == "open"
+
+
+def test_explicit_new_run_clears_previous_stop_loss_latch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(store_module, "PROJECTS", tmp_path / "projects")
+    store = ProjectStore("restart-after-stop")
+    store.init()
+    state = store.load_state()
+    state.current_decision = "stop_loss"
+    store.save_state(state)
+    run_id = AutomationEngine(store).start(max_workers=1)
+    assert run_id.startswith("R-")
+    assert store.load_state().current_decision == "continue"
+
+
+def test_worker_stop_loss_decision_terminates_run(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(store_module, "PROJECTS", tmp_path / "projects")
+    monkeypatch.setattr(team_module, "TEAMS_DIR", tmp_path / "teams")
+    team_module.TEAMS_DIR.mkdir()
+    (team_module.TEAMS_DIR / "stopper.json").write_text(json.dumps({"members": [{
+        "name": "reason-stop",
+        "type": "mock",
+        "role": "reason",
+        "extra": {"payload": {
+            "kind": "decision",
+            "action": "stop_loss",
+            "reason": "连续 3 次没有新增证据，当前路径 ROI 过低",
+        }},
+    }]}), encoding="utf-8")
+    store = ProjectStore("controller-stop")
+    store.init()
+    engine = AutomationEngine(store)
+    run_id = engine.start("stopper", max_workers=1)
+    engine.run(run_id)
+    assert engine.db.get_run(run_id)["status"] == "stopped"
+    assert store.load_state().current_decision == "stop_loss"
+
+
+def test_new_project_owner_directive_fences_stale_worker_result(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(store_module, "PROJECTS", tmp_path / "projects")
+    monkeypatch.setattr(team_module, "TEAMS_DIR", tmp_path / "teams")
+    team_module.TEAMS_DIR.mkdir()
+    (team_module.TEAMS_DIR / "directive-fence.json").write_text(
+        json.dumps({"members": [{"name": "reason-old", "type": "mock", "role": "reason"}]}),
+        encoding="utf-8",
+    )
+
+    def stale_run_member(*args, **kwargs):
+        return {
+            "member": "reason-old",
+            "role": "reason",
+            "status": "ok",
+            "payload": {
+                "kind": "decision",
+                "action": "request_confirmation",
+                "reason": "旧上下文要求用户再次确认",
+            },
+            "control_context": {"human_directive_ids": []},
+        }
+
+    monkeypatch.setattr(automation_module, "_run_member", stale_run_member)
+    store = ProjectStore("directive-fence")
+    store.init()
+    engine = AutomationEngine(store)
+    run_id = engine.start("directive-fence", timeout=30, max_workers=1)
+    store.append_jsonl("hints.jsonl", Hint(
+        content="停止旧规划，按我的新方向执行",
+        priority=10,
+        intervention_type="redirect",
+        applies_to_run_id=run_id,
+    ))
+
+    engine.run(run_id)
+
+    assert not any(
+        item.get("reason") == "旧上下文要求用户再次确认"
+        for item in store.read_jsonl("decision_log.jsonl")
+    )
+    assert any(
+        event["event_type"] == "human_directive_fence_rejected"
+        for event in engine.status(run_id)["events"]
+    )
+
+
+def test_agent_cannot_ask_to_reconfirm_observed_owner_directive(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(store_module, "PROJECTS", tmp_path / "projects")
+    monkeypatch.setattr(team_module, "TEAMS_DIR", tmp_path / "teams")
+    team_module.TEAMS_DIR.mkdir()
+    (team_module.TEAMS_DIR / "owner-wins.json").write_text(json.dumps({"members": [{
+        "name": "reason-main",
+        "type": "mock",
+        "role": "reason",
+        "extra": {"payload": {
+            "kind": "decision",
+            "action": "request_confirmation",
+            "reason": "applies_to_run_id 不匹配，请用户重新确认",
+        }},
+    }]}), encoding="utf-8")
+    store = ProjectStore("owner-wins")
+    store.init()
+    store.append_jsonl("hints.jsonl", Hint(
+        content="黑板初始化，全部重新测试",
+        priority=10,
+        intervention_type="redirect",
+        applies_to_run_id="R-old",
+    ))
+    engine = AutomationEngine(store)
+    run_id = engine.start("owner-wins", timeout=30, max_workers=1)
+
+    engine.run(run_id)
+
+    assert not any(
+        item.get("reason") == "applies_to_run_id 不匹配，请用户重新确认"
+        for item in store.read_jsonl("decision_log.jsonl")
+    )
+    assert any(
+        event["event_type"] == "agent_confirmation_overridden_by_owner"
+        for event in engine.status(run_id)["events"]
+    )

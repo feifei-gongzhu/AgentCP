@@ -14,7 +14,11 @@
 - 每完成一个子任务，或同一节拍达到 15 分钟，立即进入 `awaiting_approval`。
 - 待批准时，继续计时和 Worker 写回都会被代码拒绝。
 - 高危或严重 Intent 必须等待用户确认。
-- 发现必须有可复核证据、复现步骤和具体业务影响，才能升级为 vulnerability。
+- 模型只能提出漏洞候选，不能决定漏洞成立。Guardian 只降不升：必须同时满足安全边界突破（因子 A）与可复核证据（因子 B），才能进入“系统漏洞池”。
+- 进入系统漏洞池后仍须人工认可、调级、驳斥、降级或要求复测；人工驳斥不会篡改系统原判，而是形成独立的长期质量账本和反例记忆。
+- `stop_loss` 是 Run 级终结态。控制版本（fencing token）会拒绝停止前 Worker 的迟到写回，避免已止损运行被自动续期复活。
+- 超时、认证失败、WAF 阻断等结果作为有作用域、有时效的负向证据保存；有效期内自动剪枝，失效或环境变化后允许重新验证。
+- WAF 不等于放弃。系统会建立独立的受预算约束的 WAF 刻画分支；每轮只改变一个抽象变量族，耗尽预算仍无稳定差分时自动止损。
 
 ## 双层黑板
 
@@ -34,9 +38,27 @@ projects/{厂商名}/项目黑板_知识库.md
 facts.jsonl
 intents.jsonl
 evidence.jsonl
+negative_evidence.jsonl
+human_verdicts.jsonl
+refutation_memories.jsonl
+waf_assessments.jsonl
+waf_events.jsonl
 decision_log.jsonl
 state.json
 ```
+
+## 可信发现生命周期
+
+```text
+Executor 原始证据
+  → Evidence Normalizer（验证证据文件与结构化指标）
+  → Guardian A+B 确定性裁决
+  → 系统漏洞池
+  → 人工认可 / 调级 / 驳斥 / 降级 / 要求复测
+  → 长期误报率与反例记忆
+```
+
+长期质量账本按“项目哈希 + 发现哈希”记录最新人工结论，不保存目标、域名或证据正文。重复出现的驳斥模式只生成规则候选，不会直接改写 Guardian；规则仍需历史回放和人工批准后才能启用。
 
 ## 快速开始
 
