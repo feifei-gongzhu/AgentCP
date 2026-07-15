@@ -8,6 +8,7 @@ from typing import Any
 from collections.abc import Callable
 
 from .dashboard import render_dashboard
+from .directives import authoritative_directives, directive_ids, missing_directive_ids
 from .drivers import DriverConfig, run_driver
 from .lifecycle import project_execution_lock, require_initialized_project
 from .schemas import now_iso
@@ -67,7 +68,9 @@ def _run_member(
     cancel_check: Callable[[], bool] | None = None,
     progress_callback: Callable[[dict[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
-    prompt = build_worker_prompt(store, member.role)
+    owner_directives = authoritative_directives(store)
+    observed_directive_ids = directive_ids(owner_directives)
+    prompt = build_worker_prompt(store, member.role, owner_directives)
     if context_suffix:
         prompt += "\n\n当前调度器候选状态（只读）：\n" + context_suffix
     if dry_run:
@@ -76,6 +79,7 @@ def _run_member(
             "role": member.role,
             "status": "dry_run",
             "prompt": prompt,
+            "control_context": {"human_directive_ids": observed_directive_ids},
             "created_at": now_iso(),
         }
     extra = dict(member.extra or {})
@@ -109,6 +113,7 @@ def _run_member(
         "role": member.role,
         "status": "ok",
         "payload": payload,
+        "control_context": {"human_directive_ids": observed_directive_ids},
         "created_at": now_iso(),
     }
 
@@ -177,6 +182,16 @@ def _run_team_locked(
     for item in results:
         if item.get("status") != "ok":
             applied.append(f"[{item.get('member')}] 失败: {item.get('error')}")
+            continue
+        missing = missing_directive_ids(
+            store,
+            (item.get("control_context") or {}).get("human_directive_ids"),
+        )
+        if missing:
+            applied.append(
+                f"[{item['member']}] 结果已丢弃：执行期间收到更高优先级人工指令 "
+                + ", ".join(missing)
+            )
             continue
         try:
             applied.append(f"[{item['member']}] {apply_worker_output(store, item['payload'])}")

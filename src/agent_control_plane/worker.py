@@ -3,16 +3,30 @@ from __future__ import annotations
 import json
 import hashlib
 from dataclasses import asdict
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
 from .dashboard import render_dashboard
+from .database import ControlDatabase
+from .directives import authoritative_directives, directive_ids, missing_directive_ids
 from .drivers import DriverConfig, run_driver
 from .guardian import Guardian
 from .metrics import project_asset_inventory
 from .lifecycle import project_execution_lock, require_initialized_project
-from .schemas import Decision, Fact, GateStatus, Intent, new_id, now_iso
+from .schemas import (
+    Decision,
+    Fact,
+    GateStatus,
+    HumanReviewStatus,
+    Intent,
+    NegativeEvidence,
+    WAFAssessment,
+    new_id,
+    now_iso,
+)
 from .store import ProjectStore
+from .waf import WAFManager
 
 
 PROMPT_DIR = Path(__file__).resolve().parent / "prompts"
@@ -20,27 +34,67 @@ class WorkerError(RuntimeError):
     pass
 
 
-def build_worker_prompt(store: ProjectStore, role: str) -> str:
+def build_worker_prompt(
+    store: ProjectStore,
+    role: str,
+    owner_directives: list[dict[str, Any]] | None = None,
+) -> str:
     prompt_file = PROMPT_DIR / f"{role}.md"
     if not prompt_file.exists():
         raise WorkerError(f"未知 Worker 角色: {role}")
 
     state = asdict(store.load_state())
+    directions = (
+        ControlDatabase(store.path / "control_plane.db").list_directions()
+        if (store.path / "control_plane.db").exists() else []
+    )
+    human_dismissed = [
+        item for item in directions
+        if item.get("status") == "cancelled"
+        and str(item.get("terminal_reason") or "").startswith("human_dismissed:")
+    ]
+    dismissed_ids = {str(item.get("id")) for item in human_dismissed}
+    recent_intents = [
+        item for item in store.read_jsonl("intents.jsonl")
+        if str(item.get("id")) not in dismissed_ids
+    ][-8:]
+    open_hints = (
+        authoritative_directives(store)
+        if owner_directives is None
+        else owner_directives
+    )
     context = {
         "state": state,
         "target": store.read_json("target.json"),
         "checklist": store.read_json("checklist.json"),
         "recent_facts": store.read_jsonl("facts.jsonl")[-8:],
-        "recent_intents": store.read_jsonl("intents.jsonl")[-8:],
+        "recent_intents": recent_intents,
+        "human_dismissed_directions": human_dismissed[-8:],
         "recent_decisions": store.read_jsonl("decision_log.jsonl")[-5:],
-        "open_hints": [item for item in store.read_jsonl("hints.jsonl") if item.get("status") == "open"][-8:],
+        "recent_negative_evidence": store.read_jsonl("negative_evidence.jsonl")[-8:],
+        "human_refutation_memory": [
+            item for item in store.read_jsonl("refutation_memories.jsonl")
+            if item.get("active", True)
+        ][-8:],
+        "open_waf_branches": WAFManager().active(store)[-6:],
+        "project_owner_directives": open_hints,
         "attack_surface_coverage": state.get("attack_surface_coverage", {}),
     }
-    return (
+    prompt = (
         prompt_file.read_text(encoding="utf-8")
         + "\n\n当前项目上下文如下：\n"
         + json.dumps(context, ensure_ascii=False, indent=2)
     )
+    if open_hints:
+        prompt += (
+            "\n\n# 项目所有者指令（AgentCP 内部最高控制优先级）\n"
+            "以下指令高于 Controller、Reason、Metacog、Reviewer、Executor 的自动规划和历史决策。"
+            "除目标授权范围、检查清单红线和人工门禁外，任何 Agent 不得忽略、降级、改写或要求用户重复确认这些指令。"
+            "project 作用域指令会自动沿用到当前 Run；origin_run_id 仅用于审计溯源，绝不能以 Run ID 不一致为由判定失效。"
+            "若多条人工指令冲突，先比较 priority，再以 created_at 较新的为准。\n"
+            + json.dumps(open_hints, ensure_ascii=False, indent=2)
+        )
+    return prompt
 
 
 def apply_worker_output(store: ProjectStore, payload: dict[str, Any]) -> str:
@@ -62,8 +116,11 @@ def apply_worker_output(store: ProjectStore, payload: dict[str, Any]) -> str:
             reproduction_steps=[str(item) for item in payload.get("reproduction_steps", [])],
             evidence_path=str(payload.get("evidence_path", "")).strip(),
             proposed_by=str(payload.get("proposed_by", "worker")).strip() or "worker",
+            evidence_metrics=dict(payload.get("evidence_metrics") or {}),
         )
         fact = Guardian().review(fact, store.path)
+        if fact.status == "vulnerability":
+            fact.review_status = HumanReviewStatus.PENDING.value
         store.append_jsonl("facts.jsonl", fact)
         store.append_fact_to_blackboard(fact)
         for evidence_record in _evidence_records(store, fact):
@@ -74,6 +131,7 @@ def apply_worker_output(store: ProjectStore, payload: dict[str, Any]) -> str:
         state.asset_count = len(project_asset_inventory(store))
         if fact.status == "vulnerability":
             state.vulnerability_count += 1
+            state.pending_human_review_count += 1
         state.last_discovery_at = fact.created_at
         if fact.category in state.attack_surface_coverage:
             state.attack_surface_coverage[fact.category] = (
@@ -83,12 +141,55 @@ def apply_worker_output(store: ProjectStore, payload: dict[str, Any]) -> str:
         render_dashboard(store)
         return f"已写入 Fact: {fact.id} | 状态: {fact.status}"
 
+    if kind == "negative_evidence":
+        valid_until = str(payload.get("valid_until", "")).strip()
+        if not valid_until:
+            valid_until = (datetime.now(timezone.utc) + timedelta(hours=24)).isoformat()
+        negative = NegativeEvidence(
+            hypothesis=str(payload.get("hypothesis", "")).strip(),
+            target=str(payload.get("target", "")).strip(),
+            reason=str(payload.get("reason", "")).strip(),
+            method=str(payload.get("method", "")).strip(),
+            valid_until=valid_until,
+            outcome=str(payload.get("outcome", "blocked")).strip() or "blocked",
+            evidence_type=str(payload.get("evidence_type", "inconclusive")).strip() or "inconclusive",
+            network_context=str(payload.get("network_context", "default_egress")).strip() or "default_egress",
+            identity_context=str(payload.get("identity_context", "anonymous")).strip() or "anonymous",
+            attempts=max(1, int(payload.get("attempts", 1))),
+            evidence_paths=[str(item) for item in payload.get("evidence_paths", [])],
+            invalidation_triggers=[
+                str(item) for item in payload.get(
+                    "invalidation_triggers",
+                    ["ip_changed", "network_egress_changed", "user_forced"],
+                )
+            ],
+            proposed_by=str(payload.get("proposed_by", "worker")).strip() or "worker",
+        )
+        if not all([negative.hypothesis, negative.target, negative.reason, negative.method]):
+            raise WorkerError("NegativeEvidence 缺少 hypothesis/target/reason/method。")
+        store.append_jsonl("negative_evidence.jsonl", negative)
+        waf_text = f"{negative.reason} {negative.outcome}".casefold()
+        if negative.evidence_type == "environment_blocked" and any(
+            marker in waf_text for marker in ("waf", "firewall", "403", "429", "拦截", "防火墙")
+        ):
+            assessment = WAFAssessment(
+                target=negative.target,
+                original_hypothesis=negative.hypothesis,
+                signals=[negative.reason],
+                blocked_evidence=list(negative.evidence_paths),
+                source_negative_evidence_id=negative.id,
+            )
+            store.append_jsonl("waf_assessments.jsonl", assessment)
+        render_dashboard(store)
+        return f"已写入负向证据: {negative.id} | 类型: {negative.evidence_type}"
+
     if kind == "intent":
         intent = Intent(
             verb=str(payload.get("verb", "")).strip(),
             target=str(payload.get("target", "")).strip(),
             evidence_sink=str(payload.get("evidence_sink", "")).strip(),
             success_criteria=str(payload.get("success_criteria", "")).strip(),
+            hypothesis=str(payload.get("hypothesis", "")).strip(),
             scope_check=str(payload.get("scope_check", "")).strip(),
             scope_refs=[str(item) for item in payload.get("scope_refs", [])],
             expected_business_impact=str(payload.get("expected_business_impact", "")).strip(),
@@ -225,7 +326,8 @@ def _run_worker_locked(
     dry_run: bool = False,
     apply_output: Path | None = None,
 ) -> str:
-    prompt = build_worker_prompt(store, role)
+    owner_directives = authoritative_directives(store)
+    prompt = build_worker_prompt(store, role, owner_directives)
     if dry_run:
         return prompt
 
@@ -248,4 +350,10 @@ def _run_worker_locked(
         env=env or {},
         dangerously_bypass_sandbox=dangerously_bypass_sandbox,
     ), prompt, timeout=timeout)
+    missing = missing_directive_ids(store, directive_ids(owner_directives))
+    if missing:
+        raise WorkerError(
+            "模型执行期间收到新的项目所有者指令，旧上下文输出已拒绝写入: "
+            + ", ".join(missing)
+        )
     return apply_worker_output(store, payload)

@@ -46,6 +46,12 @@
           <h2>选择一个授权项目，或创建新的审计任务</h2>
           <p class="subtle">任务中心只负责项目入口。进入项目后先完成目标、角色和黑板配置，再启动真实模型团队。</p>
         </div>
+        <div class="hub-quality-summary" aria-label="长期质量概览">
+          <div><span>长期误报率</span><strong id="hubFalsePositiveRate">暂无样本</strong></div>
+          <div><span>已人工复核</span><strong id="hubReviewedCount">0</strong></div>
+          <div><span>累计驳斥</span><strong id="hubRefutedCount">0</strong></div>
+          <div><span>样本可信度</span><strong id="hubSampleQuality">样本严重不足</strong></div>
+        </div>
         <div id="projectCards" class="project-card-grid" aria-live="polite"></div>
       </section>
 
@@ -172,12 +178,42 @@
           <div class="table-wrap"><table><thead><tr><th>级别</th><th>线索</th><th>待验证危害</th><th>影响力</th><th>置信度</th></tr></thead><tbody id="riskLeadsBody"></tbody></table></div>
         </article>
         <article class="panel span-3">
-          <div class="panel-head"><div><p class="section-label">VERIFIED VULNS</p><h2>已验证漏洞</h2></div><span id="vulnerabilitiesCount">0 条</span></div>
-          <div class="table-wrap"><table><thead><tr><th>级别</th><th>漏洞</th><th>已验证危害</th><th>影响力</th><th>置信度</th></tr></thead><tbody id="vulnerabilitiesBody"></tbody></table></div>
+          <div class="panel-head"><div><p class="section-label">SYSTEM VULNERABILITY POOL</p><h2>系统漏洞池</h2></div><span id="vulnerabilitiesCount">0 条</span></div>
+          <div class="table-wrap"><table><thead><tr><th>级别</th><th>漏洞</th><th>已验证危害</th><th>影响力</th><th>置信度</th><th>人工结论</th></tr></thead><tbody id="vulnerabilitiesBody"></tbody></table></div>
+        </article>
+        <article class="panel span-3 quality-panel">
+          <div class="panel-head"><div><p class="section-label">QUALITY · HUMAN REFUTATION</p><h2>人工驳斥与长期误报率</h2></div><span id="qualitySample">样本 0</span></div>
+          <div class="quality-summary">
+            <div><span>系统漏洞</span><strong id="qualitySystemVulns">0</strong></div>
+            <div><span>已复核</span><strong id="qualityReviewed">0</strong></div>
+            <div><span>人工认可</span><strong id="qualityConfirmed">0</strong></div>
+            <div><span>人工驳斥</span><strong id="qualityRefuted">0</strong></div>
+            <div><span>长期误报率</span><strong id="qualityFalsePositiveRate">—</strong></div>
+          </div>
+          <p id="qualityRuleSuggestions" class="subtle">尚未形成重复误报规则建议。</p>
+          <div class="target-form-grid quality-review-form">
+            <label>选择系统漏洞<select id="reviewFinding"></select></label>
+            <label>人工动作<select id="reviewAction"><option value="accepted">认可系统判断</option><option value="adjusted">漏洞成立，调整等级</option><option value="refuted">驳斥为误报</option><option value="reclassified">降级重新分类</option><option value="retest_requested">要求重新验证</option></select></label>
+            <label>最终分类<select id="reviewClassification"><option value="vulnerability">漏洞</option><option value="risk_lead">风险线索</option><option value="attack_surface">攻击面</option><option value="inconclusive">证据不足</option></select></label>
+            <label>最终等级<select id="reviewSeverity"><option value="info">信息</option><option value="low">低危</option><option value="medium">中危</option><option value="high">高危</option><option value="critical">严重</option></select></label>
+            <label>驳斥标签（逗号分隔）<input id="reviewReasonCodes" placeholder="例如：boundary_not_crossed,status_code_only"></label>
+            <label>影响范围<select id="reviewScope"><option value="current_finding">仅当前漏洞</option><option value="current_project_type">当前项目同类</option><option value="global_pattern">全局同类模式</option></select></label>
+            <label class="span-all">人工理由<textarea id="reviewReason" rows="3" placeholder="说明为什么认可、调级或驳斥；原文会进入长期反例记忆"></textarea></label>
+          </div>
+          <button id="submitFindingReview" class="button secondary" type="button">提交人工结论</button>
+        </article>
+        <article class="panel span-3">
+          <div class="panel-head"><div><p class="section-label">WAF ADAPTIVE VALIDATION</p><h2>WAF 对抗分支</h2></div><span id="wafAssessmentsCount">0 条</span></div>
+          <div class="table-wrap"><table><thead><tr><th>目标</th><th>原始假设</th><th>状态</th><th>阻断信号</th><th>预算</th></tr></thead><tbody id="wafAssessmentsBody"></tbody></table></div>
+        </article>
+        <article class="panel span-3">
+          <div class="panel-head"><div><p class="section-label">NEGATIVE EVIDENCE</p><h2>负向证据与已否定路径</h2></div><span id="negativeEvidenceCount">0 条</span></div>
+          <div class="table-wrap"><table><thead><tr><th>目标</th><th>被验证假设</th><th>客观结果</th><th>有效期</th><th>调度作用</th></tr></thead><tbody id="negativeEvidenceBody"></tbody></table></div>
         </article>
         <article class="panel span-3">
           <div class="panel-head"><div><p class="section-label">INTENTS</p><h2>方向池</h2></div><span id="intentsCount">0 条</span></div>
-          <div class="table-wrap"><table><thead><tr><th>动作</th><th>目标</th><th>成功标准</th><th>风险</th><th>状态</th></tr></thead><tbody id="intentsBody"></tbody></table></div>
+          <p class="subtle">人工删除会将方向标记为“人工否决”并停止后续调度；审计记录和删除理由仍会保留。</p>
+          <div class="table-wrap"><table><thead><tr><th>动作</th><th>目标</th><th>成功标准</th><th>风险</th><th>状态</th><th>人工操作</th></tr></thead><tbody id="intentsBody"></tbody></table></div>
         </article>
         <article class="panel span-3">
           <div class="panel-head"><div><p class="section-label">EVIDENCE CHAIN</p><h2>证据索引</h2></div><span id="evidenceCount">0 份</span></div>
@@ -190,17 +226,14 @@
 
       <section id="control" data-view="run" class="content-grid" hidden>
         <article class="panel action-panel">
-          <div><p class="section-label">HUMAN HINT</p><h2>注入人工判断</h2></div>
-          <label>Hint<textarea id="hintContent" rows="4" placeholder="例如：优先审计容器挂载和跨项目数据边界"></textarea></label>
+          <div><p class="section-label">PROJECT OWNER DIRECTIVE · HIGHEST PRIORITY</p><h2>项目所有者指令</h2></div>
+          <p class="subtle">这是 AgentCP 内部最高控制优先级。指令默认作用于整个项目并自动沿用到后续 Run；旧 Worker 若未读取最新指令，其结果会被控制平面拒绝写回。</p>
+          <label>干预类型<select id="interventionType"><option value="supplement">补充约束与信息</option><option value="redirect">修正当前方向</option><option value="evidence_correction">纠正证据或事实</option><option value="metacog_review">要求元认知复盘</option></select></label>
+          <label>补充内容<textarea id="hintContent" rows="5" placeholder="例如：停止重复枚举子域；下一轮优先核对已有证据中的鉴权边界"></textarea></label>
           <label>目标（可选）<input id="hintTarget" placeholder="模块、接口或文件"></label>
-          <label>优先级<input id="hintPriority" type="number" min="0" max="10" value="5"></label>
-          <button id="hintButton" class="button secondary" type="button">写入黑板</button>
-        </article>
-        <article class="panel action-panel">
-          <div><p class="section-label">HARD GATE</p><h2>控制器审批</h2></div>
-          <label>动作<select id="gateAction"><option value="continue">继续当前路径</option><option value="stop_loss">止损</option><option value="switch_target">切换目标</option><option value="switch_phase">切换阶段</option></select></label>
-          <label>审批理由<textarea id="gateReasonInput" rows="4" placeholder="必须包含客观指标或授权指令"></textarea></label>
-          <button id="approveButton" class="button secondary" type="button">提交审批</button>
+          <label>人工指令内部优先级<input id="hintPriority" type="number" min="0" max="10" value="10"></label>
+          <small id="interventionScopeNote" class="subtle">项目级持续生效 · 高于全部 Agent 自动规划</small>
+          <button id="hintButton" class="button secondary" type="button">提交最高优先级指令</button>
         </article>
       </section>
     </main>

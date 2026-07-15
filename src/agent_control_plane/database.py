@@ -10,7 +10,7 @@ from typing import Any, Iterator
 from uuid import uuid4
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 
 def _now() -> str:
@@ -62,6 +62,7 @@ class ControlDatabase:
                     completed_task_count INTEGER NOT NULL DEFAULT 0,
                     low_value_streak INTEGER NOT NULL DEFAULT 0,
                     no_direction_streak INTEGER NOT NULL DEFAULT 0,
+                    control_version INTEGER NOT NULL DEFAULT 1,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL,
                     error TEXT
@@ -83,6 +84,7 @@ class ControlDatabase:
                     error TEXT,
                     committed_at TEXT,
                     commit_error TEXT,
+                    control_version INTEGER NOT NULL DEFAULT 1,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
                 );
@@ -103,6 +105,7 @@ class ControlDatabase:
                     status TEXT NOT NULL,
                     claimed_by TEXT,
                     lease_expires_at TEXT,
+                    terminal_reason TEXT,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
                 );
@@ -113,8 +116,23 @@ class ControlDatabase:
             row = db.execute("SELECT version FROM schema_meta LIMIT 1").fetchone()
             if row is None:
                 db.execute("INSERT INTO schema_meta(version) VALUES (?)", (SCHEMA_VERSION,))
-            elif int(row["version"]) != SCHEMA_VERSION:
+            elif int(row["version"]) > SCHEMA_VERSION:
                 raise RuntimeError(f"不支持的数据库版本: {row['version']}")
+            self._ensure_column(db, "automation_runs", "control_version", "INTEGER NOT NULL DEFAULT 1")
+            self._ensure_column(db, "jobs", "control_version", "INTEGER NOT NULL DEFAULT 1")
+            self._ensure_column(db, "directions", "terminal_reason", "TEXT")
+            db.execute("UPDATE schema_meta SET version=?", (SCHEMA_VERSION,))
+
+    @staticmethod
+    def _ensure_column(
+        db: sqlite3.Connection,
+        table: str,
+        column: str,
+        declaration: str,
+    ) -> None:
+        names = {str(row["name"]) for row in db.execute(f"PRAGMA table_info({table})").fetchall()}
+        if column not in names:
+            db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {declaration}")
 
     def create_run(self, project: str, team: str, timeout_seconds: int, max_workers: int) -> str:
         run_id = f"R-{uuid4().hex[:12]}"
@@ -122,7 +140,7 @@ class ControlDatabase:
         with self.connect() as db:
             previous = db.execute(
                 """
-                SELECT completed_task_count,low_value_streak,no_direction_streak
+                SELECT completed_task_count,low_value_streak,no_direction_streak,control_version
                 FROM automation_runs WHERE project=? ORDER BY created_at DESC LIMIT 1
                 """,
                 (project,),
@@ -132,14 +150,16 @@ class ControlDatabase:
                 int(previous["low_value_streak"]),
                 int(previous["no_direction_streak"]),
             ) if previous else (0, 0, 0)
+            control_version = int(previous["control_version"]) + 1 if previous else 1
             db.execute(
                 """
                 INSERT INTO automation_runs(
                     id,project,team,status,stage,timeout_seconds,max_workers,
-                    completed_task_count,low_value_streak,no_direction_streak,created_at,updated_at,error
-                ) VALUES (?, ?, ?, 'running', 'swarm', ?, ?, ?, ?, ?, ?, ?, NULL)
+                    completed_task_count,low_value_streak,no_direction_streak,control_version,
+                    created_at,updated_at,error
+                ) VALUES (?, ?, ?, 'running', 'swarm', ?, ?, ?, ?, ?, ?, ?, ?, NULL)
                 """,
-                (run_id, project, team, timeout_seconds, max_workers, *counters, now, now),
+                (run_id, project, team, timeout_seconds, max_workers, *counters, control_version, now, now),
             )
             self._event(db, run_id, None, "run_created", {"team": team})
         return run_id
@@ -156,13 +176,24 @@ class ControlDatabase:
         job_id = f"J-{uuid4().hex[:12]}"
         now = _now()
         with self.connect() as db:
+            run = db.execute(
+                "SELECT status,control_version FROM automation_runs WHERE id=?",
+                (run_id,),
+            ).fetchone()
+            if run is None or run["status"] != "running":
+                raise RuntimeError(f"运行 {run_id} 不接受新任务。")
             db.execute(
                 """
                 INSERT INTO jobs(
-                    id,run_id,stage,member_name,role,payload_json,status,attempts,max_attempts,created_at,updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, 'queued', 0, ?, ?, ?)
+                    id,run_id,stage,member_name,role,payload_json,status,attempts,max_attempts,
+                    control_version,created_at,updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, 'queued', 0, ?, ?, ?, ?)
                 """,
-                (job_id, run_id, stage, member_name, role, json.dumps(payload, ensure_ascii=False), max_attempts, now, now),
+                (
+                    job_id, run_id, stage, member_name, role,
+                    json.dumps(payload, ensure_ascii=False), max_attempts,
+                    int(run["control_version"]), now, now,
+                ),
             )
             self._event(db, run_id, job_id, "job_queued", {"stage": stage, "member": member_name})
         return job_id
@@ -170,7 +201,7 @@ class ControlDatabase:
     def register_direction(self, intent: dict[str, Any]) -> tuple[str, bool]:
         identity = "\x1f".join(
             str(intent.get(key, "")).strip().casefold()
-            for key in ("verb", "target", "success_criteria", "chain_id", "sequence")
+            for key in ("verb", "target", "hypothesis", "success_criteria", "chain_id", "sequence")
         )
         fingerprint = hashlib.sha256(identity.encode("utf-8")).hexdigest()
         direction_id = str(intent.get("id") or f"I-{uuid4().hex[:12]}")
@@ -197,7 +228,7 @@ class ControlDatabase:
             row = db.execute(
                 """
                 SELECT * FROM directions
-                WHERE status='open' OR (status='claimed' AND lease_expires_at < ?)
+                WHERE status IN ('open','released') OR (status='claimed' AND lease_expires_at < ?)
                 ORDER BY
                     CASE
                         WHEN json_extract(intent_json, '$.requires_human_confirmation') THEN 0
@@ -243,17 +274,32 @@ class ControlDatabase:
             )
             return result.rowcount == 1
 
-    def finish_direction(self, direction_id: str, worker_id: str, success: bool) -> None:
+    def finish_direction(
+        self,
+        direction_id: str,
+        worker_id: str,
+        success: bool | None = None,
+        *,
+        outcome: str | None = None,
+        reason: str | None = None,
+    ) -> None:
         with self.connect() as db:
-            status = "completed" if success else "open"
+            status = outcome or ("completed" if success else "released")
+            if status not in {
+                "completed", "rejected", "exhausted", "blocked", "cancelled", "released",
+            }:
+                raise ValueError(f"非法 Intent 终态: {status}")
             db.execute(
                 """
-                UPDATE directions SET status=?,claimed_by=NULL,lease_expires_at=NULL,updated_at=?
+                UPDATE directions SET status=?,claimed_by=NULL,lease_expires_at=NULL,
+                    terminal_reason=?,updated_at=?
                 WHERE id=? AND claimed_by=?
                 """,
-                (status, _now(), direction_id, worker_id),
+                (status, reason, _now(), direction_id, worker_id),
             )
-            self._event(db, None, None, "direction_finished", {"direction_id": direction_id, "status": status})
+            self._event(db, None, None, "direction_finished", {
+                "direction_id": direction_id, "status": status, "reason": reason,
+            })
 
     def list_directions(self) -> list[dict[str, Any]]:
         with self.connect() as db:
@@ -262,16 +308,122 @@ class ControlDatabase:
             row["intent"] = json.loads(row.pop("intent_json"))
         return rows
 
+    def get_direction(self, direction_id: str) -> dict[str, Any] | None:
+        with self.connect() as db:
+            row = db.execute("SELECT * FROM directions WHERE id=?", (direction_id,)).fetchone()
+        if row is None:
+            return None
+        result = dict(row)
+        result["intent"] = json.loads(result.pop("intent_json"))
+        return result
+
+    def dismiss_direction(self, direction_id: str, reason: str) -> dict[str, Any]:
+        """Human-reject a direction and fence every not-yet-committed job bound to it."""
+        reason = reason.strip()
+        if not reason:
+            raise ValueError("人工否决方向必须填写理由。")
+        now = _now()
+        terminal_reason = f"human_dismissed:{reason[:1000]}"
+        with self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            direction = db.execute(
+                "SELECT * FROM directions WHERE id=?", (direction_id,)
+            ).fetchone()
+            if direction is None:
+                db.execute("ROLLBACK")
+                raise RuntimeError(f"方向不存在: {direction_id}")
+            if direction["status"] == "cancelled" and str(direction["terminal_reason"] or "").startswith("human_dismissed:"):
+                db.execute("COMMIT")
+                return self.get_direction(direction_id) or {}
+
+            matched_jobs = db.execute(
+                """
+                SELECT id,run_id,status FROM jobs
+                WHERE json_extract(payload_json, '$.direction.id')=?
+                  AND committed_at IS NULL
+                  AND status IN ('queued','running','completed','cancelling')
+                """,
+                (direction_id,),
+            ).fetchall()
+            db.execute(
+                """
+                UPDATE directions SET status='cancelled',claimed_by=NULL,lease_expires_at=NULL,
+                    terminal_reason=?,updated_at=? WHERE id=?
+                """,
+                (terminal_reason, now, direction_id),
+            )
+            db.execute(
+                """
+                UPDATE jobs SET status='cancelled',error=?,worker_id=NULL,
+                    lease_expires_at=NULL,updated_at=?
+                WHERE json_extract(payload_json, '$.direction.id')=?
+                  AND committed_at IS NULL AND status IN ('queued','completed')
+                """,
+                (terminal_reason, now, direction_id),
+            )
+            db.execute(
+                """
+                UPDATE jobs SET status='cancelling',error=?,updated_at=?
+                WHERE json_extract(payload_json, '$.direction.id')=?
+                  AND committed_at IS NULL AND status='running'
+                """,
+                (terminal_reason, now, direction_id),
+            )
+            for job in matched_jobs:
+                next_status = "cancelling" if job["status"] == "running" else "cancelled"
+                self._event(db, job["run_id"], job["id"], "job_human_cancelled", {
+                    "direction_id": direction_id,
+                    "status": next_status,
+                    "reason": reason[:1000],
+                })
+            self._event(db, None, None, "direction_human_dismissed", {
+                "direction_id": direction_id,
+                "reason": reason[:1000],
+                "affected_jobs": len(matched_jobs),
+            })
+            db.execute("COMMIT")
+        return self.get_direction(direction_id) or {}
+
+    def job_status(self, job_id: str) -> str | None:
+        with self.connect() as db:
+            row = db.execute("SELECT status FROM jobs WHERE id=?", (job_id,)).fetchone()
+            return str(row["status"]) if row else None
+
+    def set_direction_status(
+        self,
+        direction_id: str,
+        status: str,
+        reason: str | None = None,
+    ) -> None:
+        if status not in {
+            "open", "released", "completed", "rejected", "exhausted", "blocked", "cancelled",
+        }:
+            raise ValueError(f"非法 Intent 状态: {status}")
+        with self.connect() as db:
+            db.execute(
+                """
+                UPDATE directions SET status=?,claimed_by=NULL,lease_expires_at=NULL,
+                    terminal_reason=?,updated_at=? WHERE id=? AND status!='claimed'
+                """,
+                (status, reason, _now(), direction_id),
+            )
+            self._event(db, None, None, "direction_status_changed", {
+                "direction_id": direction_id, "status": status, "reason": reason,
+            })
+
     def claim_job(self, run_id: str, stage: str, worker_id: str, lease_seconds: int = 60) -> dict[str, Any] | None:
         now = _now()
         with self.connect() as db:
             db.execute("BEGIN IMMEDIATE")
             row = db.execute(
                 """
-                SELECT * FROM jobs
-                WHERE run_id=? AND stage=? AND attempts < max_attempts
-                  AND (status='queued' OR (status='running' AND lease_expires_at < ?))
-                ORDER BY created_at, id LIMIT 1
+                SELECT jobs.* FROM jobs
+                JOIN automation_runs ON automation_runs.id=jobs.run_id
+                WHERE jobs.run_id=? AND jobs.stage=? AND jobs.attempts < jobs.max_attempts
+                  AND automation_runs.status='running'
+                  AND jobs.control_version=automation_runs.control_version
+                  AND (jobs.status='queued' OR (jobs.status='running' AND jobs.lease_expires_at < ?))
+                ORDER BY jobs.created_at, jobs.id LIMIT 1
                 """,
                 (run_id, stage, now),
             ).fetchone()
@@ -293,48 +445,102 @@ class ControlDatabase:
             claimed["payload"] = json.loads(claimed.pop("payload_json"))
             return claimed
 
-    def heartbeat(self, job_id: str, worker_id: str, lease_seconds: int = 60) -> bool:
+    def heartbeat(
+        self,
+        job_id: str,
+        worker_id: str,
+        lease_seconds: int = 60,
+        control_version: int | None = None,
+    ) -> bool:
         now = _now()
         with self.connect() as db:
+            if control_version is None:
+                row = db.execute("SELECT control_version FROM jobs WHERE id=?", (job_id,)).fetchone()
+                control_version = int(row["control_version"]) if row else -1
             result = db.execute(
                 """
                 UPDATE jobs SET lease_expires_at=?, last_heartbeat_at=?, updated_at=?
-                WHERE id=? AND worker_id=? AND status='running'
+                WHERE id=? AND worker_id=? AND status='running' AND control_version=?
+                  AND EXISTS (
+                    SELECT 1 FROM automation_runs
+                    WHERE automation_runs.id=jobs.run_id
+                      AND automation_runs.status='running'
+                      AND automation_runs.control_version=jobs.control_version
+                  )
                 """,
-                (_lease_deadline(lease_seconds), now, now, job_id, worker_id),
+                (_lease_deadline(lease_seconds), now, now, job_id, worker_id, control_version),
             )
             return result.rowcount == 1
 
-    def complete_job(self, job_id: str, worker_id: str, result: dict[str, Any]) -> None:
+    def complete_job(
+        self,
+        job_id: str,
+        worker_id: str,
+        result: dict[str, Any],
+        control_version: int | None = None,
+    ) -> None:
         now = _now()
         with self.connect() as db:
-            row = db.execute("SELECT run_id FROM jobs WHERE id=?", (job_id,)).fetchone()
+            row = db.execute(
+                "SELECT run_id,control_version FROM jobs WHERE id=?", (job_id,)
+            ).fetchone()
+            if row is None:
+                raise RuntimeError(f"任务不存在: {job_id}")
+            expected_version = int(row["control_version"]) if control_version is None else control_version
             updated = db.execute(
                 """
                 UPDATE jobs SET status='completed', result_json=?, lease_expires_at=NULL,
                     updated_at=? WHERE id=? AND worker_id=? AND status='running'
+                    AND control_version=?
+                    AND EXISTS (
+                      SELECT 1 FROM automation_runs
+                      WHERE automation_runs.id=jobs.run_id
+                        AND automation_runs.status='running'
+                        AND automation_runs.control_version=jobs.control_version
+                    )
                 """,
-                (json.dumps(result, ensure_ascii=False), now, job_id, worker_id),
+                (json.dumps(result, ensure_ascii=False), now, job_id, worker_id, expected_version),
             )
             if updated.rowcount != 1:
-                raise RuntimeError(f"任务租约已失效: {job_id}")
+                self._event(db, row["run_id"], job_id, "stale_write_rejected", {
+                    "worker_id": worker_id, "control_version": expected_version,
+                })
+                raise RuntimeError(f"任务控制版本或租约已失效: {job_id}")
             self._event(db, row["run_id"], job_id, "job_completed", {})
 
-    def fail_job(self, job_id: str, worker_id: str, error: str, *, retryable: bool = True) -> str:
+    def fail_job(
+        self,
+        job_id: str,
+        worker_id: str,
+        error: str,
+        *,
+        retryable: bool = True,
+        control_version: int | None = None,
+    ) -> str:
         now = _now()
         with self.connect() as db:
             row = db.execute(
                 """
-                SELECT jobs.run_id,jobs.attempts,jobs.max_attempts,automation_runs.status AS run_status
+                SELECT jobs.run_id,jobs.status AS job_status,jobs.attempts,jobs.max_attempts,jobs.control_version,
+                    automation_runs.status AS run_status,
+                    automation_runs.control_version AS run_control_version
                 FROM jobs JOIN automation_runs ON automation_runs.id=jobs.run_id WHERE jobs.id=?
                 """,
                 (job_id,),
             ).fetchone()
             if row is None:
                 raise RuntimeError(f"任务不存在: {job_id}")
+            expected_version = int(row["control_version"]) if control_version is None else control_version
+            stale = (
+                row["job_status"] != "running"
+                or
+                row["run_status"] != "running"
+                or int(row["run_control_version"]) != expected_version
+                or int(row["control_version"]) != expected_version
+            )
             next_status = (
                 "cancelled"
-                if row["run_status"] == "cancelled"
+                if stale
                 else "failed"
                 if not retryable or int(row["attempts"]) >= int(row["max_attempts"])
                 else "queued"
@@ -342,11 +548,15 @@ class ControlDatabase:
             db.execute(
                 """
                 UPDATE jobs SET status=?, error=?, worker_id=NULL, lease_expires_at=NULL,
-                    updated_at=? WHERE id=? AND worker_id=? AND status='running'
+                    updated_at=? WHERE id=? AND worker_id=? AND status IN ('running','cancelling')
                 """,
                 (next_status, error, now, job_id, worker_id),
             )
             self._event(db, row["run_id"], job_id, "job_failed", {"status": next_status, "error": error})
+            if stale:
+                self._event(db, row["run_id"], job_id, "stale_write_rejected", {
+                    "worker_id": worker_id, "control_version": expected_version,
+                })
             return next_status
 
     def add_event(
@@ -375,11 +585,25 @@ class ControlDatabase:
 
     def set_run_stage(self, run_id: str, stage: str) -> None:
         with self.connect() as db:
-            db.execute("UPDATE automation_runs SET stage=?,updated_at=? WHERE id=?", (stage, _now(), run_id))
+            updated = db.execute(
+                "UPDATE automation_runs SET stage=?,updated_at=? WHERE id=? AND status IN ('running','paused')",
+                (stage, _now(), run_id),
+            )
+            if updated.rowcount != 1:
+                return
             self._event(db, run_id, None, "run_stage_changed", {"stage": stage})
 
     def set_run_status(self, run_id: str, status: str, error: str | None = None) -> None:
         with self.connect() as db:
+            current = db.execute(
+                "SELECT status FROM automation_runs WHERE id=?", (run_id,)
+            ).fetchone()
+            if current is None:
+                raise RuntimeError(f"运行不存在: {run_id}")
+            if current["status"] in {"stopped", "cancelled", "completed", "failed"}:
+                if status != current["status"]:
+                    raise RuntimeError(f"终结运行 {run_id} 不能从 {current['status']} 变为 {status}")
+                return
             db.execute(
                 "UPDATE automation_runs SET status=?,error=?,updated_at=? WHERE id=?",
                 (status, error, _now(), run_id),
@@ -432,27 +656,74 @@ class ControlDatabase:
 
     def finish_run(self, run_id: str, status: str, error: str | None = None) -> None:
         with self.connect() as db:
-            db.execute(
-                "UPDATE automation_runs SET status=?,stage='finished',error=?,updated_at=? WHERE id=?",
+            updated = db.execute(
+                """
+                UPDATE automation_runs SET status=?,stage='finished',error=?,updated_at=?
+                WHERE id=? AND status IN ('running','paused')
+                """,
                 (status, error, _now(), run_id),
             )
+            if updated.rowcount != 1:
+                return
             self._event(db, run_id, None, "run_finished", {"status": status, "error": error})
 
     def cancel_run(self, run_id: str, reason: str) -> None:
+        self.stop_run(run_id, reason)
+
+    def stop_run(self, run_id: str, reason: str) -> None:
         with self.connect() as db:
             db.execute("BEGIN IMMEDIATE")
+            run = db.execute(
+                "SELECT status,control_version FROM automation_runs WHERE id=?", (run_id,)
+            ).fetchone()
+            if run is None:
+                db.execute("ROLLBACK")
+                raise RuntimeError(f"运行不存在: {run_id}")
+            if run["status"] in {"stopped", "cancelled", "completed", "failed"}:
+                db.execute("COMMIT")
+                return
+            next_version = int(run["control_version"]) + 1
+            now = _now()
             db.execute(
-                "UPDATE automation_runs SET status='cancelled',error=?,updated_at=? WHERE id=?",
-                (reason, _now(), run_id),
+                """
+                UPDATE automation_runs SET status='stopping',control_version=?,error=?,updated_at=?
+                WHERE id=?
+                """,
+                (next_version, reason, now, run_id),
             )
             db.execute(
                 """
-                UPDATE jobs SET status='cancelled',error=?,lease_expires_at=NULL,updated_at=?
+                UPDATE jobs SET status='cancelled',error=?,worker_id=NULL,
+                    lease_expires_at=NULL,updated_at=?
                 WHERE run_id=? AND status='queued'
                 """,
-                (reason, _now(), run_id),
+                (reason, now, run_id),
             )
-            self._event(db, run_id, None, "run_cancelled", {"reason": reason})
+            db.execute(
+                """
+                UPDATE jobs SET status='cancelling',error=?,updated_at=?
+                WHERE run_id=? AND status='running'
+                """,
+                (reason, now, run_id),
+            )
+            db.execute(
+                """
+                UPDATE directions SET status='cancelled',claimed_by=NULL,lease_expires_at=NULL,
+                    terminal_reason=?,updated_at=?
+                WHERE status='claimed' AND claimed_by LIKE ?
+                """,
+                (reason, now, f"{run_id}:%"),
+            )
+            self._event(db, run_id, None, "run_stopping", {
+                "reason": reason, "control_version": next_version,
+            })
+            db.execute(
+                "UPDATE automation_runs SET status='stopped',stage='finished',updated_at=? WHERE id=?",
+                (_now(), run_id),
+            )
+            self._event(db, run_id, None, "run_stopped", {
+                "reason": reason, "control_version": next_version,
+            })
             db.execute("COMMIT")
 
     def get_run(self, run_id: str) -> dict[str, Any] | None:

@@ -17,8 +17,10 @@ from .dashboard import render_dashboard
 from .automation import AutomationEngine
 from .lifecycle import ProjectLifecycleBusy, project_deletion_lock
 from .scheduler import Scheduler
-from .schemas import Hint, coverage_template_for_project_type, now_iso
+from .schemas import GateStatus, Hint, coverage_template_for_project_type, now_iso
 from .metrics import collect_metrics, refresh_asset_count
+from .quality import QualityLedger
+from .waf import WAFManager
 from .store import PROJECTS, ROOT, ProjectStore
 from .team import run_team
 from .runtime_secrets import RuntimeSecretStore
@@ -129,32 +131,82 @@ def _apply_gate_run_action(
 ) -> dict[str, object]:
     """Turn a gate decision into a real run transition when applicable."""
     engine = AutomationEngine(store)
-    run = engine.db.get_run(run_id) if run_id else engine.db.latest_resumable_run()
+    run = engine.db.get_run(run_id) if run_id else (engine.db.latest_resumable_run() or engine.db.latest_run())
     if run_id and run is None:
         raise WebAppError(f"运行不存在: {run_id}")
     if run is None:
-        return {"run_id": None, "run_status": None, "resumed": False, "cancelled": False}
+        return {
+            "run_id": None, "previous_run_id": None, "run_status": None,
+            "transition": "gate_only", "resumed": False, "started": False, "cancelled": False,
+        }
 
     result: dict[str, object] = {
         "run_id": run["id"],
+        "previous_run_id": run["id"],
         "run_status": run["status"],
+        "transition": "none",
         "resumed": False,
+        "started": False,
         "cancelled": False,
     }
     if action in {"continue", "switch_target", "switch_phase"} and run["status"] == "paused":
         engine.resume(run["id"])
         _start_background_run(store, engine, run["id"])
-        result.update({"run_status": "running", "resumed": True})
-    elif action == "stop_loss" and run["status"] in {"running", "paused"}:
+        result.update({"run_status": "running", "transition": "resumed", "resumed": True})
+    elif action in {"continue", "switch_target", "switch_phase"} and run["status"] == "running":
+        result.update({"transition": "continued", "resumed": True})
+    elif action in {"continue", "switch_target", "switch_phase"} and run["status"] in {
+        "completed", "failed", "stopped", "cancelled",
+    }:
+        new_run_id = engine.start(
+            str(run.get("team") or "default"),
+            timeout=int(run.get("timeout_seconds") or 600),
+            max_workers=int(run.get("max_workers") or 3),
+        )
+        _start_background_run(store, engine, new_run_id)
+        result.update({
+            "run_id": new_run_id,
+            "run_status": "running",
+            "transition": "started_next_iteration",
+            "started": True,
+        })
+    elif action == "stop_loss" and run["status"] in {"running", "paused", "stopping"}:
         engine.cancel(run["id"], "gate_stop_loss")
-        result.update({"run_status": "cancelled", "cancelled": True})
+        result.update({"run_status": "stopped", "transition": "stopped", "cancelled": True})
+    elif action == "stop_loss":
+        result.update({"transition": "already_terminal"})
     return result
+
+
+def _approve_gate_and_transition(
+    store: ProjectStore,
+    action: str,
+    reason: str,
+    run_id: str | None,
+) -> tuple[str, dict[str, object]]:
+    """Approve and apply the run transition as one recoverable operation."""
+    before = store.load_state()
+    original_reason = before.gate_reason
+    output = Scheduler(store).approve(action, reason)
+    try:
+        transition = _apply_gate_run_action(store, action, run_id)
+    except Exception as exc:
+        state = store.load_state()
+        state.gate_status = GateStatus.AWAITING_APPROVAL.value
+        state.gate_reason = (
+            f"{original_reason} | 审批动作执行失败，门禁保持暂停：{exc}"
+            if original_reason else f"审批动作执行失败，门禁保持暂停：{exc}"
+        )
+        state.current_decision = "request_confirmation"
+        store.save_state(state)
+        raise
+    return output, transition
 
 
 def _has_active_job_lease(engine: AutomationEngine) -> bool:
     now = datetime.now(timezone.utc)
     for job in engine.db.list_all_jobs():
-        if job.get("status") != "running" or not job.get("lease_expires_at"):
+        if job.get("status") not in {"running", "cancelling"} or not job.get("lease_expires_at"):
             continue
         try:
             expires_at = datetime.fromisoformat(str(job["lease_expires_at"]).replace("Z", "+00:00"))
@@ -396,7 +448,7 @@ def _save_config(store: ProjectStore, config: dict) -> None:
     if not config["members"]:
         raise WebAppError("至少需要一个角色")
     allowed_types = {"codex", "claude-cli", "openai-compatible", "ollama", "container"}
-    allowed_roles = {"reason", "metacog", "executor", "pentester", "reviewer"}
+    allowed_roles = {"reason", "metacog", "executor", "pentester", "reviewer", "waf_analyst"}
     allowed_sandboxes = {"read-only", "workspace-write", "danger-full-access"}
     allowed_auth_modes = {"auto", "bearer", "x-api-key"}
     names: set[str] = set()
@@ -540,12 +592,16 @@ class AgentControlHandler(SimpleHTTPRequestHandler):
             return
         if parsed.path == "/api/projects":
             projects = []
+            quality_summary = None
             for vendor in _project_names():
                 try:
                     with _project_activity(vendor):
                         store = _safe_project(vendor)
                         state = store.load_state()
                         target = store.read_json("target.json")
+                        quality = QualityLedger().project_metrics(store)
+                        if quality_summary is None:
+                            quality_summary = QualityLedger().global_metrics(store)
                         projects.append({
                             "vendor": vendor,
                             "phase": state.phase,
@@ -556,10 +612,21 @@ class AgentControlHandler(SimpleHTTPRequestHandler):
                             "target_count": len(target.get("targets") or []),
                             "fact_count": state.fact_count,
                             "vulnerability_count": state.vulnerability_count,
+                            "quality_metrics": quality,
                         })
                 except ProjectNotFound:
                     continue
-            self._json({"ok": True, "projects": projects})
+            self._json({
+                "ok": True,
+                "projects": projects,
+                "quality_summary": quality_summary or {
+                    "reviewed": 0,
+                    "false_positives": 0,
+                    "false_positive_rate": None,
+                    "sample_size": 0,
+                    "sample_quality": "样本严重不足",
+                },
+            })
             return
         if parsed.path == "/api/project/state":
             try:
@@ -571,6 +638,12 @@ class AgentControlHandler(SimpleHTTPRequestHandler):
                     "state": store.load_state().__dict__,
                     "target": store.read_json("target.json"),
                     "facts": store.read_jsonl("facts.jsonl"),
+                    "negative_evidence": store.read_jsonl("negative_evidence.jsonl"),
+                    "human_verdicts": store.read_jsonl("human_verdicts.jsonl"),
+                    "refutation_memories": store.read_jsonl("refutation_memories.jsonl"),
+                    "waf_assessments": WAFManager().current(store),
+                    "quality_metrics": QualityLedger().project_metrics(store),
+                    "global_quality_metrics": QualityLedger().global_metrics(store),
                     "intents": store.read_jsonl("intents.jsonl"),
                     "directions": database.list_directions(),
                     "decisions": store.read_jsonl("decision_log.jsonl"),
@@ -653,9 +726,10 @@ class AgentControlHandler(SimpleHTTPRequestHandler):
                 return
             guarded_paths = {
                 "/api/projects", "/api/target", "/api/config", "/api/gate/approve",
+                "/api/directions/dismiss",
                 "/api/automation/start", "/api/automation/launch", "/api/automation/run",
                 "/api/automation/resume", "/api/automation/cancel", "/api/subtask/complete",
-                "/api/hints", "/api/team/run",
+                "/api/hints", "/api/team/run", "/api/findings/review",
             }
             if parsed.path in guarded_paths:
                 with _project_activity(payload.get("vendor", DEFAULT_VENDOR)):
@@ -698,6 +772,53 @@ class AgentControlHandler(SimpleHTTPRequestHandler):
                 self._json({"ok": True, "target": target})
                 return
 
+            if parsed.path == "/api/findings/review":
+                payload = self._read_json()
+                store = _safe_project(payload.get("vendor", DEFAULT_VENDOR))
+                verdict = QualityLedger().review(
+                    store,
+                    finding_id=str(payload.get("finding_id", "")).strip(),
+                    action=str(payload.get("action", "")).strip(),
+                    final_classification=str(payload.get("final_classification", "")).strip(),
+                    final_severity=str(payload.get("final_severity", "")).strip(),
+                    reason=str(payload.get("reason", "")).strip(),
+                    reason_codes=[str(item) for item in payload.get("reason_codes", [])],
+                    applicable_scope=str(payload.get("applicable_scope", "current_finding")),
+                    reviewed_by=str(payload.get("reviewed_by", "project_owner")),
+                )
+                _audit(store, "finding_human_reviewed", {
+                    "finding_id": verdict.finding_id,
+                    "action": verdict.action,
+                    "reason_codes": verdict.reason_codes,
+                })
+                render_dashboard(store)
+                self._json({
+                    "ok": True,
+                    "verdict": verdict.__dict__,
+                    "quality_metrics": QualityLedger().project_metrics(store),
+                    "global_quality_metrics": QualityLedger().global_metrics(store),
+                })
+                return
+
+            if parsed.path == "/api/directions/dismiss":
+                payload = self._read_json()
+                store = _safe_project(payload.get("vendor", DEFAULT_VENDOR))
+                direction_id = str(payload.get("direction_id", "")).strip()
+                reason = str(payload.get("reason", "")).strip()
+                if not direction_id:
+                    raise WebAppError("缺少 direction_id")
+                if not reason:
+                    raise WebAppError("人工删除方向必须填写理由")
+                direction = AutomationEngine(store).db.dismiss_direction(direction_id, reason)
+                _audit(store, "direction_human_dismissed", {
+                    "direction_id": direction_id,
+                    "reason": reason,
+                    "previous_intent": (direction.get("intent") or {}).get("verb"),
+                })
+                render_dashboard(store)
+                self._json({"ok": True, "direction": direction})
+                return
+
             if parsed.path == "/api/config":
                 payload = self._read_json()
                 store = _safe_project(payload.get("vendor", DEFAULT_VENDOR))
@@ -727,16 +848,20 @@ class AgentControlHandler(SimpleHTTPRequestHandler):
                 requested_run_id = str(payload.get("run_id", "")).strip() or None
                 if requested_run_id and AutomationEngine(store).db.get_run(requested_run_id) is None:
                     raise WebAppError(f"运行不存在: {requested_run_id}")
-                output = Scheduler(store).approve(
-                    action,
-                    str(payload.get("reason", "")).strip() or "用户从 Web 控制台批准",
-                )
-                run_transition = _apply_gate_run_action(
+                reason = str(payload.get("reason", "")).strip() or "用户从 Web 控制台批准"
+                output, run_transition = _approve_gate_and_transition(
                     store,
                     action,
+                    reason,
                     requested_run_id,
                 )
-                _audit(store, "gate_approved", {"action": payload.get("action"), "reason": payload.get("reason")})
+                _audit(store, "gate_approved", {
+                    "action": action,
+                    "reason": reason,
+                    "transition": run_transition.get("transition"),
+                    "previous_run_id": run_transition.get("previous_run_id"),
+                    "run_id": run_transition.get("run_id"),
+                })
                 render_dashboard(store)
                 self._json({"ok": True, "output": output, "action": action, **run_transition})
                 return
@@ -811,13 +936,35 @@ class AgentControlHandler(SimpleHTTPRequestHandler):
                 content = str(payload.get("content", "")).strip()
                 if not content:
                     raise WebAppError("缺少 content")
+                intervention_type = str(payload.get("intervention_type", "supplement")).strip()
+                if intervention_type not in {
+                    "supplement", "redirect", "evidence_correction", "metacog_review",
+                }:
+                    raise WebAppError(f"不支持的人工干预类型: {intervention_type}")
+                run_id = str(payload.get("run_id", "")).strip() or None
+                if run_id and AutomationEngine(store).db.get_run(run_id) is None:
+                    raise WebAppError(f"运行不存在: {run_id}")
+                scope = str(payload.get("scope", "project")).strip() or "project"
+                if scope not in {"project", "run"}:
+                    raise WebAppError(f"不支持的人工干预作用域: {scope}")
                 hint = Hint(
                     content=content,
                     target=payload.get("target"),
                     priority=int(payload.get("priority", 0)),
+                    intervention_type=intervention_type,
+                    applies_to_run_id=run_id,
+                    scope=scope,
                 )
                 store.append_jsonl("hints.jsonl", hint)
-                _audit(store, "hint_added", {"hint_id": hint.id, "target": hint.target, "priority": hint.priority})
+                _audit(store, "controller_intervention_added", {
+                    "hint_id": hint.id,
+                    "type": hint.intervention_type,
+                    "target": hint.target,
+                    "priority": hint.priority,
+                    "run_id": hint.applies_to_run_id,
+                    "scope": hint.scope,
+                    "authority": hint.authority,
+                })
                 self._json({"ok": True, "hint": hint.__dict__})
                 return
 

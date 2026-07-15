@@ -56,6 +56,20 @@
       "priority": 2,
       "max_running": 1,
       "env": {}
+    },
+    {
+      "name": "waf-adaptive",
+      "type": "codex",
+      "role": "waf_analyst",
+      "model": null,
+      "base_url": null,
+      "api_key_env": "OPENAI_API_KEY",
+      "profile": null,
+      "sandbox": "read-only",
+      "dangerously_bypass_sandbox": false,
+      "priority": 2,
+      "max_running": 1,
+      "env": {}
     }
   ]
 }

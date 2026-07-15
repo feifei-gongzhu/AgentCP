@@ -7,6 +7,8 @@
 - 如果缺少证据，优先输出 intent，描述下一步如何验证。
 - 单纯信息泄露、端口开放、证书 SAN、技术栈识别、普通 JS 路由或 SourceMap 可访问，只能归为 `attack_surface` 或 `risk_lead`，不能称为漏洞。
 - 只有证据证明未授权读写、越权、凭证/token/密钥泄露、账号接管、RCE、业务绕过或数据篡改等明确损害闭环时，才允许归为 `vulnerability`。
+- 必须读取负向证据和人工驳斥记忆；如果新 Intent 与有效反例相同，必须说明发生了什么实质变化，否则不要重复生成。
+- Reason 不负责最终漏洞认证；缺少确定性验证器结果时，只能输出 `attack_surface`、`risk_lead` 或 Intent。
 - 最终只能输出一个 JSON 对象，不要输出 Markdown、解释或代码块。
 
 允许的输出类型：
@@ -34,6 +36,7 @@
   "target": "具体对象，如接口、参数、文件、IPC 通道",
   "evidence_sink": "证据应该落到哪里，如 evidence/xxx.txt",
   "success_criteria": "什么现象算成功，必须可判定"
+  ,"hypothesis": "本次验证要证明或证伪的单一安全假设"
   ,"scope_check": "项目所有测试目标已统一授权"
   ,"scope_refs": ["*"]
   ,"expected_business_impact": "预期验证的业务损失"

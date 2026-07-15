@@ -43,6 +43,18 @@ class FactClassification(str, Enum):
     ATTACK_SURFACE = "attack_surface"
     RISK_LEAD = "risk_lead"
     VULNERABILITY = "vulnerability"
+    NEGATIVE_EVIDENCE = "negative_evidence"
+    INCONCLUSIVE = "inconclusive"
+
+
+class HumanReviewStatus(str, Enum):
+    NOT_REQUIRED = "not_required"
+    PENDING = "pending_human_review"
+    ACCEPTED = "human_accepted"
+    ADJUSTED = "human_adjusted"
+    REFUTED = "human_refuted"
+    RECLASSIFIED = "human_reclassified"
+    RETEST_REQUESTED = "retest_requested"
 
 
 class AttackSurface(str, Enum):
@@ -112,8 +124,14 @@ class ProjectState:
     asset_count: int = 0
     fact_count: int = 0
     vulnerability_count: int = 0
+    pending_human_review_count: int = 0
+    human_confirmed_count: int = 0
+    human_refuted_count: int = 0
     last_discovery_at: str | None = None
     current_decision: str = ControllerAction.CONTINUE.value
+    active_run_id: str | None = None
+    run_status: str = "idle"
+    control_version: int = 0
     attack_surface_coverage: dict[str, str] = field(
         default_factory=lambda: dict(CLIENT_ATTACK_SURFACE_COVERAGE)
     )
@@ -138,6 +156,115 @@ class Fact:
     id: str = field(default_factory=lambda: new_id("F"))
     created_at: str = field(default_factory=now_iso)
     quality_notes: list[str] = field(default_factory=list)
+    evidence_metrics: dict[str, Any] = field(default_factory=dict)
+    validator_result: dict[str, Any] = field(default_factory=dict)
+    review_status: str = HumanReviewStatus.NOT_REQUIRED.value
+
+
+@dataclass
+class EvidenceMetrics:
+    """Evidence-derived tri-state metrics used by deterministic validators.
+
+    ``None`` means that the available artifacts do not prove either outcome.
+    Values supplied by a model remain assertions until the normalizer can bind
+    them to concrete proof references.
+    """
+
+    boundary_crossed: bool | None = None
+    unauthorized_capability_obtained: bool | None = None
+    data_leaked: bool | None = None
+    control_bypassed: bool | None = None
+    reproducible: bool | None = None
+    has_raw_request_response: bool | None = None
+    evidence_files_exist: bool | None = None
+    result_reliable: bool | None = None
+    waf_interference: bool = False
+    response_codes: list[int] = field(default_factory=list)
+    actual_result_summary: str = ""
+    proof_refs: dict[str, list[str]] = field(default_factory=dict)
+    validator: str = "generic_boundary_v1"
+
+
+@dataclass
+class NegativeEvidence:
+    hypothesis: str
+    target: str
+    reason: str
+    method: str
+    valid_until: str
+    outcome: str = "blocked"
+    evidence_type: str = "inconclusive"
+    observed_at: str = field(default_factory=now_iso)
+    network_context: str = "default_egress"
+    identity_context: str = "anonymous"
+    attempts: int = 1
+    evidence_paths: list[str] = field(default_factory=list)
+    invalidation_triggers: list[str] = field(
+        default_factory=lambda: ["ip_changed", "network_egress_changed", "user_forced"]
+    )
+    proposed_by: str = "worker"
+    id: str = field(default_factory=lambda: new_id("NE"))
+
+
+@dataclass
+class HumanVerdict:
+    finding_id: str
+    action: str
+    final_classification: str
+    final_severity: str
+    reason: str
+    reason_codes: list[str] = field(default_factory=list)
+    applicable_scope: str = "current_finding"
+    reviewed_by: str = "project_owner"
+    machine_classification: str = ""
+    machine_severity: str = ""
+    model_context: dict[str, Any] = field(default_factory=dict)
+    versions: dict[str, str] = field(default_factory=dict)
+    id: str = field(default_factory=lambda: new_id("HV"))
+    created_at: str = field(default_factory=now_iso)
+
+
+@dataclass
+class RefutationMemory:
+    finding_id: str
+    original_reason: str
+    reason_codes: list[str]
+    extracted_principle: str
+    vulnerability_type: str
+    evidence_pattern: str
+    applicable_scope: str = "current_finding"
+    hit_count: int = 0
+    active: bool = True
+    id: str = field(default_factory=lambda: new_id("RM"))
+    created_at: str = field(default_factory=now_iso)
+
+
+@dataclass
+class WAFAssessment:
+    target: str
+    original_hypothesis: str
+    status: str = "suspected"
+    layer: str = "unknown"
+    signals: list[str] = field(default_factory=list)
+    baseline_evidence: list[str] = field(default_factory=list)
+    blocked_evidence: list[str] = field(default_factory=list)
+    allowed_mutation_families: list[str] = field(default_factory=lambda: [
+        "encoding_normalization",
+        "path_normalization",
+        "parameter_structure",
+        "method_content_type",
+        "parser_differential",
+        "session_context",
+    ])
+    tested_mutation_families: list[str] = field(default_factory=list)
+    semantic_preserved: bool | None = None
+    differential_found: bool = False
+    budget_minutes: int = 12
+    used_minutes: int = 0
+    requires_human_confirmation: bool = False
+    source_negative_evidence_id: str | None = None
+    id: str = field(default_factory=lambda: new_id("WAF"))
+    created_at: str = field(default_factory=now_iso)
 
 
 @dataclass
@@ -146,6 +273,7 @@ class Intent:
     target: str
     evidence_sink: str
     success_criteria: str
+    hypothesis: str = ""
     scope_check: str = ""
     scope_refs: list[str] = field(default_factory=list)
     expected_business_impact: str = ""
@@ -189,6 +317,12 @@ class Hint:
     content: str
     target: str | None = None
     priority: int = 0
+    intervention_type: str = "supplement"
+    applies_to_run_id: str | None = None
+    source: str = "project_owner"
+    scope: str = "project"
+    authority: str = "project_owner"
+    supersedes_agent_planning: bool = True
     status: str = "open"
     id: str = field(default_factory=lambda: new_id("H"))
     created_at: str = field(default_factory=now_iso)
