@@ -171,7 +171,7 @@ def test_successful_candidate_is_not_lost_when_sibling_job_fails(
     assert successful["committed_at"]
 
 
-def test_next_iteration_claims_committed_intent(
+def test_same_run_next_wave_claims_committed_intent(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -199,24 +199,19 @@ def test_next_iteration_claims_committed_intent(
     store = ProjectStore("vendor")
     store.init()
     engine = AutomationEngine(store)
-    first = engine.start("intent", timeout=30, max_workers=1)
-    engine.run(first)
-    assert engine.db.list_directions()[0]["status"] == "open"
+    run_id = engine.start("intent", timeout=30, max_workers=1)
+    engine.run(run_id)
 
-    Scheduler(store).approve("continue", "用户批准下一迭代")
-    second = engine.start("intent", timeout=30, max_workers=1)
-    jobs = engine.db.list_jobs(second, "swarm")
+    status = engine.status(run_id)
+    jobs = status["jobs"]
     executor_job = next(item for item in jobs if item["role"] == "executor")
-    reason_job = next(item for item in jobs if item["role"] == "reason")
+    reason_job = next(item for item in jobs if item["role"] == "reason" and item["wave"] == 2)
     assert executor_job["payload"]["direction"]["intent"]["target"] == "ipc://pushUpdate"
+    assert executor_job["wave"] == 2
     assert "direction" not in reason_job["payload"]
-    engine.run(second)
+    assert status["run"]["wave"] == 2
     assert engine.db.list_directions()[0]["status"] == "exhausted"
-
-    Scheduler(store).approve("continue", "用户批准下一迭代")
-    third = engine.start("intent", timeout=30, max_workers=1)
-    third_jobs = engine.db.list_jobs(third, "swarm")
-    assert not any(item["role"] == "executor" for item in third_jobs)
+    assert any(event["event_type"] == "run_wave_advanced" for event in status["events"])
 
 
 def test_direction_claim_prioritizes_human_confirmed_high_value_intents(

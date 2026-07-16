@@ -1,0 +1,5 @@
+services:
+  agent-compose:
+    privileged: true
+    devices:
+      - /dev/kvm:/dev/kvm

@@ -1,8 +1,8 @@
-# 渗透测试黑板控制平面 V2.0
+# AgentCP 安全研究引擎 V3.0
 
 > 完整安装、模型配置、自动化、远程协议、恢复与排错请阅读 [docs/USAGE.md](docs/USAGE.md)。
 
-这是一个从零实现的并发渗透测试黑板控制平面。产品核心是本项目的 V2.0 方法论、确定性控制器与可恢复的多代理执行系统。
+这是一个并发安全研究黑板控制平面。V3 将 Method Pack、PlanBatch 假设组合、同一 Run 多波执行、反事实、长期 Lesson 记忆、确定性 Guardian 与人工裁决组成一个可恢复的工程化系统。所有真实模型 Worker 必须经过内置 `agent-compose` 运行时。
 
 ## 核心约束
 
@@ -13,7 +13,9 @@
 - 项目所有测试目标按所有者声明统一视为已授权，代码中固定为 `authorization=authorized` 和 `scope=["*"]`。
 - 每完成一个子任务，或同一节拍达到 15 分钟，立即进入 `awaiting_approval`。
 - 待批准时，继续计时和 Worker 写回都会被代码拒绝。
-- 高危或严重 Intent 必须等待用户确认。
+- 漏洞假设的潜在危害与验证动作的操作风险分开裁决；只有高/严重操作风险才触发人工门禁。
+- Web 与客户端 Method Pack 各自提供十维攻击面、动态检查清单和初始假设组合。Reason/Metacog 以 PlanBatch 一次提交多条正交假设，由确定性评分选择。
+- Reason 产生的新方向会在同一 Run 下一波立即交给 Executor，不再等下次人工启动。
 - 模型只能提出漏洞候选，不能决定漏洞成立。Guardian 只降不升：必须同时满足安全边界突破（因子 A）与可复核证据（因子 B），才能进入“系统漏洞池”。
 - 进入系统漏洞池后仍须人工认可、调级、驳斥、降级或要求复测；人工驳斥不会篡改系统原判，而是形成独立的长期质量账本和反例记忆。
 - `stop_loss` 是 Run 级终结态。控制版本（fencing token）会拒绝停止前 Worker 的迟到写回，避免已止损运行被自动续期复活。
@@ -43,6 +45,11 @@ human_verdicts.jsonl
 refutation_memories.jsonl
 waf_assessments.jsonl
 waf_events.jsonl
+hypotheses.jsonl
+plan_batches.jsonl
+counterfactuals.jsonl
+lessons.jsonl
+phase_events.jsonl
 decision_log.jsonl
 state.json
 ```
@@ -67,6 +74,7 @@ Executor 原始证据
 ```bash
 git clone https://github.com/feifei-gongzhu/AgentCP.git
 cd AgentCP
+cd third_party/agent-compose && task build && cd ../..
 python3 agentcp serve --host 127.0.0.1 --port 8765
 ```
 
@@ -77,6 +85,8 @@ python3 agentcp serve --host 127.0.0.1 --port 8765
 3. 点击“开始审计”，系统保存未提交配置、启动真实模型团队，然后进入“执行与结果”查看队列、事件、证据和发现。
 
 授权字段会自动固定为 `authorized / *`。
+
+`third_party/agent-compose` 保留上游 AGPL-3.0 许可证和原始来源。`build/` 与 `.cache/` 是本地产物，不会提交到 Git。生产 Worker 若找不到 `third_party/agent-compose/build/agent-compose` 会直接拒绝运行，不会退回旧的直连 CLI 路径。
 
 也可以继续使用 CLI：
 

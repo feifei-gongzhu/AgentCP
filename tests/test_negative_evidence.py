@@ -4,6 +4,7 @@ import pytest
 
 from src.agent_control_plane import store as store_module
 from src.agent_control_plane.store import ProjectStore
+from src.agent_control_plane.memory import relevant_lessons
 from src.agent_control_plane.worker import apply_worker_output
 from src.agent_control_plane.waf import WAFManager
 
@@ -36,6 +37,10 @@ def test_waf_block_creates_bounded_adaptive_branch(
     assert branches[0]["status"] == "suspected"
     assert branches[0]["budget_minutes"] == 12
     assert branches[0]["source_negative_evidence_id"] == negatives[0]["id"]
+    lessons = store.read_jsonl("lessons.jsonl")
+    assert len(lessons) == 1
+    assert lessons[0]["source_id"] == negatives[0]["id"]
+    assert relevant_lessons(store, {"target": "api.example.com/orders"})[0]["id"] == lessons[0]["id"]
 
 
 def test_waf_branch_budget_is_event_sourced_and_exhausted(

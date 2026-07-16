@@ -1,0 +1,299 @@
+name: Images & Release
+
+on:
+  pull_request:
+    paths:
+      - .github/workflows/images.yml
+      - Dockerfile
+      - cmd/**
+      - deploy/**
+      - docker-compose.yml
+      - docker-compose.kvm.yml
+      - docker-compose.override.yml
+      - .env.example
+      - guest-images/**
+      - go.mod
+      - go.sum
+      - pkg/**
+      - proto/**
+      - runtime/**
+      - scripts/**
+  push:
+    branches:
+      - main
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+# Cancel superseded pull-request runs only. Pushes to main and tags publish
+# images, so they must never be cancelled mid-flight (cancel-in-progress false).
+concurrency:
+  group: images-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_PREFIX: ghcr.io/${{ github.repository_owner }}
+  REGISTRY_MIRROR: docker.io
+  GOPROXY: https://goproxy.cn,direct
+
+jobs:
+  # Emit the build matrix as JSON: amd64 only on pull requests (fast Dockerfile
+  # validation), the full amd64 + arm64 set on pushes to main and tags where the
+  # multi-arch manifest is published. Done in a job rather than a job-level `if`
+  # because that `if` cannot read the matrix context, so the arm64 legs would
+  # otherwise still be created (and only skipped) on PRs.
+  setup:
+    name: Configure build matrix
+    runs-on: ubuntu-latest
+    outputs:
+      platforms: ${{ steps.platforms.outputs.json }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate image CI contract
+        run: ./scripts/test-image-ci-contract.sh
+      - id: platforms
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          amd64='{"tag":"linux/amd64","arch":"amd64","runner":"ubuntu-latest"}'
+          arm64='{"tag":"linux/arm64","arch":"arm64","runner":"ubuntu-24.04-arm"}'
+          if [ "$EVENT_NAME" = "pull_request" ]; then
+            echo "json=[$amd64]" >> "$GITHUB_OUTPUT"
+          else
+            echo "json=[$amd64,$arm64]" >> "$GITHUB_OUTPUT"
+          fi
+
+  # Build each image for a single architecture on a native runner, then push by
+  # digest. Native arm64 runners avoid slow QEMU emulation of the Rust-based
+  # microsandbox build stage. The manifest list is assembled in the merge job.
+  build:
+    name: Build ${{ matrix.name }} (${{ matrix.platform.tag }})
+    needs: setup
+    runs-on: ${{ matrix.platform.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        name: [agent-compose, agent-compose-guest]
+        platform: ${{ fromJSON(needs.setup.outputs.platforms) }}
+        include:
+          - name: agent-compose
+            image: agent-compose
+            dockerfile: Dockerfile
+            context: .
+          - name: agent-compose-guest
+            image: agent-compose-guest
+            dockerfile: guest-images/Dockerfile.agent-compose-guest
+            context: .
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: docker/setup-buildx-action@v3
+      - name: Docker metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE_PREFIX }}/${{ matrix.image }}
+      - name: Login to GHCR
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build image
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ matrix.context }}
+          file: ${{ matrix.dockerfile }}
+          platforms: ${{ matrix.platform.tag }}
+          labels: ${{ steps.meta.outputs.labels }}
+          outputs: type=image,name=${{ env.IMAGE_PREFIX }}/${{ matrix.image }},push-by-digest=true,name-canonical=true,push=${{ github.event_name != 'pull_request' }}
+          build-args: |
+            VERSION=${{ github.ref_name }}
+            REGISTRY_MIRROR=${{ env.REGISTRY_MIRROR }}
+            GOPROXY=${{ env.GOPROXY }}
+          cache-from: type=gha,scope=${{ matrix.name }}-${{ matrix.platform.arch }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.name }}-${{ matrix.platform.arch }}
+      - name: Verify published daemon image digest
+        if: matrix.name == 'agent-compose' && github.event_name != 'pull_request'
+        env:
+          IMAGE_REF: ${{ env.IMAGE_PREFIX }}/${{ matrix.image }}@${{ steps.build.outputs.digest }}
+          TARGET_ARCH: ${{ matrix.platform.arch }}
+        run: |
+          docker pull "$IMAGE_REF"
+          ./scripts/verify-agent-compose-image.sh \
+            --image "$IMAGE_REF" \
+            --arch "$TARGET_ARCH"
+      - name: Export digest
+        if: github.event_name != 'pull_request'
+        run: |
+          mkdir -p "${{ runner.temp }}/digests"
+          digest="${{ steps.build.outputs.digest }}"
+          touch "${{ runner.temp }}/digests/${digest#sha256:}"
+      - name: Upload digest
+        if: github.event_name != 'pull_request'
+        uses: actions/upload-artifact@v4
+        with:
+          name: digests-${{ matrix.image }}--${{ matrix.platform.arch }}
+          path: ${{ runner.temp }}/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  # Build loadable amd64 images independently from the push-by-digest matrix.
+  # The smoke proves the published Dockerfile starts without KVM and completes
+  # a real Docker-driver sandbox lifecycle through the public API.
+  image-smoke:
+    name: Full image Docker smoke (linux/amd64)
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - uses: docker/setup-buildx-action@v3
+      - name: Build loadable guest image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: guest-images/Dockerfile.agent-compose-guest
+          platforms: linux/amd64
+          load: true
+          tags: agent-compose-guest:image-smoke
+          build-args: |
+            REGISTRY_MIRROR=${{ env.REGISTRY_MIRROR }}
+            GOPROXY=${{ env.GOPROXY }}
+          cache-from: type=gha,scope=agent-compose-guest-amd64
+          cache-to: type=gha,mode=max,scope=agent-compose-guest-amd64
+      - name: Build loadable full daemon image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile
+          platforms: linux/amd64
+          load: true
+          tags: agent-compose:image-smoke
+          build-args: |
+            VERSION=ci-${{ github.sha }}
+            REGISTRY_MIRROR=${{ env.REGISTRY_MIRROR }}
+            GOPROXY=${{ env.GOPROXY }}
+          cache-from: type=gha,scope=agent-compose-amd64
+          cache-to: type=gha,mode=max,scope=agent-compose-amd64
+      - name: Verify full daemon image
+        run: |
+          ./scripts/verify-agent-compose-image.sh \
+            --image agent-compose:image-smoke \
+            --arch amd64
+      - name: Run no-KVM Docker lifecycle smoke
+        env:
+          AGENT_COMPOSE_E2E_DAEMON_IMAGE: agent-compose:image-smoke
+          AGENT_COMPOSE_E2E_GUEST_IMAGE: agent-compose-guest:image-smoke
+          AGENT_COMPOSE_E2E_DOCKER_SOCKET: /var/run/docker.sock
+          GOCACHE: ${{ github.workspace }}/.cache/go-build
+        run: ./scripts/test-image-docker-e2e.sh
+
+  # Combine the per-arch digests into a single multi-arch manifest per image.
+  merge:
+    name: Merge ${{ matrix.image }} manifest
+    if: github.event_name != 'pull_request'
+    needs:
+      - build
+      - image-smoke
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        image: [agent-compose, agent-compose-guest]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download digests
+        uses: actions/download-artifact@v4
+        with:
+          path: ${{ runner.temp }}/digests
+          pattern: digests-${{ matrix.image }}--*
+          merge-multiple: true
+      - uses: docker/setup-buildx-action@v3
+      - name: Docker metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE_PREFIX }}/${{ matrix.image }}
+          tags: |
+            type=ref,event=branch
+            type=ref,event=tag
+            type=sha,prefix=sha-
+            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Create manifest list and push
+        working-directory: ${{ runner.temp }}/digests
+        run: |
+          set -euo pipefail
+          image="${{ env.IMAGE_PREFIX }}/${{ matrix.image }}"
+          digests=(*)
+          if [[ "${digests[0]}" == "*" ]]; then
+            echo "No digest artifacts were downloaded for ${image}" >&2
+            exit 1
+          fi
+
+          refs=()
+          for digest in "${digests[@]}"; do
+            refs+=("${image}@sha256:${digest}")
+          done
+
+          docker buildx imagetools create \
+            $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON") \
+            "${refs[@]}"
+      - name: Verify multi-arch image
+        run: |
+          ./scripts/verify-image-manifest.sh \
+            --image ${{ env.IMAGE_PREFIX }}/${{ matrix.image }}:${{ steps.meta.outputs.version }} \
+            --platforms linux/amd64,linux/arm64
+
+  # Publish the installer assets. The stack pulls its multi-arch images from the
+  # registry at install time, so no per-arch binary artifacts are shipped here.
+  release:
+    name: Publish GitHub release
+    if: github.ref_type == 'tag'
+    needs:
+      - merge
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: write
+      pull-requests: read
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build installer assets
+        env:
+          VERSION: ${{ github.ref_name }}
+        run: ./scripts/build-installer-assets.sh ./upload
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if gh release view "${GITHUB_REF_NAME}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+            gh release upload "${GITHUB_REF_NAME}" upload/* \
+              --repo "${GITHUB_REPOSITORY}" \
+              --clobber
+          else
+            gh release create "${GITHUB_REF_NAME}" upload/* \
+              --repo "${GITHUB_REPOSITORY}" \
+              --title "agent-compose ${GITHUB_REF_NAME}" \
+              --generate-notes
+          fi

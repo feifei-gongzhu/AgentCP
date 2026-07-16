@@ -1,0 +1,16 @@
+.git
+.venv
+.vscode
+.cache
+data
+build/*
+vendor
+node_modules
+**/node_modules
+runtime/javascript/node_modules
+runtime/agent-compose-runtime-sdk/node_modules
+.pnpm-store
+!assets/
+!guest-images/
+!guest-images/**
+tmp

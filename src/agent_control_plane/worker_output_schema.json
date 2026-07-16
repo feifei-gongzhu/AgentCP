@@ -4,7 +4,7 @@
   "properties": {
     "kind": {
       "type": "string",
-      "enum": ["fact", "intent", "decision", "negative_evidence", "none"]
+      "enum": ["fact", "intent", "plan_batch", "decision", "negative_evidence", "none"]
     },
     "title": { "type": "string" },
     "category": { "type": "string" },
@@ -18,6 +18,8 @@
     "reproduction_steps": { "type": "array", "items": { "type": "string" } },
     "evidence_path": { "type": "string" },
     "proposed_by": { "type": "string" },
+    "hypothesis_id": { "type": ["string", "null"] },
+    "intent_id": { "type": ["string", "null"] },
     "evidence_metrics": {
       "type": "object",
       "additionalProperties": false,
@@ -59,11 +61,71 @@
     "scope_check": { "type": "string" },
     "scope_refs": { "type": "array", "items": { "type": "string" } },
     "expected_business_impact": { "type": "string" },
+    "potential_impact": { "type": "number", "minimum": 0, "maximum": 1 },
+    "boundary_reachability": { "type": "number", "minimum": 0, "maximum": 1 },
+    "information_gain": { "type": "number", "minimum": 0, "maximum": 1 },
+    "novelty": { "type": "number", "minimum": 0, "maximum": 1 },
+    "prerequisite_readiness": { "type": "number", "minimum": 0, "maximum": 1 },
+    "estimated_cost": { "type": "number", "minimum": 0, "maximum": 1 },
+    "action_safety_risk": { "type": "string", "enum": ["low", "medium", "high", "critical"] },
+    "evidence_maturity": { "type": "string", "enum": ["hypothesis", "observed", "reproducible", "boundary_proven"] },
+    "priority_score": { "type": "number", "minimum": 0, "maximum": 1 },
     "risk_level": { "type": "string", "enum": ["low", "medium", "high", "critical"] },
     "requires_human_confirmation": { "type": "boolean" },
     "parent_id": { "type": ["string", "null"] },
     "chain_id": { "type": ["string", "null"] },
     "sequence": { "type": "integer", "minimum": 0 },
+    "strategy_summary": { "type": "string" },
+    "counterfactual": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "claim": { "type": "string" },
+        "falsification_criteria": { "type": "string" },
+        "target": { "type": "string" },
+        "source": { "type": "string" }
+      },
+      "required": ["claim", "falsification_criteria"]
+    },
+    "wave": { "type": "integer", "minimum": 0 },
+    "run_id": { "type": ["string", "null"] },
+    "hypotheses": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 12,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "title": { "type": "string" },
+          "statement": { "type": "string" },
+          "target": { "type": "string" },
+          "dimension": { "type": "string" },
+          "expected_business_impact": { "type": "string" },
+          "potential_impact": { "type": "number", "minimum": 0, "maximum": 1 },
+          "boundary_reachability": { "type": "number", "minimum": 0, "maximum": 1 },
+          "information_gain": { "type": "number", "minimum": 0, "maximum": 1 },
+          "novelty": { "type": "number", "minimum": 0, "maximum": 1 },
+          "prerequisite_readiness": { "type": "number", "minimum": 0, "maximum": 1 },
+          "estimated_cost": { "type": "number", "minimum": 0, "maximum": 1 },
+          "action_safety_risk": { "type": "string", "enum": ["low", "medium", "high", "critical"] },
+          "evidence_maturity": { "type": "string", "enum": ["hypothesis", "observed", "reproducible", "boundary_proven"] },
+          "parent_fact_ids": { "type": "array", "items": { "type": "string" } },
+          "validation_plan": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "verb": { "type": "string" },
+              "evidence_sink": { "type": "string" },
+              "success_criteria": { "type": "string" },
+              "method": { "type": "string" }
+            },
+            "required": ["verb", "evidence_sink", "success_criteria"]
+          }
+        },
+        "required": ["title", "statement", "target", "dimension", "validation_plan", "potential_impact", "boundary_reachability", "information_gain", "novelty", "prerequisite_readiness", "estimated_cost", "action_safety_risk"]
+      }
+    },
     "action": {
       "type": "string",
       "enum": ["continue", "stop_loss", "switch_target", "switch_phase", "request_confirmation"]
