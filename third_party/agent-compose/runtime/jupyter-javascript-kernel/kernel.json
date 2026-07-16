@@ -1,0 +1,5 @@
+{
+  "argv": ["node", "/opt/agent-compose/npm/node_modules/ijavascript/lib/kernel.js", "--hide-undefined", "--protocol=5.1", "{connection_file}"],
+  "display_name": "JavaScript (Node.js)",
+  "language": "javascript"
+}

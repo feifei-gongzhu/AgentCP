@@ -262,6 +262,8 @@ class QualityLedger:
         elif verdict.action in FALSE_POSITIVE_ACTIONS:
             state.human_refuted_count += 1
         store.save_state(state)
+        from .phase import reconcile_phase
+        reconcile_phase(store, f"human_verdict:{verdict.action}")
 
     @staticmethod
     def _principle(verdict: HumanVerdict) -> str:

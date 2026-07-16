@@ -144,6 +144,10 @@ class ProjectStore:
             "decision_log.jsonl",
             "lessons.jsonl",
             "team_runs.jsonl",
+            "hypotheses.jsonl",
+            "plan_batches.jsonl",
+            "counterfactuals.jsonl",
+            "phase_events.jsonl",
         ):
             (self.path / name).touch(exist_ok=True)
 

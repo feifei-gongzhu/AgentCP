@@ -1,0 +1,61 @@
+{
+  "name": "@chaitin-ai/agent-compose-runtime-sdk",
+  "version": "0.6.0",
+  "description": "Node.js SDK for scripts running inside an agent-compose guest runtime.",
+  "license": "LGPL-3.0-only",
+  "type": "module",
+  "main": "./dist/cjs/index.cjs",
+  "module": "./dist/esm/index.js",
+  "types": "./dist/types/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/types/index.d.ts",
+      "import": "./dist/esm/index.js",
+      "require": "./dist/cjs/index.cjs"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/chaitin/agent-compose.git",
+    "directory": "runtime/agent-compose-runtime-sdk"
+  },
+  "homepage": "https://github.com/chaitin/agent-compose#readme",
+  "bugs": {
+    "url": "https://github.com/chaitin/agent-compose/issues"
+  },
+  "keywords": [
+    "agent-compose",
+    "runtime",
+    "sdk"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
+  },
+  "scripts": {
+    "build": "node scripts/clean-dist.mjs && npm run build:esm && npm run build:cjs && npm run build:types && node scripts/rename-cjs.mjs",
+    "build:esm": "tsc -p tsconfig.esm.json",
+    "build:cjs": "tsc -p tsconfig.cjs.json",
+    "build:types": "tsc -p tsconfig.types.json",
+    "prepack": "npm run build",
+    "test": "npm run build && vitest run",
+    "pack:runtime-bundle": "node scripts/pack-runtime-bundle.mjs",
+    "test:packaging": "node scripts/verify-offline-install.mjs",
+    "typecheck": "tsc -p tsconfig.esm.json --noEmit"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "typescript": "^5.9.3",
+    "vitest": "^4.0.0"
+  },
+  "dependencies": {
+    "zod": "^4.4.3"
+  }
+}

@@ -14,6 +14,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
+from .agent_compose import AgentComposeError, AgentComposeRuntime, profile_from_driver_config
 from .store import ROOT
 
 
@@ -587,6 +588,21 @@ class MockDriver(BaseDriver):
         return {"kind": "none", "reason": "mock driver 未配置 payload"}
 
 
+class AgentComposeDriver(BaseDriver):
+    """Mandatory V3 runtime for every real model-backed worker."""
+
+    def run(self, prompt: str) -> dict[str, Any]:
+        try:
+            return AgentComposeRuntime(
+                profile_from_driver_config(self.config),
+                timeout=self.timeout,
+                cancel_check=self.cancel_check,
+                progress_callback=self.progress_callback,
+            ).run(prompt)
+        except AgentComposeError as exc:
+            raise DriverError(str(exc)) from exc
+
+
 DRIVERS = {
     "codex": CodexCliDriver,
     "claude-cli": ClaudeCliDriver,
@@ -604,8 +620,13 @@ def run_driver(
     cancel_check: Callable[[], bool] | None = None,
     progress_callback: ProgressCallback | None = None,
 ) -> dict[str, Any]:
-    driver_cls = DRIVERS.get(config.type)
-    if not driver_cls:
+    if config.type == "mock":
+        driver_cls = MockDriver
+    elif config.type in DRIVERS or config.type in {"claude", "gemini", "opencode"}:
+        # AgentCP owns methodology and scheduling. agent-compose exclusively
+        # owns process isolation, provider execution, sessions and cancellation.
+        driver_cls = AgentComposeDriver
+    else:
         raise DriverError(f"未知模型后端: {config.type}")
     return driver_cls(
         config,

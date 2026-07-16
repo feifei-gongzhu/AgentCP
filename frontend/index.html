@@ -11,7 +11,7 @@
 <body>
   <div class="shell">
     <aside class="sidebar">
-      <div class="brand"><span class="brand-mark">A</span><div><strong>AgentCP</strong><small>BLACKBOARD V2.0</small></div></div>
+      <div class="brand"><span class="brand-mark">A</span><div><strong>AgentCP</strong><small>RESEARCH ENGINE V3.0</small></div></div>
       <nav aria-label="控制台导航">
         <a class="nav-item active" data-route-link="hub" href="#hub"><span>01</span>任务中心</a>
         <a class="nav-item" data-route-link="config" href="#config"><span>02</span>项目配置</a>
@@ -165,6 +165,16 @@
       </section>
 
       <section id="intelligence" data-view="run" class="content-grid" hidden>
+        <article class="panel span-3">
+          <div class="panel-head"><div><p class="section-label">V3 RESEARCH PORTFOLIO</p><h2>研究假设组合</h2></div><span id="hypothesesCount">0 个假设</span></div>
+          <p id="methodPackSummary" class="subtle">尚未加载项目方法包。每个假设都会经过价值、可达性、信息增益、新颖度、前置成熟度和成本评分。</p>
+          <div class="table-wrap"><table><thead><tr><th>假设</th><th>目标</th><th>攻击面维度</th><th>优先分</th><th>证据成熟度</th><th>状态</th><th>来源</th></tr></thead><tbody id="hypothesesBody"></tbody></table></div>
+        </article>
+        <article class="panel span-3">
+          <div class="panel-head"><div><p class="section-label">COUNTERFACTUAL · LESSON MEMORY</p><h2>反事实与经验记忆</h2></div><span id="researchMemoryCount">0 条</span></div>
+          <p class="subtle">反事实用来推翻当前主线；经验记忆来自已证伪或受阻路径，在有效期内阻止 Agent 原样重试。</p>
+          <div class="table-wrap"><table><thead><tr><th>类型</th><th>目标</th><th>可检验命题 / 经验</th><th>推翻标准 / 失效条件</th><th>状态</th></tr></thead><tbody id="researchMemoryBody"></tbody></table></div>
+        </article>
         <article class="panel">
           <div class="panel-head"><div><p class="section-label">攻击面</p><h2>十维覆盖</h2></div><strong id="verifiedCoverage">0 已验证</strong></div>
           <div id="coverageList" class="coverage-list"></div>
@@ -213,7 +223,7 @@
         <article class="panel span-3">
           <div class="panel-head"><div><p class="section-label">INTENTS</p><h2>方向池</h2></div><span id="intentsCount">0 条</span></div>
           <p class="subtle">人工删除会将方向标记为“人工否决”并停止后续调度；审计记录和删除理由仍会保留。</p>
-          <div class="table-wrap"><table><thead><tr><th>动作</th><th>目标</th><th>成功标准</th><th>风险</th><th>状态</th><th>人工操作</th></tr></thead><tbody id="intentsBody"></tbody></table></div>
+          <div class="table-wrap"><table><thead><tr><th>动作</th><th>目标</th><th>成功标准</th><th>潜在危害 / 操作风险</th><th>状态</th><th>人工操作</th></tr></thead><tbody id="intentsBody"></tbody></table></div>
         </article>
         <article class="panel span-3">
           <div class="panel-head"><div><p class="section-label">EVIDENCE CHAIN</p><h2>证据索引</h2></div><span id="evidenceCount">0 份</span></div>

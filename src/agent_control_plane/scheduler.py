@@ -48,11 +48,11 @@ class Scheduler:
         )
 
     def complete_subtask(self, summary: str) -> str:
-        """完成任何子任务都立即触发 V2.0 强制节拍。"""
+        """完成任何子任务都立即触发 V3.0 强制节拍。"""
         state = self.store.load_state()
         previous_reason = state.gate_reason if state.gate_status == GateStatus.AWAITING_APPROVAL.value else None
         state.gate_status = GateStatus.AWAITING_APPROVAL.value
-        completion_reason = f"子任务已完成：{summary}。按 V2.0 要求暂停并等待用户批准。"
+        completion_reason = f"子任务已完成：{summary}。按 V3.0 要求暂停并等待用户批准。"
         state.gate_reason = f"{previous_reason} | {completion_reason}" if previous_reason else completion_reason
         state.current_decision = ControllerAction.REQUEST_CONFIRMATION.value
         decision = Decision(action=state.current_decision, reason=state.gate_reason, phase=state.phase)
