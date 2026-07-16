@@ -153,6 +153,8 @@ class Fact:
     reproduction_steps: list[str] = field(default_factory=list)
     evidence_path: str = ""
     proposed_by: str = "worker"
+    hypothesis_id: str | None = None
+    intent_id: str | None = None
     id: str = field(default_factory=lambda: new_id("F"))
     created_at: str = field(default_factory=now_iso)
     quality_notes: list[str] = field(default_factory=list)
@@ -277,6 +279,16 @@ class Intent:
     scope_check: str = ""
     scope_refs: list[str] = field(default_factory=list)
     expected_business_impact: str = ""
+    hypothesis_id: str | None = None
+    potential_impact: float = 0.0
+    boundary_reachability: float = 0.0
+    information_gain: float = 0.0
+    novelty: float = 0.0
+    prerequisite_readiness: float = 0.0
+    estimated_cost: float = 0.5
+    action_safety_risk: str = "low"
+    evidence_maturity: str = "hypothesis"
+    priority_score: float = 0.0
     risk_level: str = "low"
     requires_human_confirmation: bool = False
     proposed_by: str = "worker"
@@ -287,6 +299,47 @@ class Intent:
     sequence: int = 0
     status: str = "open"
     id: str = field(default_factory=lambda: new_id("I"))
+    created_at: str = field(default_factory=now_iso)
+
+
+@dataclass
+class AttackHypothesis:
+    title: str
+    statement: str
+    target: str
+    dimension: str
+    validation_plan: dict[str, Any]
+    expected_business_impact: str = ""
+    potential_impact: float = 0.5
+    boundary_reachability: float = 0.5
+    information_gain: float = 0.5
+    novelty: float = 0.5
+    prerequisite_readiness: float = 0.5
+    estimated_cost: float = 0.5
+    action_safety_risk: str = "low"
+    evidence_maturity: str = "hypothesis"
+    score: float = 0.0
+    status: str = "proposed"
+    source: str = "method_pack"
+    run_id: str | None = None
+    wave: int = 0
+    parent_fact_ids: list[str] = field(default_factory=list)
+    intent_ids: list[str] = field(default_factory=list)
+    evidence_ids: list[str] = field(default_factory=list)
+    id: str = field(default_factory=lambda: new_id("AH"))
+    created_at: str = field(default_factory=now_iso)
+
+
+@dataclass
+class PlanBatch:
+    hypotheses: list[dict[str, Any]]
+    selected_hypothesis_ids: list[str] = field(default_factory=list)
+    strategy_summary: str = ""
+    counterfactual: dict[str, Any] = field(default_factory=dict)
+    proposed_by: str = "worker"
+    run_id: str | None = None
+    wave: int = 0
+    id: str = field(default_factory=lambda: new_id("PB"))
     created_at: str = field(default_factory=now_iso)
 
 
@@ -308,6 +361,14 @@ class Decision:
 class Lesson:
     pattern: str
     expiry_conditions: list[str]
+    target: str = ""
+    hypothesis: str = ""
+    method: str = ""
+    outcome: str = ""
+    evidence_paths: list[str] = field(default_factory=list)
+    source_id: str | None = None
+    valid_until: str | None = None
+    confidence: float = 0.7
     id: str = field(default_factory=lambda: new_id("L"))
     created_at: str = field(default_factory=now_iso)
 

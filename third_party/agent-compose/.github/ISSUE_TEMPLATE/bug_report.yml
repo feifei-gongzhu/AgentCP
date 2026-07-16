@@ -1,0 +1,59 @@
+name: Bug report
+description: Report a reproducible problem in agent-compose.
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Please do not include secrets, tokens, private repository URLs, or sensitive logs.
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: What happened?
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: Provide the smallest reproduction you can.
+      placeholder: |
+        1. Start daemon with ...
+        2. Run ...
+        3. Observe ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Version or commit
+      placeholder: agent-compose version or git commit
+  - type: dropdown
+    id: runtime
+    attributes:
+      label: Runtime driver
+      options:
+        - boxlite
+        - docker
+        - microsandbox
+        - not runtime-related
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: Paste relevant logs with secrets redacted.
+      render: text

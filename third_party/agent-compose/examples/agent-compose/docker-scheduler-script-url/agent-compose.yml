@@ -1,0 +1,12 @@
+name: docker-scheduler-script-url
+
+agents:
+  reviewer:
+    provider: codex
+    image: agent-compose-guest:latest
+    driver:
+      docker: {}
+    scheduler:
+      enabled: true
+      script:
+        url: ./scheduler.js

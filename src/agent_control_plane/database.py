@@ -10,7 +10,7 @@ from typing import Any, Iterator
 from uuid import uuid4
 
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 
 def _now() -> str:
@@ -63,6 +63,9 @@ class ControlDatabase:
                     low_value_streak INTEGER NOT NULL DEFAULT 0,
                     no_direction_streak INTEGER NOT NULL DEFAULT 0,
                     control_version INTEGER NOT NULL DEFAULT 1,
+                    wave INTEGER NOT NULL DEFAULT 1,
+                    max_waves INTEGER NOT NULL DEFAULT 4,
+                    execution_deadline TEXT,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL,
                     error TEXT
@@ -85,6 +88,7 @@ class ControlDatabase:
                     committed_at TEXT,
                     commit_error TEXT,
                     control_version INTEGER NOT NULL DEFAULT 1,
+                    wave INTEGER NOT NULL DEFAULT 1,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
                 );
@@ -119,7 +123,11 @@ class ControlDatabase:
             elif int(row["version"]) > SCHEMA_VERSION:
                 raise RuntimeError(f"不支持的数据库版本: {row['version']}")
             self._ensure_column(db, "automation_runs", "control_version", "INTEGER NOT NULL DEFAULT 1")
+            self._ensure_column(db, "automation_runs", "wave", "INTEGER NOT NULL DEFAULT 1")
+            self._ensure_column(db, "automation_runs", "max_waves", "INTEGER NOT NULL DEFAULT 4")
+            self._ensure_column(db, "automation_runs", "execution_deadline", "TEXT")
             self._ensure_column(db, "jobs", "control_version", "INTEGER NOT NULL DEFAULT 1")
+            self._ensure_column(db, "jobs", "wave", "INTEGER NOT NULL DEFAULT 1")
             self._ensure_column(db, "directions", "terminal_reason", "TEXT")
             db.execute("UPDATE schema_meta SET version=?", (SCHEMA_VERSION,))
 
@@ -134,7 +142,16 @@ class ControlDatabase:
         if column not in names:
             db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {declaration}")
 
-    def create_run(self, project: str, team: str, timeout_seconds: int, max_workers: int) -> str:
+    def create_run(
+        self,
+        project: str,
+        team: str,
+        timeout_seconds: int,
+        max_workers: int,
+        *,
+        execution_lease_seconds: int = 900,
+        max_waves: int = 4,
+    ) -> str:
         run_id = f"R-{uuid4().hex[:12]}"
         now = _now()
         with self.connect() as db:
@@ -156,10 +173,15 @@ class ControlDatabase:
                 INSERT INTO automation_runs(
                     id,project,team,status,stage,timeout_seconds,max_workers,
                     completed_task_count,low_value_streak,no_direction_streak,control_version,
+                    wave,max_waves,execution_deadline,
                     created_at,updated_at,error
-                ) VALUES (?, ?, ?, 'running', 'swarm', ?, ?, ?, ?, ?, ?, ?, ?, NULL)
+                ) VALUES (?, ?, ?, 'running', 'swarm', ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, NULL)
                 """,
-                (run_id, project, team, timeout_seconds, max_workers, *counters, control_version, now, now),
+                (
+                    run_id, project, team, timeout_seconds, max_workers,
+                    *counters, control_version, max(1, max_waves),
+                    _lease_deadline(max(60, execution_lease_seconds)), now, now,
+                ),
             )
             self._event(db, run_id, None, "run_created", {"team": team})
         return run_id
@@ -172,12 +194,13 @@ class ControlDatabase:
         role: str,
         payload: dict[str, Any],
         max_attempts: int = 3,
+        wave: int | None = None,
     ) -> str:
         job_id = f"J-{uuid4().hex[:12]}"
         now = _now()
         with self.connect() as db:
             run = db.execute(
-                "SELECT status,control_version FROM automation_runs WHERE id=?",
+                "SELECT status,control_version,wave FROM automation_runs WHERE id=?",
                 (run_id,),
             ).fetchone()
             if run is None or run["status"] != "running":
@@ -186,13 +209,13 @@ class ControlDatabase:
                 """
                 INSERT INTO jobs(
                     id,run_id,stage,member_name,role,payload_json,status,attempts,max_attempts,
-                    control_version,created_at,updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, 'queued', 0, ?, ?, ?, ?)
+                    control_version,wave,created_at,updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, 'queued', 0, ?, ?, ?, ?, ?)
                 """,
                 (
                     job_id, run_id, stage, member_name, role,
                     json.dumps(payload, ensure_ascii=False), max_attempts,
-                    int(run["control_version"]), now, now,
+                    int(run["control_version"]), int(wave or run["wave"]), now, now,
                 ),
             )
             self._event(db, run_id, job_id, "job_queued", {"stage": stage, "member": member_name})
@@ -241,6 +264,7 @@ class ControlDatabase:
                         WHEN 'low' THEN 3
                         ELSE 4
                     END,
+                    CAST(coalesce(json_extract(intent_json, '$.priority_score'), 0) AS REAL) DESC,
                     created_at,
                     id
                 LIMIT 1
@@ -411,7 +435,14 @@ class ControlDatabase:
                 "direction_id": direction_id, "status": status, "reason": reason,
             })
 
-    def claim_job(self, run_id: str, stage: str, worker_id: str, lease_seconds: int = 60) -> dict[str, Any] | None:
+    def claim_job(
+        self,
+        run_id: str,
+        stage: str,
+        worker_id: str,
+        lease_seconds: int = 60,
+        wave: int | None = None,
+    ) -> dict[str, Any] | None:
         now = _now()
         with self.connect() as db:
             db.execute("BEGIN IMMEDIATE")
@@ -422,10 +453,11 @@ class ControlDatabase:
                 WHERE jobs.run_id=? AND jobs.stage=? AND jobs.attempts < jobs.max_attempts
                   AND automation_runs.status='running'
                   AND jobs.control_version=automation_runs.control_version
+                  AND (? IS NULL OR jobs.wave=?)
                   AND (jobs.status='queued' OR (jobs.status='running' AND jobs.lease_expires_at < ?))
                 ORDER BY jobs.created_at, jobs.id LIMIT 1
                 """,
-                (run_id, stage, now),
+                (run_id, stage, wave, wave, now),
             ).fetchone()
             if row is None:
                 db.execute("COMMIT")
@@ -569,12 +601,20 @@ class ControlDatabase:
         with self.connect() as db:
             self._event(db, run_id, job_id, event_type, data)
 
-    def list_jobs(self, run_id: str, stage: str | None = None) -> list[dict[str, Any]]:
+    def list_jobs(
+        self,
+        run_id: str,
+        stage: str | None = None,
+        wave: int | None = None,
+    ) -> list[dict[str, Any]]:
         query = "SELECT * FROM jobs WHERE run_id=?"
         params: list[Any] = [run_id]
         if stage:
             query += " AND stage=?"
             params.append(stage)
+        if wave is not None:
+            query += " AND wave=?"
+            params.append(wave)
         query += " ORDER BY created_at,id"
         with self.connect() as db:
             rows = [dict(row) for row in db.execute(query, params).fetchall()]
@@ -592,6 +632,34 @@ class ControlDatabase:
             if updated.rowcount != 1:
                 return
             self._event(db, run_id, None, "run_stage_changed", {"stage": stage})
+
+    def advance_run_wave(self, run_id: str) -> int:
+        with self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            row = db.execute(
+                "SELECT status,wave,max_waves FROM automation_runs WHERE id=?", (run_id,)
+            ).fetchone()
+            if row is None or row["status"] != "running":
+                db.execute("ROLLBACK")
+                raise RuntimeError(f"运行 {run_id} 不能进入下一波")
+            next_wave = int(row["wave"]) + 1
+            if next_wave > int(row["max_waves"]):
+                db.execute("ROLLBACK")
+                raise RuntimeError(f"运行 {run_id} 已达最大波次")
+            db.execute(
+                "UPDATE automation_runs SET wave=?,stage='swarm',updated_at=? WHERE id=?",
+                (next_wave, _now(), run_id),
+            )
+            self._event(db, run_id, None, "run_wave_advanced", {"wave": next_wave})
+            db.execute("COMMIT")
+            return next_wave
+
+    def open_direction_count(self) -> int:
+        with self.connect() as db:
+            row = db.execute(
+                "SELECT COUNT(*) AS count FROM directions WHERE status IN ('open','released')"
+            ).fetchone()
+            return int(row["count"])
 
     def set_run_status(self, run_id: str, status: str, error: str | None = None) -> None:
         with self.connect() as db:

@@ -89,11 +89,15 @@ def _run_member(
     if runtime_secret:
         api_key_env = "AGENTCP_RUNTIME_API_KEY"
         member_env[api_key_env] = runtime_secret
+    # Every production backend is executed by agent-compose in V3. These
+    # identifiers are runtime routing data and never contain a provider secret.
+    extra.setdefault("project_path", str(store.path.resolve()))
+    extra.setdefault("member_name", member.name)
+    target_path = str(store.read_json("target.json").get("target_path", "")).strip()
+    if target_path:
+        extra.setdefault("target_path", target_path)
     if (member.type or member.backend) == "container":
-        extra.setdefault("project_path", str(store.path.resolve()))
-        target_path = str(store.read_json("target.json").get("target_path", "")).strip()
         if target_path:
-            extra.setdefault("target_path", target_path)
             prompt += "\n\n容器内目标源码以只读方式挂载在 /target；项目证据目录位于 /workspace/evidence。"
     payload = run_driver(DriverConfig(
         type=member.type or member.backend,

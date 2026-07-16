@@ -1,0 +1,14 @@
+name: docker-scheduler-cron
+
+agents:
+  reviewer:
+    provider: codex
+    image: agent-compose-guest:latest
+    driver:
+      docker: {}
+    scheduler:
+      enabled: true
+      triggers:
+        - name: hourly-review
+          cron: "0 * * * *"
+          prompt: "Review the current project state and summarize any important changes."

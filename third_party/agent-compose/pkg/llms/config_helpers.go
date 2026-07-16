@@ -1,0 +1,343 @@
+package llms
+
+import (
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"net/url"
+	pathpkg "path"
+	"strconv"
+	"strings"
+	"time"
+)
+
+func ScanProvider(scan func(dest ...any) error) (Provider, error) {
+	var item Provider
+	var genericResponsesTextParts, enabled int
+	var createdAt, updatedAt int64
+	if err := scan(&item.ID, &item.Name, &item.ProviderType, &item.DefaultWireAPI, &item.BaseURL, &item.APIKey, &item.AuthHeader, &item.AuthScheme, &item.HeadersJSON, &genericResponsesTextParts, &item.Weight, &enabled, &item.Scope, &createdAt, &updatedAt); err != nil {
+		return Provider{}, err
+	}
+	item.UseGenericResponsesTextParts = genericResponsesTextParts != 0
+	item.Enabled = enabled != 0
+	item.ProviderType = NormalizeProviderType(item.ProviderType)
+	item.DefaultWireAPI = NormalizeWireAPI(item.DefaultWireAPI)
+	item.CreatedAt = parseStoredTime(createdAt)
+	item.UpdatedAt = parseStoredTime(updatedAt)
+	return item, nil
+}
+
+func ScanModel(scan func(dest ...any) error) (Model, error) {
+	var item Model
+	var defaultModel, enabled int
+	var createdAt, updatedAt int64
+	if err := scan(&item.ID, &item.Name, &item.Description, &defaultModel, &enabled, &item.Scope, &createdAt, &updatedAt); err != nil {
+		return Model{}, err
+	}
+	item.DefaultModel = defaultModel != 0
+	item.Enabled = enabled != 0
+	item.CreatedAt = parseStoredTime(createdAt)
+	item.UpdatedAt = parseStoredTime(updatedAt)
+	return item, nil
+}
+
+func ScanFacadeToken(scan func(dest ...any) error) (FacadeToken, error) {
+	var item FacadeToken
+	var issuedAt, expiresAt, revokedAt int64
+	if err := scan(&item.SandboxID, &item.TokenHash, &item.TokenFingerprint, &item.Model, &item.ProviderID, &item.WireAPI, &item.Source, &item.RunID, &issuedAt, &expiresAt, &revokedAt); err != nil {
+		return FacadeToken{}, err
+	}
+	item.IssuedAt = parseStoredTime(issuedAt)
+	item.ExpiresAt = parseStoredTime(expiresAt)
+	item.RevokedAt = parseStoredTime(revokedAt)
+	return item, nil
+}
+
+func parseStoredTime(value any) time.Time {
+	switch typed := value.(type) {
+	case nil:
+		return time.Time{}
+	case int64:
+		return parseStoredUnixTimeAuto(typed)
+	case int:
+		return parseStoredUnixTimeAuto(int64(typed))
+	case float64:
+		return parseStoredUnixTimeAuto(int64(typed))
+	case []byte:
+		return parseStoredTime(string(typed))
+	case string:
+		trimmed := strings.TrimSpace(typed)
+		if trimmed == "" {
+			return time.Time{}
+		}
+		if unixValue, err := strconv.ParseInt(trimmed, 10, 64); err == nil {
+			return parseStoredUnixTimeAuto(unixValue)
+		}
+		for _, layout := range []string{time.RFC3339Nano, time.RFC3339, "2006-01-02T15:04:05.000Z"} {
+			if parsed, err := time.Parse(layout, trimmed); err == nil {
+				return parsed.UTC()
+			}
+		}
+	}
+	return time.Time{}
+}
+
+func parseStoredUnixTimeAuto(value int64) time.Time {
+	if value <= 0 {
+		return time.Time{}
+	}
+	if value >= 10_000_000_000 {
+		return time.UnixMilli(value).UTC()
+	}
+	return time.Unix(value, 0).UTC()
+}
+
+func NormalizeDefaultConfig(provider Provider, model Model) (Provider, Model, bool) {
+	provider.ID = firstNonEmpty(strings.TrimSpace(provider.ID), ProviderIDDefaultOpenAI)
+	provider.Name = firstNonEmpty(strings.TrimSpace(provider.Name), "default")
+	provider.ProviderType = NormalizeProviderType(provider.ProviderType)
+	provider.DefaultWireAPI = NormalizeWireAPI(provider.DefaultWireAPI)
+	if provider.ProviderType == ProviderFamilyAnthropic {
+		provider.BaseURL = NormalizeAnthropicAPIBaseURL(provider.BaseURL)
+	} else {
+		provider.BaseURL = NormalizeAPIBaseURL(provider.BaseURL, provider.DefaultWireAPI)
+	}
+	provider.AuthHeader = firstNonEmpty(strings.TrimSpace(provider.AuthHeader), "Authorization")
+	provider.AuthScheme = strings.TrimSpace(provider.AuthScheme)
+	if provider.AuthScheme == "" && strings.EqualFold(provider.AuthHeader, "Authorization") {
+		provider.AuthScheme = "Bearer"
+	}
+	provider.HeadersJSON = firstNonEmpty(strings.TrimSpace(provider.HeadersJSON), "{}")
+	if provider.Weight == 0 {
+		provider.Weight = 10
+	}
+	provider.Scope = firstNonEmpty(strings.TrimSpace(provider.Scope), ProviderScopeSystem)
+
+	model.ID = firstNonEmpty(strings.TrimSpace(model.ID), strings.TrimSpace(model.Name))
+	model.Name = firstNonEmpty(strings.TrimSpace(model.Name), model.ID)
+	model.Enabled = true
+	model.Scope = firstNonEmpty(strings.TrimSpace(model.Scope), ProviderScopeSystem)
+	return provider, model, model.ID != "" && model.Name != ""
+}
+
+func NormalizeWireAPI(value string) string {
+	switch strings.ReplaceAll(strings.ToLower(strings.TrimSpace(value)), "-", "_") {
+	case "", APIProtocolResponses:
+		return APIProtocolResponses
+	case "chat", "chat_completion", APIProtocolChatCompletions:
+		return APIProtocolChatCompletions
+	case "message", APIProtocolMessages:
+		return APIProtocolMessages
+	default:
+		return strings.ReplaceAll(strings.ToLower(strings.TrimSpace(value)), "-", "_")
+	}
+}
+
+func NormalizeAPIEndpoint(raw string) string {
+	return NormalizeAPIEndpointForProtocol(raw, APIProtocolResponses)
+}
+
+func NormalizeAPIEndpointForProtocol(raw, protocol string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+	parsed, err := url.Parse(raw)
+	if err != nil {
+		return raw
+	}
+	normalizedProtocol := NormalizeWireAPI(protocol)
+	if normalizedProtocol == APIProtocolChatCompletions && (strings.TrimSpace(parsed.Path) == "" || parsed.Path == "/") {
+		parsed.Path = "/v1/chat/completions"
+		return parsed.String()
+	}
+	cleanPath := strings.TrimRight(parsed.Path, "/")
+	if normalizedProtocol == APIProtocolChatCompletions && (cleanPath == "/v1" || strings.HasSuffix(cleanPath, "/openai/v1")) {
+		parsed.Path = pathpkg.Join(parsed.Path, "/chat/completions")
+		return parsed.String()
+	}
+	if normalizedProtocol == APIProtocolChatCompletions && strings.HasSuffix(cleanPath, "/openai") {
+		parsed.Path = pathpkg.Join(parsed.Path, "/v1/chat/completions")
+		return parsed.String()
+	}
+	if normalizedProtocol == APIProtocolResponses && strings.HasSuffix(cleanPath, "/openai") {
+		parsed.Path = pathpkg.Join(parsed.Path, "/v1/responses")
+		return parsed.String()
+	}
+	if normalizedProtocol == APIProtocolResponses && (cleanPath == "/v1" || strings.HasSuffix(cleanPath, "/openai/v1")) {
+		parsed.Path = pathpkg.Join(parsed.Path, "/responses")
+		return parsed.String()
+	}
+	if strings.TrimSpace(parsed.Path) == "" || parsed.Path == "/" {
+		parsed.Path = pathpkg.Join(parsed.Path, "/v1/responses")
+	}
+	return parsed.String()
+}
+
+func NormalizeProviderType(value string) string {
+	switch strings.ReplaceAll(strings.ToLower(strings.TrimSpace(value)), "-", "_") {
+	case "", "openai", "openai_compatible":
+		return ProviderFamilyOpenAI
+	case "anthropic", "claude", "anthropic_messages":
+		return ProviderFamilyAnthropic
+	default:
+		return strings.ReplaceAll(strings.ToLower(strings.TrimSpace(value)), "-", "_")
+	}
+}
+
+func NormalizeOptionalProviderType(value string) string {
+	if strings.TrimSpace(value) == "" {
+		return ""
+	}
+	return NormalizeProviderType(value)
+}
+
+func NormalizeAPIBaseURL(raw, wireAPI string) string {
+	raw = strings.TrimRight(strings.TrimSpace(raw), "/")
+	if raw == "" {
+		return ""
+	}
+	parsed, err := url.Parse(raw)
+	if err != nil {
+		return raw
+	}
+	cleanPath := strings.TrimRight(parsed.Path, "/")
+	switch {
+	case strings.HasSuffix(cleanPath, "/responses"):
+		parsed.Path = strings.TrimSuffix(cleanPath, "/responses")
+	case strings.HasSuffix(cleanPath, "/chat/completions"):
+		parsed.Path = strings.TrimSuffix(cleanPath, "/chat/completions")
+	default:
+		parsed.Path = cleanPath
+	}
+	return strings.TrimRight(parsed.String(), "/")
+}
+
+func NormalizeAnthropicAPIBaseURL(raw string) string {
+	raw = strings.TrimRight(strings.TrimSpace(raw), "/")
+	if raw == "" {
+		return ""
+	}
+	parsed, err := url.Parse(raw)
+	if err != nil {
+		return raw
+	}
+	cleanPath := strings.TrimRight(parsed.Path, "/")
+	switch {
+	case strings.HasSuffix(cleanPath, "/messages"):
+		parsed.Path = strings.TrimSuffix(cleanPath, "/messages")
+	case cleanPath == "":
+		parsed.Path = "/v1"
+	default:
+		parsed.Path = cleanPath
+	}
+	return strings.TrimRight(parsed.String(), "/")
+}
+
+func EndpointForProvider(provider Provider, wireAPI string) string {
+	if NormalizeProviderType(provider.ProviderType) == ProviderFamilyAnthropic {
+		baseURL := NormalizeAnthropicAPIBaseURL(provider.BaseURL)
+		parsed, err := url.Parse(baseURL)
+		if err != nil {
+			return strings.TrimRight(baseURL, "/") + "/messages"
+		}
+		parsed.Path = pathpkg.Join(parsed.Path, "messages")
+		return parsed.String()
+	}
+	baseURL := NormalizeAPIBaseURL(provider.BaseURL, wireAPI)
+	if !ProviderScopeIsConfigured(provider.Scope) {
+		return NormalizeAPIEndpointForProtocol(baseURL, wireAPI)
+	}
+	return AppendAPIEndpointToBaseURL(baseURL, wireAPI)
+}
+
+func ProviderScopeIsConfigured(scope string) bool {
+	switch strings.TrimSpace(scope) {
+	case ProviderScopeEnvDefault, ProviderScopeSessionEnv:
+		return false
+	default:
+		return true
+	}
+}
+
+func ProviderForwardHeaders(provider Provider) (http.Header, error) {
+	headers := http.Header{}
+	if raw := strings.TrimSpace(provider.HeadersJSON); raw != "" && raw != "{}" {
+		custom := map[string]string{}
+		if err := json.Unmarshal([]byte(raw), &custom); err != nil {
+			return nil, fmt.Errorf("decode llm provider headers: %w", err)
+		}
+		for key, value := range custom {
+			if ForbiddenProviderHeader(key, provider.AuthHeader) {
+				continue
+			}
+			headers.Set(strings.TrimSpace(key), value)
+		}
+	}
+	authHeader := firstNonEmpty(strings.TrimSpace(provider.AuthHeader), "Authorization")
+	apiKey := strings.TrimSpace(provider.APIKey)
+	if apiKey != "" {
+		if scheme := strings.TrimSpace(provider.AuthScheme); scheme != "" {
+			headers.Set(authHeader, scheme+" "+apiKey)
+		} else {
+			headers.Set(authHeader, apiKey)
+		}
+	}
+	return headers, nil
+}
+
+func ForbiddenProviderHeader(name, authHeader string) bool {
+	canonical := strings.ToLower(strings.TrimSpace(name))
+	if canonical == "" || canonical == strings.ToLower(strings.TrimSpace(authHeader)) {
+		return true
+	}
+	switch canonical {
+	case "authorization", "proxy-authorization", "host", "content-length", "content-type", "cookie", "set-cookie":
+		return true
+	default:
+		return false
+	}
+}
+
+func AppendAPIEndpointToBaseURL(baseURL, wireAPI string) string {
+	baseURL = strings.TrimRight(strings.TrimSpace(baseURL), "/")
+	if baseURL == "" {
+		return ""
+	}
+	parsed, err := url.Parse(baseURL)
+	if err != nil {
+		switch NormalizeWireAPI(wireAPI) {
+		case APIProtocolChatCompletions:
+			return baseURL + "/v1/chat/completions"
+		default:
+			return baseURL + "/v1/responses"
+		}
+	}
+	cleanPath := strings.TrimRight(parsed.Path, "/")
+	switch NormalizeWireAPI(wireAPI) {
+	case APIProtocolChatCompletions:
+		if cleanPath == "/v1" || strings.HasSuffix(cleanPath, "/v1") {
+			joinAPIBasePath(parsed, cleanPath, "chat/completions")
+		} else {
+			joinAPIBasePath(parsed, cleanPath, "v1/chat/completions")
+		}
+	default:
+		if cleanPath == "/v1" || strings.HasSuffix(cleanPath, "/v1") {
+			joinAPIBasePath(parsed, cleanPath, "responses")
+		} else {
+			joinAPIBasePath(parsed, cleanPath, "v1/responses")
+		}
+	}
+	return parsed.String()
+}
+
+func joinAPIBasePath(parsed *url.URL, basePath, suffix string) {
+	if parsed == nil {
+		return
+	}
+	joined := pathpkg.Join(basePath, suffix)
+	if parsed.Host != "" && !strings.HasPrefix(joined, "/") {
+		joined = "/" + joined
+	}
+	parsed.Path = joined
+}

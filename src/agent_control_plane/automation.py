@@ -6,6 +6,7 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
@@ -16,6 +17,7 @@ from .dashboard import render_dashboard
 from .directives import authoritative_directives, missing_directive_ids
 from .lifecycle import project_execution_lock, require_initialized_project
 from .memory import active_negative_evidence, matching_negative_evidence
+from .methodology import ensure_methodology
 from .schemas import GateStatus
 from .scheduler import Scheduler
 from .store import ProjectStore
@@ -200,7 +202,19 @@ class AutomationEngine:
         if state.current_decision == "stop_loss":
             state.current_decision = "continue"
             self.store.save_state(state)
-        run_id = self.db.create_run(self.store.vendor, team_name, timeout, max_workers)
+        methodology = ensure_methodology(self.store, self.db)
+        run_id = self.db.create_run(
+            self.store.vendor,
+            team_name,
+            timeout,
+            max_workers,
+            execution_lease_seconds=max(60, int(state.gate_interval_minutes) * 60),
+            max_waves=4,
+        )
+        self.db.add_event(run_id, None, "method_pack_loaded", {
+            "method_pack": methodology["method_pack"],
+            "seeded_hypotheses": methodology["seeded"],
+        })
         self._sync_run_state(run_id)
         self._schedule_iteration(run_id)
         return run_id
@@ -360,24 +374,31 @@ class AutomationEngine:
         )
 
     def _continue_run(self, run_id: str) -> list[str]:
-        run = self.db.get_run(run_id)
-        if not run:
-            raise WorkerError(f"运行不存在: {run_id}")
         summaries: list[str] = []
-        if run["stage"] == "swarm":
-            summaries.extend(self._execute_swarm(run))
+        while True:
             run = self.db.get_run(run_id)
-            if not run or run["status"] in {"failed", "stopping", "stopped", "cancelled"}:
+            if not run:
+                raise WorkerError(f"运行不存在: {run_id}")
+            if run["status"] in {"failed", "stopping", "stopped", "cancelled", "completed"}:
                 return summaries
-        if run["stage"] == "review":
-            summaries.extend(self._execute_stage(run, "review"))
-            if any(item["status"] == "failed" for item in self.db.list_jobs(run_id, "review")):
-                self.db.finish_run(run_id, "failed", "review_job_failed")
-                Scheduler(self.store).complete_subtask(f"自动化运行 {run_id} 审查任务失败")
+            wave = int(run.get("wave", 1))
+            if run["stage"] == "swarm":
+                summaries.extend(self._execute_swarm(run))
+                continue
+            if run["stage"] == "review":
+                summaries.extend(self._execute_stage(run, "review"))
+                if any(
+                    item["status"] == "failed"
+                    for item in self.db.list_jobs(run_id, "review", wave=wave)
+                ):
+                    self.db.finish_run(run_id, "failed", "review_job_failed")
+                    Scheduler(self.store).complete_subtask(f"自动化运行 {run_id} 审查任务失败")
+                    return summaries
+                self.db.set_run_stage(run_id, "commit")
+                continue
+            if run["stage"] != "commit":
                 return summaries
-            self.db.set_run_stage(run_id, "commit")
-            run = self.db.get_run(run_id)
-        if run and run["stage"] == "commit":
+
             summaries.extend(self._commit_candidates(run_id))
             latest_run = self.db.get_run(run_id)
             if not latest_run or latest_run["status"] in {"stopping", "stopped", "cancelled"}:
@@ -390,13 +411,21 @@ class AutomationEngine:
                 self.db.set_run_status(run_id, "paused", "candidate_commit_waiting_for_approval")
                 summaries.append(f"还有 {len(pending)} 个候选结果待门禁解除后提交")
                 return summaries
+            if self._can_advance_wave(latest_run):
+                next_wave = self.db.advance_run_wave(run_id)
+                self._schedule_iteration(run_id)
+                summaries.append(
+                    f"V3 同一 Run 继续第 {next_wave} 波："
+                    f"当前有 {self.db.open_direction_count()} 个可执行方向"
+                )
+                continue
             self._finalize_run(run_id)
             summaries.append(
                 Scheduler(self.store).complete_subtask(
-                    f"Stigmergy 迭代 {run_id} 完成，所有候选结果已收敛"
+                    f"V3 运行 {run_id} 完成 {wave} 波探索，候选结果已收敛"
                 )
             )
-        return summaries
+            return summaries
 
     def _execute_swarm(self, run: dict[str, Any]) -> list[str]:
         run_id = run["id"]
@@ -404,7 +433,8 @@ class AutomationEngine:
         latest_run = self.db.get_run(run_id)
         if not latest_run or latest_run["status"] in {"stopping", "stopped", "cancelled"}:
             return summaries
-        jobs = self.db.list_jobs(run_id, "swarm")
+        wave = int(run.get("wave", 1))
+        jobs = self.db.list_jobs(run_id, "swarm", wave=wave)
         if any(item["status"] == "failed" for item in jobs):
             # A failed sibling must not discard valid results already returned
             # by other concurrent workers. Converge those candidates first,
@@ -416,7 +446,7 @@ class AutomationEngine:
 
         candidates = [item for item in jobs if item["status"] == "completed" and item.get("result")]
         reviewer_members = [item for item in load_team(run["team"], self.store) if item.role == "reviewer"]
-        existing_review = self.db.list_jobs(run_id, "review")
+        existing_review = self.db.list_jobs(run_id, "review", wave=wave)
         if reviewer_members and not existing_review:
             context = _candidate_review_context(self.store, candidates)
             for member in reviewer_members:
@@ -428,6 +458,7 @@ class AutomationEngine:
                         job_member_name,
                         member.role,
                         {"member": asdict(member), "context_suffix": context},
+                        wave=wave,
                     )
             self.db.set_run_stage(run_id, "review")
         else:
@@ -470,7 +501,10 @@ class AutomationEngine:
             latest = self.db.get_run(run["id"])
             if not latest or latest["status"] in {"stopping", "stopped", "cancelled", "completed", "failed"}:
                 return outputs
-            job = self.db.claim_job(run["id"], stage, worker_id, lease_seconds=30)
+            job = self.db.claim_job(
+                run["id"], stage, worker_id, lease_seconds=30,
+                wave=int(run.get("wave", 1)),
+            )
             if job is None:
                 return outputs
             payload = job["payload"]
@@ -703,6 +737,14 @@ class AutomationEngine:
                 continue
             payload = dict(payload)
             payload.setdefault("proposed_by", job["member_name"])
+            if payload.get("kind") == "plan_batch":
+                payload.setdefault("run_id", run_id)
+                payload.setdefault("wave", int(job.get("wave", 1)))
+            bound_for_graph = (job.get("payload") or {}).get("direction") or {}
+            bound_intent = bound_for_graph.get("intent") or {}
+            if payload.get("kind") in {"fact", "negative_evidence"} and bound_intent:
+                payload.setdefault("hypothesis_id", bound_intent.get("hypothesis_id"))
+                payload.setdefault("intent_id", bound_for_graph.get("id") or bound_intent.get("id"))
             owner_directives = authoritative_directives(self.store, active_run_id=run_id)
             if (
                 payload.get("kind") == "decision"
@@ -761,6 +803,20 @@ class AutomationEngine:
                 if self.store.load_state().gate_status == GateStatus.AWAITING_APPROVAL.value:
                     break
         return summaries
+
+    def _can_advance_wave(self, run: dict[str, Any]) -> bool:
+        if self.store.load_state().gate_status == GateStatus.AWAITING_APPROVAL.value:
+            return False
+        if int(run.get("wave", 1)) >= int(run.get("max_waves", 4)):
+            return False
+        deadline = str(run.get("execution_deadline") or "").strip()
+        if deadline:
+            try:
+                if datetime.fromisoformat(deadline).astimezone(timezone.utc) <= datetime.now(timezone.utc):
+                    return False
+            except ValueError:
+                return False
+        return self.db.open_direction_count() > 0
 
     def _synchronize_negative_evidence(self) -> None:
         negatives = active_negative_evidence(self.store)

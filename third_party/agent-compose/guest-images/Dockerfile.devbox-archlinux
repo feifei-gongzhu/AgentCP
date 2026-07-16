@@ -1,0 +1,92 @@
+ARG REGISTRY_MIRROR=docker.io
+
+FROM ${REGISTRY_MIRROR}/library/archlinux:latest
+
+ARG GOPROXY=https://goproxy.cn
+ARG CODEX_VERSION=0.144.1
+ARG CLAUDE_CODE_VERSION=2.1.206
+ARG GEMINI_CLI_VERSION=0.50.0
+ARG OPENCODE_VERSION=1.17.18
+ARG QWEN_CODE_VERSION=0.19.8
+
+RUN ln -sfv /usr/share/zoneinfo/Asia/Shanghai /etc/localtime
+
+RUN printf 'Server = http://mirrors.tuna.tsinghua.edu.cn/archlinux/$repo/os/$arch\n' > /etc/pacman.d/mirrorlist
+RUN pacman -Syu --disable-download-timeout --noconfirm git git-lfs git-delta tig lazygit npm go rsync python python-pip less pre-commit the_silver_searcher ripgrep vim bash-completion tmux which openbsd-netcat socat podman podman-compose jq yq ed zip protobuf buf uv proxychains-ng
+
+RUN go env -w GOPROXY=${GOPROXY},direct &&\
+    env GOPATH=/usr/local/go go install github.com/go-task/task/v3/cmd/task@latest &&\
+    env GOPATH=/usr/local/go go install google.golang.org/protobuf/cmd/protoc-gen-go@latest &&\
+    env GOPATH=/usr/local/go go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@latest &&\
+    env GOPATH=/usr/local/go go install connectrpc.com/connect/cmd/protoc-gen-connect-go@latest &&\
+    env GOPATH=/usr/local/go go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@latest &&\
+    env GOPATH=/usr/local/go go install go.uber.org/nilaway/cmd/nilaway@latest &&\
+    env GOPATH=/usr/local/go go install github.com/securego/gosec/v2/cmd/gosec@latest &&\
+    env GOPATH=/usr/local/go go install golang.org/x/vuln/cmd/govulncheck@latest &&\
+    env GOPATH=/usr/local/go go install golang.org/x/tools/gopls@latest &&\
+    go clean -cache -modcache -testcache -fuzzcache
+
+# node and tools
+RUN npm config set prefix /usr/local/ &&\
+    npm config set registry https://registry.npmjs.org --global &&\
+    npm config set fund false --global &&\
+    npm config set update-notifier false --global &&\
+    npm install -g @openai/codex@${CODEX_VERSION} &&\
+    npm install -g @anthropic-ai/claude-code@${CLAUDE_CODE_VERSION} &&\
+    npm install -g @anthropic-ai/claude-code-linux-x64@${CLAUDE_CODE_VERSION} &&\
+    npm install -g @google/gemini-cli@${GEMINI_CLI_VERSION} &&\
+    npm install -g opencode-ai@${OPENCODE_VERSION} &&\
+    npm install -g @qwen-code/qwen-code@${QWEN_CODE_VERSION} &&\
+    npm install -g @bufbuild/protobuf @bufbuild/protoc-gen-es &&\
+    npm install -g typescript-language-server typescript
+
+ARG HTTP_PROXY
+ARG HTTPS_PROXY
+ARG ALL_PROXY
+ENV HTTP_PROXY=${HTTP_PROXY}
+ENV HTTPS_PROXY=${HTTPS_PROXY}
+ENV ALL_PROXY=${ALL_PROXY}
+
+ENV HOME=/root \
+    GOPATH=/usr/local/go \
+    GOPROXY=${GOPROXY},direct \
+    OPENCODE_DISABLE_AUTOUPDATE=true \
+    OPENCODE_DISABLE_MODELS_FETCH=1 \
+    PATH=/root/.local/bin:/usr/local/go/bin:/root/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+COPY ./assets/.codex/ /root/.codex/
+COPY ./assets/.claude/ /root/.claude/
+COPY ./assets/.claude.json /root/
+COPY ./assets/.gitconfig /root/
+COPY runtime/javascript /tmp/agent-compose-runtime
+
+RUN mkdir -p /usr/local/share/jupyter/kernels/javascript /root/.codex /root/.local/bin /root/.cargo/bin /usr/local/go /usr/local/go/bin /workspace /data/state /data/runtime /data/logs
+
+RUN cd /tmp/agent-compose-runtime && \
+    npm ci && \
+    RUNTIME_TARBALL="$(npm pack --silent | tail -n 1)" && \
+    npm install -g "./${RUNTIME_TARBALL}" && \
+    cd /usr/local/bin && \
+    ln -sfv ../lib/node_modules/@chaitin-ai/agent-compose-runtime/dist/cli.js agent-compose-runtime && \
+    rm -rf /tmp/agent-compose-runtime
+
+RUN PIP_DISABLE_PIP_VERSION_CHECK=1 python3 -m pip install --break-system-packages --no-cache-dir --no-input \
+    --index-url https://pypi.org/simple \
+    jupyterlab bash_kernel && \
+    python3 -m bash_kernel.install --sys-prefix
+
+COPY ./runtime/jupyter-javascript-kernel/kernel.json /usr/local/share/jupyter/kernels/javascript/kernel.json
+
+RUN cd /tmp &&\
+    curl -LO https://github.com/h4ckf0r0day/obscura/releases/latest/download/obscura-x86_64-linux.tar.gz &&\
+    tar xzf obscura-x86_64-linux.tar.gz &&\
+    mv obscura obscura-worker /usr/local/bin &&\
+    chmod +x /usr/local/bin/obscura /usr/local/bin/obscura-worker &&\
+    rm -rf obscura-x86_64-linux.tar.gz
+
+RUN printf '%s\n' \
+  '#!/usr/bin/env bash' \
+  'set -euo pipefail' \
+  'export GOPATH=${GOPATH:-/usr/local/go}' \
+  'export PATH=/root/.local/bin:/usr/local/go/bin:/root/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin' \
+  'exec "$@"' > /usr/local/bin/agent-compose-env && chmod +x /usr/local/bin/agent-compose-env

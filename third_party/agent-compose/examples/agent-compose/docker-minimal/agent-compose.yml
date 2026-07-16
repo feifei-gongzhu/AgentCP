@@ -1,0 +1,8 @@
+name: docker-minimal
+
+agents:
+  reviewer:
+    provider: codex
+    image: agent-compose-guest:latest
+    driver:
+      docker: {}

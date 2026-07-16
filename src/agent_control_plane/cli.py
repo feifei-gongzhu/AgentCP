@@ -139,7 +139,7 @@ def cmd_config_gate(args: argparse.Namespace) -> None:
     state = store.load_state()
     if args.interval is not None:
         if args.interval <= 0:
-            raise ValueError("V2.0 强制门禁不可关闭，间隔必须大于 0。")
+            raise ValueError("V3.0 强制门禁不可关闭，间隔必须大于 0。")
         state.gate_interval_minutes = args.interval
     if args.reset:
         state.last_gate_elapsed_minutes = state.elapsed_minutes

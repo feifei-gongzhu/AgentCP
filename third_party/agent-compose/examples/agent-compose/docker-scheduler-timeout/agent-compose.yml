@@ -1,0 +1,14 @@
+name: docker-scheduler-timeout
+
+agents:
+  reviewer:
+    provider: codex
+    image: agent-compose-guest:latest
+    driver:
+      docker: {}
+    scheduler:
+      enabled: true
+      triggers:
+        - name: run-once-after-15-seconds
+          timeout: 15s
+          prompt: "Reply with exactly: timeout scheduler ok"

@@ -1,0 +1,104 @@
+name: Publish runtime packages
+
+on:
+  push:
+    tags:
+      - "runtime-v*"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  verify:
+    name: Verify runtime package versions
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - id: version
+        name: Verify shared runtime version
+        run: |
+          set -euo pipefail
+          runtime_version="$(node -p "require('./runtime/javascript/package.json').version")"
+          sdk_version="$(node -p "require('./runtime/agent-compose-runtime-sdk/package.json').version")"
+          if [ "$runtime_version" != "$sdk_version" ]; then
+            echo "::error::runtime package version '$runtime_version' does not match runtime-sdk package version '$sdk_version'"
+            exit 1
+          fi
+          if [ "${GITHUB_EVENT_NAME}" = "push" ]; then
+            tag_version="${GITHUB_REF_NAME#runtime-v}"
+            if [ "$tag_version" != "$runtime_version" ]; then
+              echo "::error::tag version '$tag_version' does not match runtime package version '$runtime_version'"
+              exit 1
+            fi
+          fi
+          echo "version=${runtime_version}" >> "$GITHUB_OUTPUT"
+
+  publish-runtime:
+    name: Publish @chaitin-ai/agent-compose-runtime
+    needs: verify
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: runtime/javascript
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+          cache: npm
+          cache-dependency-path: runtime/javascript/package-lock.json
+      - run: npm ci
+      - run: npm run build
+      - run: npm run test:unit
+      - name: Check npm token
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          if [ -z "$NODE_AUTH_TOKEN" ]; then
+            echo "::error::NPM_TOKEN secret is required to publish @chaitin-ai/agent-compose-runtime"
+            exit 1
+          fi
+      - name: Publish
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: npm publish --access public --provenance
+
+  publish-runtime-sdk:
+    name: Publish @chaitin-ai/agent-compose-runtime-sdk
+    needs: [verify, publish-runtime]
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: runtime/agent-compose-runtime-sdk
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+          cache: npm
+          cache-dependency-path: runtime/agent-compose-runtime-sdk/package-lock.json
+      - run: npm ci
+      - run: npm run build
+      - run: npm test
+      - run: npm run test:packaging
+      - name: Check npm token
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          if [ -z "$NODE_AUTH_TOKEN" ]; then
+            echo "::error::NPM_TOKEN secret is required to publish @chaitin-ai/agent-compose-runtime-sdk"
+            exit 1
+          fi
+      - name: Publish
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: npm publish --access public --provenance

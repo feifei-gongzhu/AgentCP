@@ -1,0 +1,11 @@
+[sandbox_workspace_write]
+exclude_tmpdir_env_var = false
+exclude_slash_tmp = false
+network_access = true
+
+[shell_environment_policy]
+inherit = "all"
+ignore_default_excludes = false
+
+[history]
+persistence = "save-all"

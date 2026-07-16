@@ -94,6 +94,8 @@ function classificationLabel(value){
   return ({attack_surface:"攻击面",risk_lead:"线索",vulnerability:"漏洞",negative_evidence:"负向证据",inconclusive:"证据不足"})[value]||value||"攻击面";
 }
 function percent(value){return value==null?"—":`${Math.round(Number(value)*100)}%`}
+function phaseLabel(value){return ({intake:"目标接入",phase_0_5_probe:"可达性探测",recon:"攻击面侦察",hunt:"漏洞狩猎",verify:"证据验证",report:"结果报告"})[value]||value||"目标接入"}
+function hypothesisStatusLabel(value){return ({proposed:"候选",selected:"已选中",testing:"验证中",supported:"已支持",blocked:"受阻",rejected:"已证伪",completed:"已完成"})[value]||value||"候选"}
 function renderFactRow(fact,{withImpact=false,pending=false}={}){
   const row=document.createElement("tr");
   const level=pending?`${fact.severity||"unknown"} · 待审查`:(fact.severity||classificationLabel(factClassification(fact)));
@@ -281,7 +283,7 @@ function renderGateApproval(data,automation){
   state.gateContext={visible,awaiting,run,data};card.hidden=!visible;
   if(!visible)return;
   $("gateApprovalReason").textContent=data.gate_reason||run?.error||"自动化运行已暂停，必须由用户明确批准后才能继续。";
-  $("gateApprovalPhase").textContent=data.phase||"intake";
+  $("gateApprovalPhase").textContent=phaseLabel(data.phase);
   $("gateApprovalElapsed").textContent=`${data.elapsed_minutes??0} min`;
   $("gateApprovalAssets").textContent=`${data.asset_count??0} / ${data.vulnerability_count??0}`;
   $("gateApprovalHighRisk").textContent=data.high_risk_fingerprint_count??0;
@@ -296,7 +298,7 @@ function renderGateApproval(data,automation){
 function objectiveGateReason(action,context){
   const data=context.data||{};const note=$("gateApprovalNote").value.trim();
   const decision=action==="continue"?"批准继续":"批准止损结束";
-  const objective=`${decision}；阶段 ${data.phase||"intake"}，已用 ${data.elapsed_minutes??0} min，资产 ${data.asset_count??0} 个，漏洞 ${data.vulnerability_count??0} 个，敏感线索 ${data.high_risk_fingerprint_count??0} 个。`;
+  const objective=`${decision}；阶段 ${phaseLabel(data.phase)}，已用 ${data.elapsed_minutes??0} min，资产 ${data.asset_count??0} 个，漏洞 ${data.vulnerability_count??0} 个，敏感线索 ${data.high_risk_fingerprint_count??0} 个。`;
   return note?`${objective} 人工备注：${note}`:objective;
 }
 async function submitGateDecision(action){
@@ -474,7 +476,7 @@ function renderProjectCards(){
     const badge=document.createElement("span");setBadge(badge,project.gate_status||"idle");head.append(heading,badge);
     const summary=document.createElement("p");summary.className="subtle";summary.textContent=project.current_task||project.goal||"尚未定义当前审计任务";
     const meta=document.createElement("div");meta.className="project-card-meta";
-    [["阶段",project.phase||"intake"],["目标",`${project.target_count??0} 个`],["事实",`${project.fact_count??0} 条`],["漏洞",`${project.vulnerability_count??0} 个`]].forEach(([label,value])=>{
+    [["阶段",phaseLabel(project.phase)],["目标",`${project.target_count??0} 个`],["事实",`${project.fact_count??0} 条`],["漏洞",`${project.vulnerability_count??0} 个`]].forEach(([label,value])=>{
       const item=document.createElement("span");item.textContent=label;const strong=document.createElement("strong");strong.textContent=value;item.append(strong);meta.append(item);
     });
     const quality=project.quality_metrics||{};const qualityBox=document.createElement("div");qualityBox.className="project-card-quality";
@@ -495,7 +497,7 @@ function renderProject(project,metrics,automation,config,evidenceResult,auditRes
   setProjectControlsEnabled(true);
   $("currentTask").textContent=data.current_task||"尚未定义当前任务";
   $("goalText").textContent=project.target.goal||`授权模式：${project.target.authorization_mode} · scope ${JSON.stringify(project.target.scope)}`;
-  $("phaseValue").textContent=data.phase||"intake";
+  $("phaseValue").textContent=phaseLabel(data.phase);
   $("updatedValue").textContent=data.updated_at?`更新于 ${new Date(data.updated_at).toLocaleString()}`:"尚未更新";
   $("decisionValue").textContent=data.current_decision||"continue";
   $("gateReason").textContent=data.gate_reason||"尚未触发强制节拍";
@@ -547,6 +549,14 @@ function renderProject(project,metrics,automation,config,evidenceResult,auditRes
     const flag=document.createElement("small");flag.textContent=coverageStatusLabels[statusValue]||statusValue;row.append(nameNode,track,flag);$("coverageList").append(row);
   });
   $("verifiedCoverage").textContent=`${metrics.coverage.verified} 已验证`;
+  const hypotheses=project.hypotheses||[];const methodPack=project.method_pack||{};const planBatches=project.plan_batches||[];
+  $("hypothesesCount").textContent=`${hypotheses.length} 个假设 · ${planBatches.length} 个计划批次`;
+  $("methodPackSummary").textContent=methodPack.name?`已加载 ${methodPack.name} ${methodPack.version||""}，包含 ${(methodPack.dimensions||[]).length} 个攻击面维度。列表展示最新假设与其确定性优先分。`:"尚未加载项目方法包。";
+  renderRows($("hypothesesBody"),[...hypotheses].reverse().slice(0,40),7,item=>{const row=document.createElement("tr");row.append(cell(item.statement||item.title),cell(item.target),cell(coverageLabels[item.dimension]||item.dimension),cell(percent(item.score??item.priority_score)),cell(item.evidence_maturity||"假设"),cell(hypothesisStatusLabel(item.status)),cell(item.source||"方法包"));return row});
+  const counterfactualRows=(project.counterfactuals||[]).map(item=>({type:"反事实",target:item.target,content:item.claim,condition:item.falsification_criteria,status:hypothesisStatusLabel(item.status)}));
+  const lessonRows=(project.lessons||[]).map(item=>({type:"经验",target:item.target,content:item.pattern,condition:(item.expiry_conditions||[]).join("、")||item.valid_until||"人工解除",status:item.valid_until&&new Date(item.valid_until).getTime()<=Date.now()?"已失效":"有效"}));
+  const memoryRows=[...counterfactualRows,...lessonRows].reverse().slice(0,30);$("researchMemoryCount").textContent=`${counterfactualRows.length+lessonRows.length} 条`;
+  renderRows($("researchMemoryBody"),memoryRows,5,item=>{const row=document.createElement("tr");row.append(cell(item.type),cell(item.target),cell(item.content),cell(item.condition),cell(item.status));return row});
   const pendingFactRows=jobs
     .filter(job=>job.status==="completed"&&!job.committed_at&&job.result?.payload?.kind==="fact")
     .map(job=>({...job.result.payload,__pending:true,__member:job.member_name}));
@@ -582,7 +592,7 @@ function renderProject(project,metrics,automation,config,evidenceResult,auditRes
   renderRows($("negativeEvidenceBody"),negativeEvidence,5,item=>{const row=document.createElement("tr");const validUntil=item.valid_until?new Date(item.valid_until):null;const active=!validUntil||validUntil.getTime()>Date.now();row.append(cell(item.target),cell(item.hypothesis),cell(item.reason),cell(validUntil&&!Number.isNaN(validUntil.getTime())?validUntil.toLocaleString():"未设置"),cell(active?"有效期内剪枝":"已失效，可重新验证"));return row});
   const directionRows=(project.directions||[]).map(direction=>({...direction.intent,direction_id:direction.id,direction_status:direction.status,terminal_reason:direction.terminal_reason}));
   $("intentsCount").textContent=`${directionRows.length} 条`;
-  renderRows($("intentsBody"),directionRows,6,intent=>{const row=document.createElement("tr");const humanDismissed=intent.direction_status==="cancelled"&&String(intent.terminal_reason||"").startsWith("human_dismissed:");row.append(cell(intent.verb),cell(intent.target),cell(intent.success_criteria),cell(intent.risk_level),cell(humanDismissed?"人工否决":intent.direction_status||"open"));const action=cell("");const button=document.createElement("button");button.type="button";button.className=`button ${humanDismissed?"ghost":"danger"} small direction-dismiss`;button.dataset.directionId=intent.direction_id;button.textContent=humanDismissed?"已删除":"删除方向";button.disabled=humanDismissed;action.append(button);row.append(action);if(humanDismissed)row.title=String(intent.terminal_reason).replace(/^human_dismissed:/,"");return row});
+  renderRows($("intentsBody"),directionRows,6,intent=>{const row=document.createElement("tr");const humanDismissed=intent.direction_status==="cancelled"&&String(intent.terminal_reason||"").startsWith("human_dismissed:");const riskText=`潜在 ${intent.risk_level||"未知"} / 操作 ${intent.action_safety_risk||"low"}`;row.append(cell(intent.verb),cell(intent.target),cell(intent.success_criteria),cell(riskText),cell(humanDismissed?"人工否决":intent.direction_status||"open"));const action=cell("");const button=document.createElement("button");button.type="button";button.className=`button ${humanDismissed?"ghost":"danger"} small direction-dismiss`;button.dataset.directionId=intent.direction_id;button.textContent=humanDismissed?"已删除":"删除方向";button.disabled=humanDismissed;action.append(button);row.append(action);if(humanDismissed)row.title=String(intent.terminal_reason).replace(/^human_dismissed:/,"");return row});
   const indexedEvidence=evidenceResult.evidence||[];
   const indexedPaths=new Set(indexedEvidence.map(item=>item.path));
   const pendingEvidence=pendingFactRows
@@ -615,6 +625,8 @@ function renderEmptyWorkspace(){
   $("eventsCount").textContent="0 条";$("eventsList").replaceChildren();
   const emptyEvent=document.createElement("div");emptyEvent.className="empty-row";emptyEvent.textContent="暂无运行事件";$("eventsList").append(emptyEvent);
   $("coverageList").replaceChildren();$("verifiedCoverage").textContent="0 已验证";
+  $("hypothesesCount").textContent="0 个假设";$("methodPackSummary").textContent="尚未加载项目方法包。";emptyRow($("hypothesesBody"),7);
+  $("researchMemoryCount").textContent="0 条";emptyRow($("researchMemoryBody"),5);
   $("attackIntelCount").textContent="0 条";emptyRow($("attackIntelBody"),4);
   $("riskLeadsCount").textContent="0 条";emptyRow($("riskLeadsBody"),5);
   $("vulnerabilitiesCount").textContent="0 条";emptyRow($("vulnerabilitiesBody"),6);

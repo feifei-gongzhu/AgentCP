@@ -1,0 +1,146 @@
+ARG REGISTRY_MIRROR=docker.io
+ARG DEBIAN_MIRROR_HOST=mirrors.aliyun.com
+ARG DEBIAN_MIRROR_SCHEME=http
+ARG PYPI_INDEX_URL=https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple
+ARG PYPI_TRUSTED_HOST=mirrors.tuna.tsinghua.edu.cn
+ARG GOPROXY=https://goproxy.cn,direct
+ARG GO_VERSION=1.26.4
+ARG GRPCURL_VERSION=v1.9.3
+ARG PROTOC_GEN_GO_VERSION=v1.36.11
+ARG PROTOC_GEN_GO_GRPC_VERSION=v1.6.2
+ARG NODE_MAJOR=22
+ARG CODEX_VERSION=0.144.1
+ARG CLAUDE_CODE_VERSION=2.1.206
+ARG GEMINI_CLI_VERSION=0.50.0
+ARG OPENCODE_VERSION=1.17.18
+
+FROM ${REGISTRY_MIRROR}/library/golang:${GO_VERSION}-alpine AS golang-toolchain
+
+FROM ${REGISTRY_MIRROR}/library/debian:bookworm-slim
+ARG DEBIAN_MIRROR_HOST
+ARG DEBIAN_MIRROR_SCHEME
+ARG PYPI_INDEX_URL
+ARG PYPI_TRUSTED_HOST
+ARG GOPROXY
+ARG GRPCURL_VERSION
+ARG PROTOC_GEN_GO_VERSION
+ARG PROTOC_GEN_GO_GRPC_VERSION
+ARG NODE_MAJOR
+ARG CODEX_VERSION
+ARG CLAUDE_CODE_VERSION
+ARG GEMINI_CLI_VERSION
+ARG OPENCODE_VERSION
+ARG TARGETARCH
+
+RUN if [ -f /etc/apt/sources.list ]; then \
+      sed -i -e "s|http://deb.debian.org|${DEBIAN_MIRROR_SCHEME}://${DEBIAN_MIRROR_HOST}|g" -e "s|http://security.debian.org|${DEBIAN_MIRROR_SCHEME}://${DEBIAN_MIRROR_HOST}|g" /etc/apt/sources.list; \
+    fi && \
+    if [ -f /etc/apt/sources.list.d/debian.sources ]; then \
+      sed -i -e "s|http://deb.debian.org|${DEBIAN_MIRROR_SCHEME}://${DEBIAN_MIRROR_HOST}|g" -e "s|http://security.debian.org|${DEBIAN_MIRROR_SCHEME}://${DEBIAN_MIRROR_HOST}|g" /etc/apt/sources.list.d/debian.sources; \
+    fi
+
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends python3 python3-pip git curl ca-certificates tini gnupg build-essential pkg-config protobuf-compiler && \
+    mkdir -p /etc/apt/keyrings && \
+    curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key | gpg --dearmor -o /etc/apt/keyrings/nodesource.gpg && \
+    echo "deb [signed-by=/etc/apt/keyrings/nodesource.gpg] https://deb.nodesource.com/node_${NODE_MAJOR}.x nodistro main" > /etc/apt/sources.list.d/nodesource.list && \
+    apt-get update && \
+    apt-get install -y --no-install-recommends nodejs && \
+    npm config set registry https://registry.npmmirror.com --global && \
+    npm config set fund false --global && \
+    npm config set update-notifier false --global && \
+    apt-get purge -y --auto-remove gnupg dirmngr && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/* /root/.npm /root/.cache
+
+COPY --from=golang-toolchain /usr/local/go /usr/local/go
+
+ENV GOPATH=/root/go \
+    GOPROXY=${GOPROXY} \
+    PATH=/usr/local/go/bin:${PATH}
+
+RUN go env -w GOPROXY="${GOPROXY}" && \
+    go install github.com/fullstorydev/grpcurl/cmd/grpcurl@"${GRPCURL_VERSION}" && \
+    go install google.golang.org/protobuf/cmd/protoc-gen-go@"${PROTOC_GEN_GO_VERSION}" && \
+    go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@"${PROTOC_GEN_GO_GRPC_VERSION}" && \
+    install -m755 /root/go/bin/grpcurl /usr/local/bin/grpcurl && \
+    install -m755 /root/go/bin/protoc-gen-go /usr/local/bin/protoc-gen-go && \
+    install -m755 /root/go/bin/protoc-gen-go-grpc /usr/local/bin/protoc-gen-go-grpc && \
+    go clean -cache -modcache -testcache -fuzzcache
+
+ENV PIP_INDEX_URL=${PYPI_INDEX_URL}
+ENV PIP_TRUSTED_HOST=${PYPI_TRUSTED_HOST}
+ENV PIP_DISABLE_PIP_VERSION_CHECK=1
+
+RUN PIP_REQUIRE_HASHES=0 python3 -m pip install --break-system-packages --no-cache-dir --no-input \
+    --index-url ${PYPI_INDEX_URL} \
+    --trusted-host ${PYPI_TRUSTED_HOST} \
+    jupyterlab bash_kernel && \
+    python3 -m bash_kernel.install --sys-prefix
+
+RUN set -e; \
+    target_arch="${TARGETARCH:-$(dpkg --print-architecture)}"; \
+    case "${target_arch}" in \
+      amd64) CLAUDE_CODE_PLATFORM_PACKAGE=@anthropic-ai/claude-code-linux-x64 ;; \
+      arm64) CLAUDE_CODE_PLATFORM_PACKAGE=@anthropic-ai/claude-code-linux-arm64 ;; \
+      *) echo "unsupported Claude Code target arch: ${target_arch}" >&2; exit 1 ;; \
+    esac; \
+    npm install -g \
+      "@openai/codex@${CODEX_VERSION}" \
+      "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" \
+      "${CLAUDE_CODE_PLATFORM_PACKAGE}@${CLAUDE_CODE_VERSION}" \
+      "@google/gemini-cli@${GEMINI_CLI_VERSION}" \
+      "opencode-ai@${OPENCODE_VERSION}"
+
+RUN mkdir -p /usr/local/share/jupyter/kernels/javascript /root/.codex /root/.opencode /root/.local/bin /root/.cargo/bin /root/go/bin /workspace /data/state /data/runtime /data/logs
+
+COPY ./assets/.codex/ /root/.codex/
+COPY ./assets/.claude/ /root/.claude/
+COPY ./assets/.claude.json /root/
+COPY ./assets/.gitconfig /root/
+
+COPY runtime/jupyter-javascript-kernel/kernel.json /usr/local/share/jupyter/kernels/javascript/kernel.json
+COPY runtime/javascript /tmp/agent-compose-runtime
+COPY runtime/agent-compose-runtime-sdk /tmp/agent-compose-runtime-sdk
+
+RUN cd /tmp/agent-compose-runtime && \
+    npm ci && \
+    RUNTIME_TARBALL="$(npm pack --silent | tail -n 1)" && \
+    npm install -g "./${RUNTIME_TARBALL}" && \
+    rm -rf /tmp/agent-compose-runtime && \
+    ln -sfv ../lib/node_modules/@chaitin-ai/agent-compose-runtime/dist/cli.js /usr/bin/agent-compose-runtime && \
+    ln -sf ../lib/node_modules/@openai/codex/bin/codex.js /usr/bin/codex && \
+    ln -sf ../lib/node_modules/@anthropic-ai/claude-code/bin/claude.exe /usr/bin/claude && \
+    ln -sf ../lib/node_modules/@google/gemini-cli/bundle/gemini.js /usr/bin/gemini && \
+    ln -sf ../lib/node_modules/opencode-ai/bin/opencode.exe /usr/bin/opencode
+
+RUN mkdir -p /opt/agent-compose/npm && \
+    cd /tmp/agent-compose-runtime-sdk && \
+    npm ci && \
+    npm run pack:runtime-bundle -- --pack-destination /opt/agent-compose/npm --filename agent-compose-runtime-sdk.tgz && \
+    mkdir -p /tmp/agent-compose-runtime-sdk-empty-cache && \
+    npm install --offline --cache /tmp/agent-compose-runtime-sdk-empty-cache /opt/agent-compose/npm/agent-compose-runtime-sdk.tgz --prefix /tmp/agent-compose-runtime-sdk-offline-check && \
+    node -e "const { runtime } = require('/tmp/agent-compose-runtime-sdk-offline-check/node_modules/@chaitin-ai/agent-compose-runtime-sdk'); if (typeof runtime.shell !== 'function') process.exit(1)" && \
+    rm -rf /tmp/agent-compose-runtime-sdk /tmp/agent-compose-runtime-sdk-offline-check /tmp/agent-compose-runtime-sdk-empty-cache
+
+ENV HOME=/root \
+    GOPATH=/root/go \
+    GOPROXY=${GOPROXY} \
+    OPENCODE_DISABLE_AUTOUPDATE=true \
+    OPENCODE_DISABLE_MODELS_FETCH=1 \
+    PATH=/root/.local/bin:/usr/local/go/bin:/root/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+RUN printf '%s\n' \
+  '#!/usr/bin/env bash' \
+  'set -euo pipefail' \
+  'mkdir -p /root/.codex /root/.opencode /root/.local/bin /root/.cargo/bin /root/go/bin /workspace /data/state /data/runtime /data/logs' \
+  'export HOME=${HOME:-/root}' \
+  'export GOPATH=${GOPATH:-/root/go}' \
+  'export GOPROXY=${GOPROXY:-https://goproxy.cn,direct}' \
+  'export OPENCODE_DISABLE_AUTOUPDATE=${OPENCODE_DISABLE_AUTOUPDATE:-true}' \
+  'export OPENCODE_DISABLE_MODELS_FETCH=${OPENCODE_DISABLE_MODELS_FETCH:-1}' \
+  'export PATH=/root/.local/bin:/usr/local/go/bin:/root/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin' \
+  'exec "$@"' > /usr/local/bin/agent-compose-env && chmod +x /usr/local/bin/agent-compose-env
+
+ENTRYPOINT ["/usr/bin/tini", "--"]
+CMD ["/usr/local/bin/agent-compose-env", "bash", "-lc", "sleep infinity"]

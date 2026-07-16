@@ -1,0 +1,39 @@
+package driver
+
+import "testing"
+
+func TestRuntimeDriverWorkflow(t *testing.T) {
+	TestDockerRuntimeSandboxProxyStateUsesContainerNameAndGuestPort(t)
+	TestPrepareRuntimeMountManifestForDockerIncludesRequiredMountsOnly(t)
+	TestPrepareRuntimeMountManifestCreatesSourcesAndWritesFile(t)
+	TestPrepareRuntimeMountManifestForDirectoryOnlyDriversMountsSingleSandboxDirectory(t)
+	testRuntimeMountManifestDriverSpecificStartPreparationWorkflow(t)
+	testDockerImageRefMatchingInternals(t)
+	testConsumeDockerPullStream(t)
+	testExecOutputFilterWorkflows(t)
+	testJupyterGuestCoverageWorkflow(t)
+}
+
+func TestIntegrationRuntimeDriverWorkflow(t *testing.T) {
+	TestDockerRuntimeSandboxProxyStateUsesContainerNameAndGuestPort(t)
+	TestPrepareRuntimeMountManifestForDockerIncludesRequiredMountsOnly(t)
+	TestPrepareRuntimeMountManifestCreatesSourcesAndWritesFile(t)
+	TestPrepareRuntimeMountManifestForDirectoryOnlyDriversMountsSingleSandboxDirectory(t)
+	testRuntimeMountManifestDriverSpecificStartPreparationWorkflow(t)
+	testDockerImageRefMatchingInternals(t)
+	testConsumeDockerPullStream(t)
+	testExecOutputFilterWorkflows(t)
+	testJupyterGuestCoverageWorkflow(t)
+}
+
+func TestE2ERuntimeDriverWorkflow(t *testing.T) {
+	TestDockerRuntimeSandboxProxyStateUsesContainerNameAndGuestPort(t)
+	TestPrepareRuntimeMountManifestForDockerIncludesRequiredMountsOnly(t)
+	TestPrepareRuntimeMountManifestCreatesSourcesAndWritesFile(t)
+	TestPrepareRuntimeMountManifestForDirectoryOnlyDriversMountsSingleSandboxDirectory(t)
+	testRuntimeMountManifestDriverSpecificStartPreparationWorkflow(t)
+	testDockerImageRefMatchingInternals(t)
+	testConsumeDockerPullStream(t)
+	testExecOutputFilterWorkflows(t)
+	testJupyterGuestCoverageWorkflow(t)
+}

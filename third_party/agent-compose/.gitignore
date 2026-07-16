@@ -1,0 +1,62 @@
+# Local configuration and secrets
+.env
+.env.*
+!.env.example
+docker-compose.override.yml
+
+# agent-compose runtime state
+/data/
+/.state/
+
+# Local git worktrees and agent scratch
+/.worktrees/
+/.claude/
+
+# Build outputs
+/build/
+/dist/
+/dist-ui/
+/agent-compose
+/runtime/agent-compose-runtime-sdk/dist/
+/runtime/javascript/dist/
+
+# Node / frontend dependencies and caches
+node_modules/
+.pnpm-store/
+.npm/
+.yarn/
+/.vite/
+/.svelte-kit/
+
+# Test and coverage output
+/coverage/
+/runtime/javascript/coverage/
+/.cache/
+*.coverprofile
+coverage.out
+*.lcov
+
+# Go build/test artifacts
+*.test
+*.prof
+__debug_bin*
+
+# Task runner
+/.task/
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# OS and editor files
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
+.idea/
+.vscode/
+.codebase-memory/

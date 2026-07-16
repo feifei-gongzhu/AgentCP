@@ -1,0 +1,14 @@
+{
+  "name": "chaitin/agent-compose",
+  "source": "https://github.com/chaitin/agent-compose",
+  "source_commit": "39b9824244d7f046d5f94daf1078f95c813c08cd",
+  "source_archive": "agent-compose-main.zip",
+  "source_archive_sha256": "a2a422c226eecd455d4881dfd207d90ac3a1bf31220c330f65979e59270660b0",
+  "license": "AGPL-3.0",
+  "agentcp_runtime_requirement": "required",
+  "local_build_version": "main-39b9824",
+  "local_build_target": "darwin/arm64",
+  "compiled_drivers": [
+    "docker"
+  ]
+}

@@ -15,9 +15,12 @@ from uuid import uuid4
 
 from .dashboard import render_dashboard
 from .automation import AutomationEngine
+from .database import ControlDatabase
 from .lifecycle import ProjectLifecycleBusy, project_deletion_lock
 from .scheduler import Scheduler
 from .schemas import GateStatus, Hint, coverage_template_for_project_type, now_iso
+from .methodology import ensure_methodology
+from .agent_compose import shutdown_project_runtimes
 from .metrics import collect_metrics, refresh_asset_count
 from .quality import QualityLedger
 from .waf import WAFManager
@@ -297,6 +300,7 @@ def _delete_project(vendor_value: object, confirmation: object) -> list[str]:
                 if _has_active_job_lease(engine):
                     raise WebAppError("项目仍有尚未退出的 Worker，请等待任务租约结束后再删除")
 
+                shutdown_project_runtimes(project_path)
                 RuntimeSecretStore.clear(vendor, persistent=True)
                 quarantine = PROJECTS / f".deleting-{vendor}-{uuid4().hex}"
                 project_path.rename(quarantine)
@@ -397,6 +401,7 @@ def _save_target(store: ProjectStore, payload: dict) -> dict:
     if selected_type != previous_type or set(state.attack_surface_coverage) != set(desired_coverage):
         state.attack_surface_coverage = desired_coverage
         store.save_state(state)
+    ensure_methodology(store, ControlDatabase(store.path / "control_plane.db"))
     refresh_asset_count(store)
     return target
 
@@ -645,6 +650,15 @@ class AgentControlHandler(SimpleHTTPRequestHandler):
                     "quality_metrics": QualityLedger().project_metrics(store),
                     "global_quality_metrics": QualityLedger().global_metrics(store),
                     "intents": store.read_jsonl("intents.jsonl"),
+                    "hypotheses": store.read_jsonl("hypotheses.jsonl"),
+                    "plan_batches": store.read_jsonl("plan_batches.jsonl"),
+                    "counterfactuals": store.read_jsonl("counterfactuals.jsonl"),
+                    "lessons": store.read_jsonl("lessons.jsonl"),
+                    "phase_events": store.read_jsonl("phase_events.jsonl"),
+                    "method_pack": (
+                        store.read_json("method_pack.json")
+                        if (store.path / "method_pack.json").exists() else {}
+                    ),
                     "directions": database.list_directions(),
                     "decisions": store.read_jsonl("decision_log.jsonl"),
                     "hints": store.read_jsonl("hints.jsonl"),
