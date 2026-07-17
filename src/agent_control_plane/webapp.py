@@ -413,9 +413,17 @@ def _config_path(store: ProjectStore) -> Path:
 def _load_config(store: ProjectStore) -> dict:
     path = _config_path(store)
     if path.exists():
-        return json.loads(path.read_text(encoding="utf-8"))
-    fallback = ROOT / "teams" / "default.json"
-    return json.loads(fallback.read_text(encoding="utf-8"))
+        config = json.loads(path.read_text(encoding="utf-8"))
+    else:
+        fallback = ROOT / "teams" / "default.json"
+        config = json.loads(fallback.read_text(encoding="utf-8"))
+    for member in config.get("members", []):
+        runtime_mode = str(member.get("runtime_mode") or "local-docker")
+        member["runtime_mode"] = {
+            "host-native": "local-cli",
+            "ct-agent-compose": "agent-compose",
+        }.get(runtime_mode, runtime_mode)
+    return config
 
 
 def _redact_config(config: dict) -> dict:
@@ -456,6 +464,7 @@ def _save_config(store: ProjectStore, config: dict) -> None:
     allowed_roles = {"reason", "metacog", "executor", "pentester", "reviewer", "waf_analyst"}
     allowed_sandboxes = {"read-only", "workspace-write", "danger-full-access"}
     allowed_auth_modes = {"auto", "bearer", "x-api-key"}
+    allowed_runtime_modes = {"local-docker", "agent-compose", "local-cli"}
     names: set[str] = set()
     for member in config["members"]:
         name = str(member.get("name", "")).strip()
@@ -468,6 +477,17 @@ def _save_config(store: ProjectStore, config: dict) -> None:
             raise WebAppError(f"不支持的角色: {member.get('role')}")
         if member.get("sandbox", "read-only") not in allowed_sandboxes:
             raise WebAppError(f"不支持的沙箱模式: {member.get('sandbox')}")
+        runtime_mode = str(member.get("runtime_mode", "local-docker") or "local-docker")
+        runtime_mode = {"host-native": "local-cli", "ct-agent-compose": "agent-compose"}.get(runtime_mode, runtime_mode)
+        if runtime_mode not in allowed_runtime_modes:
+            raise WebAppError(f"不支持的运行模式: {runtime_mode}")
+        if runtime_mode == "local-cli" and member.get("type", "codex") == "container":
+            raise WebAppError("本地 CLI 模式不能选择 Container Worker")
+        member["runtime_mode"] = runtime_mode
+        custom_prompt = str(member.get("custom_prompt", "") or "").strip()
+        if len(custom_prompt) > 30000:
+            raise WebAppError("单个 Agent 的专属提示词不能超过 30000 字符")
+        member["custom_prompt"] = custom_prompt or None
         auth_mode = str(member.get("auth_mode", "auto") or "auto")
         if auth_mode not in allowed_auth_modes:
             raise WebAppError(f"不支持的鉴权方式: {auth_mode}")
@@ -477,14 +497,22 @@ def _save_config(store: ProjectStore, config: dict) -> None:
             raise WebAppError("密钥变量必须填写环境变量名，不能填写真实 API Key")
         member["api_key_env"] = api_key_env or None
         member_type = member.get("type", "codex")
+        if member_type == "ollama" and runtime_mode != "local-cli":
+            raise WebAppError("Ollama 目前仅支持本地 CLI 模式")
+        if member_type == "container":
+            extra = member.get("extra") or {}
+            if runtime_mode != "local-docker":
+                raise WebAppError("Container Worker 仅支持本地 Docker 模式")
+            if not str(extra.get("image", "")).strip() or not isinstance(extra.get("worker_command"), list):
+                raise WebAppError("Container Worker 必须在 extra 中配置 image 和 worker_command")
         if member_type in {"claude-cli", "openai-compatible"} and not str(member.get("model", "") or "").strip():
             raise WebAppError(f"{member_type} 必须填写模型 ID")
         if member_type == "openai-compatible" and not str(member.get("base_url", "") or "").strip():
             raise WebAppError("openai-compatible 必须填写服务地址")
         if member_type == "claude-cli" and member.get("base_url") and not api_key_env:
             raise WebAppError("Claude 中转站配置必须填写密钥环境变量名")
-        if member_type == "claude-cli" and member.get("sandbox") == "danger-full-access":
-            raise WebAppError("Claude CLI 不允许在宿主机使用 danger-full-access；请使用 Container Worker")
+        if member_type == "claude-cli" and runtime_mode == "local-cli" and member.get("sandbox") == "danger-full-access":
+            raise WebAppError("Claude CLI 不允许在宿主机使用 danger-full-access；请改用本地 Docker")
         if bool(member.get("dangerously_bypass_sandbox", False)):
             raise WebAppError("Web 配置禁止绕过沙箱")
         max_running = int(member.get("max_running", 1))

@@ -12,6 +12,7 @@ from src.agent_control_plane.store import ProjectStore
 from src.agent_control_plane.scheduler import Scheduler
 from src.agent_control_plane.schemas import Hint
 from src.agent_control_plane.worker import WorkerError
+from src.agent_control_plane.waf import WAFManager
 
 
 def test_model_endpoint_never_exposes_url_credentials() -> None:
@@ -26,6 +27,44 @@ def test_permanent_payment_error_is_not_retried() -> None:
     assert not _model_error_is_retryable("Claude API 调用失败: HTTP 402 Insufficient Balance")
     assert _model_error_is_retryable("Claude API 调用失败: HTTP 429 Too Many Requests")
     assert _model_error_is_retryable("Claude API 调用失败: HTTP 503 Service Unavailable")
+
+
+def test_malformed_http_200_gateway_response_is_retried() -> None:
+    assert _model_error_is_retryable(
+        "模型 API 调用失败: API returned an empty or malformed response "
+        "(HTTP 200) — check for a proxy or gateway intercepting the request"
+    )
+
+
+def test_protocol_shape_error_is_not_retried() -> None:
+    assert not _model_error_is_retryable("模型未返回带合法 kind 的 AgentCP Worker JSON")
+
+
+def test_malformed_candidate_is_rejected_instead_of_blocking_commit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(store_module, "PROJECTS", tmp_path / "projects")
+    store = ProjectStore("bad-candidate")
+    store.init()
+    engine = AutomationEngine(store)
+    run_id = engine.db.create_run(store.vendor, "default", 30, 1)
+    job_id = engine.db.enqueue_job(run_id, "swarm", "reason", "reason", {"member": {}})
+    claimed = engine.db.claim_job(run_id, "swarm", "worker")
+    assert claimed
+    engine.db.complete_job(
+        job_id,
+        "worker",
+        {"member": "reason", "status": "ok", "payload": {"kind": "broken"}},
+    )
+
+    summaries = engine._commit_candidates(run_id)
+    job = engine.db.list_jobs(run_id)[0]
+
+    assert job["committed_at"]
+    assert "未知 Worker 输出" in job["commit_error"]
+    assert engine.db.event_count("job_commit_rejected") == 1
+    assert any("不再阻塞 Run" in item for item in summaries)
 
 
 def test_cancelled_run_cannot_be_resumed(
@@ -325,6 +364,49 @@ def test_worker_stop_loss_decision_terminates_run(
     engine.run(run_id)
     assert engine.db.get_run(run_id)["status"] == "stopped"
     assert store.load_state().current_decision == "stop_loss"
+
+
+def test_waf_branch_stop_loss_does_not_terminate_whole_run(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(store_module, "PROJECTS", tmp_path / "projects")
+    store = ProjectStore("waf-branch-stop")
+    store.init()
+    store.append_jsonl("waf_assessments.jsonl", {
+        "id": "WAF-test",
+        "status": "confirmed",
+        "budget_minutes": 12,
+        "used_minutes": 0,
+    })
+    engine = AutomationEngine(store)
+    run_id = engine.db.create_run(store.vendor, "default", 300, 1)
+    job_id = engine.db.enqueue_job(
+        run_id,
+        "swarm",
+        "waf-adaptive",
+        "waf_analyst",
+        {"waf_assessment_id": "WAF-test"},
+    )
+    claimed = engine.db.claim_job(run_id, "swarm", "worker-1")
+    assert claimed and claimed["id"] == job_id
+    engine.db.complete_job(job_id, "worker-1", {
+        "member": "waf-adaptive",
+        "role": "waf_analyst",
+        "status": "ok",
+        "payload": {
+            "kind": "decision",
+            "action": "stop_loss",
+            "reason": "WAF 分支已连续 5 次无差异，分支 ROI 过低",
+        },
+    })
+
+    summaries = engine._commit_candidates(run_id)
+
+    assert engine.db.get_run(run_id)["status"] == "running"
+    assert store.load_state().current_decision == "continue"
+    assert WAFManager().current(store)[0]["status"] == "exhausted"
+    assert any("其他目标和攻击面继续调度" in item for item in summaries)
 
 
 def test_new_project_owner_directive_fences_stale_worker_result(

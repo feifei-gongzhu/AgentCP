@@ -79,7 +79,7 @@ def _render_dashboard_locked(store: ProjectStore) -> Path:
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>{_escape(store.vendor)} · V3.0 安全研究引擎</title>
+  <title>{_escape(store.vendor)} · V3.1 安全研究引擎</title>
   <style>
     :root {{ color-scheme: dark; --bg:#080b10; --panel:#111721; --line:#253142; --text:#e8eef7; --muted:#8b9aae; --accent:#49d6a3; --warn:#ffb454; --danger:#ff6577; }}
     * {{ box-sizing:border-box }} body {{ margin:0; background:radial-gradient(circle at top right,#162032 0,var(--bg) 36%); color:var(--text); font:14px/1.55 ui-monospace,SFMono-Regular,Menlo,monospace }}

@@ -121,11 +121,15 @@ def test_potential_impact_does_not_trigger_gate_but_action_safety_risk_does(
     first = store.read_jsonl("intents.jsonl")[-1]
     assert first["risk_level"] == "critical"
     assert first["requires_human_confirmation"] is False
+    directions = ControlDatabase(store.path / "control_plane.db").list_directions()
+    assert [item["intent"]["id"] for item in directions] == [first["id"]]
 
     apply_worker_output(store, dict(common, target="https://app.example.com/destructive-check", action_safety_risk="high"))
     assert store.load_state().gate_status == GateStatus.AWAITING_APPROVAL.value
     second = store.read_jsonl("intents.jsonl")[-1]
     assert second["requires_human_confirmation"] is True
+    directions = ControlDatabase(store.path / "control_plane.db").list_directions()
+    assert {item["intent"]["id"] for item in directions} == {first["id"], second["id"]}
     assert "动作需审批" in str(store.load_state().gate_reason)
 
 

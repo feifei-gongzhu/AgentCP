@@ -1,8 +1,8 @@
-# AgentCP 安全研究引擎 V3.0
+# AgentCP 安全研究引擎 V3.1
 
 > 完整安装、模型配置、自动化、远程协议、恢复与排错请阅读 [docs/USAGE.md](docs/USAGE.md)。
 
-这是一个并发安全研究黑板控制平面。V3 将 Method Pack、PlanBatch 假设组合、同一 Run 多波执行、反事实、长期 Lesson 记忆、确定性 Guardian 与人工裁决组成一个可恢复的工程化系统。所有真实模型 Worker 必须经过内置 `agent-compose` 运行时。
+这是一个并发安全研究黑板控制平面。V3 将 Method Pack、PlanBatch 假设组合、同一 Run 多波执行、反事实、长期 Lesson 记忆、确定性 Guardian 与人工裁决组成一个可恢复的工程化系统。每个 Worker 可独立选择 AgentCP 本地 Docker、CT `agent-compose` 或本地 CLI；`agent-compose` 是可选运行时，不再是系统前置条件。
 
 ## 核心约束
 
@@ -74,19 +74,28 @@ Executor 原始证据
 ```bash
 git clone https://github.com/feifei-gongzhu/AgentCP.git
 cd AgentCP
-cd third_party/agent-compose && task build && cd ../..
+docker build -t agent-compose-guest:latest -f third_party/agent-compose/guest-images/Dockerfile.agent-compose-guest third_party/agent-compose
 python3 agentcp serve --host 127.0.0.1 --port 8765
 ```
 
 打开 `/frontend/` 后按三级流程使用：
 
 1. 在“任务中心”选择已有项目，或创建新的审计任务；项目可在这里删除。
-2. 进入“项目配置”，填写目标、模型角色和会话 API Key，并核对项目黑板。
+2. 进入“项目配置”，填写目标、模型角色、运行模式和会话 API Key。新角色默认使用“本地 Docker”；完全不需要 Docker 时选择“本地 CLI”，需要 CT 编排能力时再选择“CT agent-compose”。
+   每个 Agent 还可配置独立的项目级专属提示词；它随团队配置持久保存并在该 Agent 每次执行时注入。运行中提交的项目所有者实时指令优先级更高。
 3. 点击“开始审计”，系统保存未提交配置、启动真实模型团队，然后进入“执行与结果”查看队列、事件、证据和发现。
 
 授权字段会自动固定为 `authorized / *`。
 
-`third_party/agent-compose` 保留上游 AGPL-3.0 许可证和原始来源。`build/` 与 `.cache/` 是本地产物，不会提交到 Git。生产 Worker 若找不到 `third_party/agent-compose/build/agent-compose` 会直接拒绝运行，不会退回旧的直连 CLI 路径。
+`third_party/agent-compose` 保留上游 AGPL-3.0 许可证和原始来源。`build/` 与 `.cache/` 是本地产物，不会提交到 Git。只有显式选择 `agent-compose` 模式时才需要构建其二进制；默认本地 Docker 只需要本地 guest image。
+
+## 三种本地运行模式
+
+- `local-docker`（默认）：AgentCP 直接创建和回收本地容器，不启动 agent-compose daemon。项目挂载为 `/workspace`，目标源码挂载为只读 `/target`。
+- `agent-compose`：显式使用 vendored CT agent-compose 的 daemon、session 和 sandbox 能力。该模式需要先构建 `third_party/agent-compose/build/agent-compose`。
+- `local-cli`：不使用 Docker，直接调用本机 Codex CLI、Claude Code、Ollama 或 OpenAI-compatible 接口。该模式保留超时、取消、密钥脱敏和工具事件，但隔离强度低于容器模式。旧配置中的 `host-native` 会自动迁移为此模式。
+
+Claude 本地 CLI 仍会隔离用户级路由变量和设置，不读取或修改 CCSwitch。`danger-full-access` 在本机 Claude 模式下仍被禁止。
 
 也可以继续使用 CLI：
 

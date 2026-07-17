@@ -155,6 +155,21 @@ class ControlDatabase:
         run_id = f"R-{uuid4().hex[:12]}"
         now = _now()
         with self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            active = db.execute(
+                """
+                SELECT id,status FROM automation_runs
+                WHERE project=? AND status IN ('running','paused','stopping')
+                ORDER BY created_at DESC LIMIT 1
+                """,
+                (project,),
+            ).fetchone()
+            if active is not None:
+                db.execute("ROLLBACK")
+                raise RuntimeError(
+                    f"项目已有未结束运行 {active['id']} ({active['status']})，"
+                    "请先恢复、批准或取消该运行。"
+                )
             previous = db.execute(
                 """
                 SELECT completed_task_count,low_value_streak,no_direction_streak,control_version
@@ -184,6 +199,7 @@ class ControlDatabase:
                 ),
             )
             self._event(db, run_id, None, "run_created", {"team": team})
+            db.execute("COMMIT")
         return run_id
 
     def enqueue_job(
@@ -719,6 +735,23 @@ class ControlDatabase:
                 row["run_id"] if row else None,
                 job_id,
                 "job_committed" if error is None else "job_commit_deferred",
+                {"error": error},
+            )
+
+    def reject_job_candidate(self, job_id: str, error: str) -> None:
+        """Permanently consume a malformed candidate instead of pausing forever."""
+        now = _now()
+        with self.connect() as db:
+            db.execute(
+                "UPDATE jobs SET committed_at=?,commit_error=?,updated_at=? WHERE id=?",
+                (now, error, now, job_id),
+            )
+            row = db.execute("SELECT run_id FROM jobs WHERE id=?", (job_id,)).fetchone()
+            self._event(
+                db,
+                row["run_id"] if row else None,
+                job_id,
+                "job_commit_rejected",
                 {"error": error},
             )
 

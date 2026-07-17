@@ -247,11 +247,64 @@
 .role-editor td { padding: 7px; }
 .role-editor input, .role-editor select { min-width: 110px; padding: 8px; font-size: 11px; }
 .role-editor .wide-input { min-width: 180px; }
+.runtime-mode-guide {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+  margin: 2px 0 14px;
+}
+.runtime-mode-guide > div {
+  padding: 13px 14px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: rgba(7, 11, 16, .5);
+}
+.runtime-mode-guide strong { display: block; margin-bottom: 5px; color: #dce7ef; font-size: 12px; }
+.runtime-mode-guide span { color: var(--muted); font-size: 11px; line-height: 1.55; }
+.agent-prompt-editor {
+  display: grid;
+  gap: 11px;
+  margin-top: 15px;
+  padding: 16px;
+  border: 1px solid #31513f;
+  border-radius: 12px;
+  background: linear-gradient(145deg, rgba(18, 38, 28, .58), rgba(8, 14, 12, .7));
+}
+.agent-prompt-head { display: flex; align-items: end; justify-content: space-between; gap: 20px; }
+.agent-prompt-head > div { display: grid; gap: 5px; }
+.agent-prompt-head strong { color: #d9f3e2; font-size: 14px; }
+.agent-prompt-head span, .agent-prompt-editor small { color: var(--muted); font-size: 11px; line-height: 1.55; }
+.agent-prompt-head label { min-width: 270px; }
+.agent-prompt-editor textarea { min-height: 180px; font: 12px/1.7 ui-monospace, monospace; }
+.advanced-disclosure { padding: 0; }
+.advanced-disclosure > summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+  padding: 18px 21px;
+  cursor: pointer;
+  list-style: none;
+}
+.advanced-disclosure > summary::-webkit-details-marker { display: none; }
+.advanced-disclosure > summary::after { content: "展开"; color: var(--muted); font-size: 11px; }
+.advanced-disclosure[open] > summary::after { content: "收起"; }
+.advanced-disclosure > summary span { display: grid; gap: 4px; }
+.advanced-disclosure > summary strong { color: #dce6ef; font-size: 14px; }
+.advanced-disclosure > summary small, .advanced-disclosure > summary em { color: var(--muted); font-size: 11px; font-style: normal; }
+.advanced-disclosure[open] > summary { border-bottom: 1px solid var(--soft); }
+.advanced-disclosure > :not(summary) { margin-left: 21px; margin-right: 21px; }
+.advanced-disclosure > :last-child { margin-bottom: 21px; }
+.advanced-disclosure .disclosure-actions { margin-top: 12px; margin-bottom: 10px; }
+.metric-grid { grid-template-columns: repeat(4, 1fr); }
 @media (max-width: 1120px) {
   .evidence-grid { grid-template-columns: 1fr; }
   .project-card-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .hub-quality-summary { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .gate-objective-metrics { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .runtime-mode-guide { grid-template-columns: 1fr; }
+  .agent-prompt-head { align-items: stretch; flex-direction: column; }
+  .agent-prompt-head label { min-width: 0; }
 }
 @media (max-width: 800px) {
   .event-row, .target-form-grid { grid-template-columns: 1fr; }

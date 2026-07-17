@@ -3,6 +3,7 @@ const state = {
   teamConfig:null,teamDirty:false,configVendor:null,targetConfig:null,targetDirty:false,
   targetConfigVendor:null,secretStatus:{},requestGeneration:0,
   gateContext:null,gateSubmitting:false,projectData:null,qualitySummary:null,
+  promptMemberIndex:0,
 };
 const $ = id => document.getElementById(id);
 
@@ -52,9 +53,9 @@ function applyRoute(requested){
   const runActive=["running","paused","awaiting_approval","stopping"].includes(state.runStatus);
   $("startAuditButton").disabled=!state.vendor||!state.teamConfig||runActive;
   $("launchButton").disabled=!state.vendor||runActive;
-  if(route==="hub"){$("routeEyebrow").textContent="AUTHORIZED SECURITY WORKSPACES";$("projectTitle").textContent="任务中心"}
-  else if(route==="config"){$("routeEyebrow").textContent="TARGET · MODEL TEAM · BLACKBOARD";$("projectTitle").textContent=state.newTaskMode?"新建审计任务":`${state.vendor} · 项目配置`}
-  else{$("routeEyebrow").textContent="LIVE AUDIT PROCESS · RESULTS";$("projectTitle").textContent=`${state.vendor} · 执行与结果`}
+  if(route==="hub"){$("routeEyebrow").textContent="授权安全研究工作区";$("projectTitle").textContent="任务中心"}
+  else if(route==="config"){$("routeEyebrow").textContent="目标 · 模型团队 · 黑板";$("projectTitle").textContent=state.newTaskMode?"新建审计任务":`${state.vendor} · 项目配置`}
+  else{$("routeEyebrow").textContent="实时审计过程 · 结论";$("projectTitle").textContent=`${state.vendor} · 执行与结果`}
   return route;
 }
 function navigate(route,{replace=false}={}){
@@ -68,7 +69,9 @@ function showToast(message,isError=false){
 }
 async function api(path,options={}){
   const response=await fetch(path,{...options,headers:{"Content-Type":"application/json",...(options.headers||{})}});
-  const payload=await response.json();
+  const raw=await response.text();let payload;
+  try{payload=raw?JSON.parse(raw):{}}
+  catch(_error){throw new Error(`HTTP ${response.status}：服务返回了非 JSON 响应${raw?` · ${truncateText(raw,180)}`:""}`)}
   if(!response.ok||!payload.ok) throw new Error(payload.error||`HTTP ${response.status}`);
   return payload;
 }
@@ -328,9 +331,31 @@ function friendlyEvent(event){
   const type=event.event_type||event.action||"event";const data=event.data||event.details||{};
   const member=data.member||data.member_name||"模型任务";
   const activity=data.activity||{};const activityTarget=activity.target||null;
+  if(type==="model_local_guest_image_build_started")return {
+    kind:"started",title:"正在构建本地运行镜像",summary:data.image||"agent-compose-guest:latest",
+    detail:"首次使用本地 Docker 时只构建一次；并发 Worker 会等待并复用该镜像。",
+  };
+  if(type==="model_local_guest_image_build_progress")return {
+    kind:"waiting",title:"本地镜像构建中",summary:data.image||"agent-compose-guest:latest",detail:data.text,
+  };
+  if(type==="model_local_guest_image_build_completed")return {
+    kind:"completed",title:"本地运行镜像已就绪",summary:data.image||"agent-compose-guest:latest",
+  };
   if(type==="model_stream_started")return {
     kind:"started",title:"Claude 会话已建立",summary:member,
     meta:[data.session_id&&`会话 ${data.session_id}`,Array.isArray(data.tools)&&data.tools.length&&`可用工具 ${data.tools.length} 个`].filter(Boolean).join(" · "),
+  };
+  if(type==="model_agent_compose_log")return {
+    kind:"assistant",title:"模型实时输出",summary:member,
+    meta:activityTarget&&`当前任务：${activityTarget}`,detail:data.text,
+  };
+  if(type==="model_agent_compose_status")return {
+    kind:data.status==="failed"?"failed":"waiting",title:"模型运行状态",summary:member,
+    meta:data.status?`状态：${data.status}`:"agent-compose 运行中",
+  };
+  if(type==="model_agent_compose_run_completed")return {
+    kind:"completed",title:"模型任务完成",summary:member,
+    meta:data.duration_ms!=null?`耗时 ${(Number(data.duration_ms)/1000).toFixed(1)}s`:"agent-compose 已返回结果",
   };
   if(type==="model_tool_started")return {
     kind:"tool-running",title:"正在执行工具",summary:data.tool_name||"Claude Tool",
@@ -418,7 +443,12 @@ function renderTeamEditor(config,force=false){
         {value:"pentester",label:"执行验证"},
         {value:"waf_analyst",label:"WAF 对抗分析"},
       ]),
-      fieldControl("type",member.type||member.backend||"codex",["codex","claude-cli","openai-compatible","ollama","container"]),
+      fieldControl("runtime_mode",member.runtime_mode||"local-docker",[
+        {value:"local-docker",label:"本地 Docker（默认）"},
+        {value:"agent-compose",label:"CT agent-compose"},
+        {value:"local-cli",label:"本地 CLI"},
+      ]),
+      fieldControl("type",member.type||member.backend||"codex",["codex","claude-cli","openai-compatible","ollama"]),
       fieldControl("model",member.model||""),
       fieldControl("base_url",member.base_url||"",null,"wide-input"),
       fieldControl("api_key_env",member.api_key_env||""),
@@ -431,6 +461,20 @@ function renderTeamEditor(config,force=false){
     controls.forEach(control=>{const td=document.createElement("td");td.append(control);row.append(td)});
     const action=cell("");const remove=document.createElement("button");remove.type="button";remove.className="button danger small role-remove";remove.textContent="删除";action.append(remove);row.append(action);body.append(row);
   });
+  renderRolePromptEditor();
+}
+function renderRolePromptEditor(){
+  const select=$("rolePromptMember");const textarea=$("rolePromptText");const status=$("rolePromptStatus");
+  select.replaceChildren();const members=state.teamConfig?.members||[];
+  if(!members.length){textarea.value="";textarea.disabled=true;select.disabled=true;status.textContent="请先添加 Agent。";return}
+  state.promptMemberIndex=Math.min(Math.max(Number(state.promptMemberIndex)||0,0),members.length-1);
+  members.forEach((member,index)=>{const option=document.createElement("option");option.value=String(index);option.textContent=`${member.name} · ${roleLabel(member.role)}`;select.append(option)});
+  select.value=String(state.promptMemberIndex);select.disabled=false;textarea.disabled=false;
+  textarea.value=members[state.promptMemberIndex].custom_prompt||"";
+  status.textContent=`当前编辑：${members[state.promptMemberIndex].name}。已输入 ${textarea.value.length}/30000 字符；保存并应用后生效。`;
+}
+function clearRolePromptEditor(message="请先加载项目。"){
+  $("rolePromptMember").replaceChildren();$("rolePromptMember").disabled=true;$("rolePromptText").value="";$("rolePromptText").disabled=true;$("rolePromptStatus").textContent=message;
 }
 function collectTeamConfig(){
   if(!state.teamConfig)return {name:"project",members:[]};
@@ -536,7 +580,10 @@ function renderProject(project,metrics,automation,config,evidenceResult,auditRes
     if(job.error){const error=document.createElement("code");error.textContent=truncateText(job.error,220);error.title=String(job.error);activity.append(error)}
     row.append(cell(workerLabel(job)),cell(roleLabel(job.role)),modelCell,taskCell,cell(stageLabel(job.stage)),cell(jobStatusLabel(job.status),`job-status ${job.status||""}`),cell(`${job.attempts??0}/${job.max_attempts??"?"}`),activity);return row;
   });
-  const events=[...(automation.events||[]),...(auditResult.audit||[]).map(item=>({created_at:item.created_at,event_type:`api:${item.action}`,data:item.details}))].sort((a,b)=>String(b.created_at).localeCompare(String(a.created_at))).slice(0,50);
+  const events=[
+    ...(automation.events||[]).filter(event=>event.event_type!=="model_agent_compose_log"),
+    ...(auditResult.audit||[]).map(item=>({created_at:item.created_at,event_type:`api:${item.action}`,data:item.details})),
+  ].sort((a,b)=>String(b.created_at).localeCompare(String(a.created_at))).slice(0,50);
   $("eventsCount").textContent=`${events.length} 条`;$("eventsList").replaceChildren();
   events.forEach(event=>$("eventsList").append(renderEvent(event)));
   if(!events.length){const empty=document.createElement("div");empty.className="empty-row";empty.textContent="暂无运行事件";$("eventsList").append(empty)}
@@ -636,7 +683,7 @@ function renderEmptyWorkspace(){
   $("negativeEvidenceCount").textContent="0 条";emptyRow($("negativeEvidenceBody"),5);
   $("intentsCount").textContent="0 条";emptyRow($("intentsBody"),6);
   $("evidenceCount").textContent="0 份";emptyRow($("evidenceBody"),5);$("evidencePreview").textContent="选择一份证据查看内容";
-  $("roleConfigBody").replaceChildren();$("blackboardText").textContent="请先创建项目";
+  $("roleConfigBody").replaceChildren();clearRolePromptEditor("请先创建项目。场景创建后可逐 Agent 配置提示词。");$("blackboardText").textContent="请先创建项目";
   renderTargetEditor({targets:[],out_of_scope:[],success_criteria:[]},true);
   setConnectionStatus("实时同步",true);
 }
@@ -646,7 +693,7 @@ function prepareNewTask(){
   state.teamConfig=null;state.configVendor=null;state.teamDirty=false;state.targetConfigVendor=null;state.targetDirty=false;state.secretStatus={};state.gateContext=null;state.gateSubmitting=false;
   $("gateApprovalCard").hidden=true;$("gateApprovalNote").value="";
   renderTargetEditor({targets:[],out_of_scope:[],success_criteria:[]},true);
-  $("newProjectName").value="";$("roleConfigBody").replaceChildren();$("blackboardText").textContent="项目创建后将自动初始化双层黑板";
+  $("newProjectName").value="";$("roleConfigBody").replaceChildren();clearRolePromptEditor("项目创建后可逐 Agent 配置提示词。");$("blackboardText").textContent="项目创建后将自动初始化双层黑板";
   setProjectControlsEnabled(false);$("createProjectButton").disabled=false;applyRoute("config");
 }
 
@@ -672,7 +719,7 @@ function selectVendor(vendor){
 }
 async function openProject(vendor=state.vendor){
   if(!selectVendor(vendor))return showToast("请选择有效项目",true);
-  $("roleConfigBody").replaceChildren();$("blackboardText").textContent="正在读取项目黑板…";
+  $("roleConfigBody").replaceChildren();clearRolePromptEditor("正在读取 Agent 配置…");$("blackboardText").textContent="正在读取项目黑板…";
   renderTargetEditor({targets:[],out_of_scope:[],success_criteria:[]},true);navigate("config");await refresh();
 }
 async function refresh(){
@@ -787,8 +834,10 @@ $("reviewAction").addEventListener("change",event=>{
   else if(action==="retest_requested")$("reviewClassification").value="inconclusive";
 });
 $("roleConfigBody").addEventListener("input",()=>{state.teamDirty=true});
+$("rolePromptMember").addEventListener("change",event=>{state.promptMemberIndex=Number(event.target.value)||0;renderRolePromptEditor()});
+$("rolePromptText").addEventListener("input",event=>{const member=state.teamConfig?.members?.[state.promptMemberIndex];if(!member)return;member.custom_prompt=event.target.value;state.teamDirty=true;$("rolePromptStatus").textContent=`当前编辑：${member.name}。已输入 ${event.target.value.length}/30000 字符；保存并应用后生效。`});
 $("roleConfigBody").addEventListener("click",event=>{const button=event.target.closest(".role-remove");if(!button||!state.teamConfig?.members)return;const row=button.closest("tr");const index=Number(row.dataset.index);if(!Number.isInteger(index)||index<0||index>=state.teamConfig.members.length)return;state.teamConfig.members.splice(index,1);state.teamDirty=true;renderTeamEditor(state.teamConfig,true);state.teamDirty=true});
-$("addRoleButton").addEventListener("click",()=>{if(!state.vendor||!state.teamConfig?.members)return showToast("请先创建并加载项目",true);state.teamConfig.members.push({name:`worker-${state.teamConfig.members.length+1}`,role:"executor",type:"codex",model:null,base_url:null,api_key_env:"OPENAI_API_KEY",auth_mode:"auto",sandbox:"workspace-write",max_running:1,priority:1,env:{},dangerously_bypass_sandbox:false});state.teamDirty=true;renderTeamEditor(state.teamConfig,true);state.teamDirty=true});
+$("addRoleButton").addEventListener("click",()=>{if(!state.vendor||!state.teamConfig?.members)return showToast("请先创建并加载项目",true);state.teamConfig.members.push({name:`worker-${state.teamConfig.members.length+1}`,role:"executor",runtime_mode:"local-docker",custom_prompt:null,type:"codex",model:null,base_url:null,api_key_env:"OPENAI_API_KEY",auth_mode:"auto",sandbox:"workspace-write",max_running:1,priority:1,env:{},dangerously_bypass_sandbox:false});state.promptMemberIndex=state.teamConfig.members.length-1;state.teamDirty=true;renderTeamEditor(state.teamConfig,true);state.teamDirty=true});
 $("saveTeamButton").addEventListener("click",async()=>{if(!state.vendor||!state.teamConfig)return showToast("请先创建并加载项目",true);const config=collectTeamConfig();const secrets=collectRuntimeSecrets();const result=await post("/api/config",{config,secrets},()=>"角色配置已保存，API Key 已安全写入系统钥匙串");state.secretStatus=result.secret_status||state.secretStatus;state.teamConfig=structuredClone(result.config||config);state.teamDirty=false;renderTeamEditor(state.teamConfig,true)});
 
 $("target-setup").addEventListener("input",event=>{if(event.target.id!=="newProjectName")state.targetDirty=true});
