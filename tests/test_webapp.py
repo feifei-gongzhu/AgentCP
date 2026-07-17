@@ -50,6 +50,82 @@ def test_waf_analyst_role_can_be_saved_from_web_config(
     webapp_module._save_config(store, config)
 
     assert store.read_json("team_config.json")["members"][0]["role"] == "waf_analyst"
+    assert store.read_json("team_config.json")["members"][0]["runtime_mode"] == "local-docker"
+
+
+def test_web_team_config_accepts_local_cli_runtime(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(store_module, "PROJECTS", tmp_path / "projects")
+    store = ProjectStore("local-cli")
+    store.init()
+    config = {
+        "members": [{
+            "name": "reason-local",
+            "role": "reason",
+            "type": "claude-cli",
+            "runtime_mode": "local-cli",
+            "model": "model-id",
+            "sandbox": "read-only",
+            "max_running": 1,
+            "priority": 0,
+            "env": {},
+        }],
+    }
+
+    webapp_module._save_config(store, config)
+
+    assert store.read_json("team_config.json")["members"][0]["runtime_mode"] == "local-cli"
+
+
+def test_web_team_config_rejects_local_cli_container(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(store_module, "PROJECTS", tmp_path / "projects")
+    store = ProjectStore("invalid-runtime")
+    store.init()
+    config = {
+        "members": [{
+            "name": "container-local",
+            "role": "executor",
+            "type": "container",
+            "runtime_mode": "local-cli",
+            "sandbox": "workspace-write",
+            "max_running": 1,
+            "env": {},
+        }],
+    }
+
+    with pytest.raises(webapp_module.WebAppError, match="不能选择 Container Worker"):
+        webapp_module._save_config(store, config)
+
+
+def test_web_team_config_accepts_optional_agent_compose_runtime(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(store_module, "PROJECTS", tmp_path / "projects")
+    store = ProjectStore("compose-optional")
+    store.init()
+    config = {
+        "members": [{
+            "name": "reason-compose",
+            "role": "reason",
+            "type": "claude-cli",
+            "runtime_mode": "agent-compose",
+            "model": "model-id",
+            "sandbox": "read-only",
+            "max_running": 1,
+            "priority": 0,
+            "env": {},
+        }],
+    }
+
+    webapp_module._save_config(store, config)
+
+    assert store.read_json("team_config.json")["members"][0]["runtime_mode"] == "agent-compose"
 
 
 def test_frontend_assets_are_wired_to_control_api() -> None:
@@ -62,6 +138,9 @@ def test_frontend_assets_are_wired_to_control_api() -> None:
     assert "/api/projects" in script
     assert "/api/evidence" in script
     assert 'id="roleConfigBody"' in index
+    assert 'id="rolePromptMember"' in index
+    assert 'id="rolePromptText"' in index
+    assert "custom_prompt" in script
     assert 'id="saveTeamButton"' in index
     assert 'post("/api/config"' in script
     assert 'id="targetTargets"' in index
@@ -119,6 +198,57 @@ def test_frontend_assets_are_wired_to_control_api() -> None:
         "submitFindingReview",
     ):
         assert f'"{action_id}"' in script
+
+
+def test_web_team_config_persists_per_agent_custom_prompt(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(store_module, "PROJECTS", tmp_path / "projects")
+    store = ProjectStore("custom-prompts")
+    store.init()
+    config = {
+        "members": [{
+            "name": "reason-main",
+            "role": "reason",
+            "type": "codex",
+            "runtime_mode": "local-cli",
+            "custom_prompt": "先检查负向证据，再生成新方向。",
+            "sandbox": "read-only",
+            "max_running": 1,
+            "priority": 0,
+            "env": {},
+        }],
+    }
+
+    webapp_module._save_config(store, config)
+
+    assert store.read_json("team_config.json")["members"][0]["custom_prompt"] == "先检查负向证据，再生成新方向。"
+
+
+def test_web_team_config_rejects_oversized_custom_prompt(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(store_module, "PROJECTS", tmp_path / "projects")
+    store = ProjectStore("oversized-prompt")
+    store.init()
+    config = {
+        "members": [{
+            "name": "reason-main",
+            "role": "reason",
+            "type": "codex",
+            "runtime_mode": "local-cli",
+            "custom_prompt": "x" * 30001,
+            "sandbox": "read-only",
+            "max_running": 1,
+            "priority": 0,
+            "env": {},
+        }],
+    }
+
+    with pytest.raises(webapp_module.WebAppError, match="30000"):
+        webapp_module._save_config(store, config)
 
 
 def test_evidence_path_cannot_escape_project(
@@ -222,9 +352,16 @@ def test_project_delete_checks_all_runs_including_paused_older_run(
     store.init()
     engine = AutomationEngine(store)
     paused_run = engine.start(max_workers=1)
-    engine.db.set_run_status(paused_run, "paused", "test")
+    engine.cancel(paused_run, "prepare_legacy_state")
     newer_run = engine.start(max_workers=1)
     engine.cancel(newer_run, "test")
+    # Simulate a V2/early-V3 database that already contains an older paused
+    # run. New starts now reject this state, but deletion must still detect it.
+    with engine.db.connect() as database:
+        database.execute(
+            "UPDATE automation_runs SET status='paused',error='legacy' WHERE id=?",
+            (paused_run,),
+        )
 
     with pytest.raises(webapp_module.WebAppError, match=paused_run):
         webapp_module._delete_project("multi-run-project", "multi-run-project")
@@ -425,9 +562,13 @@ def test_web_team_config_saves_and_reloads_project_roles(
                 "model": None,
                 "sandbox": "workspace-write",
                 "max_running": 4,
-                "priority": 20,
-                "env": {},
-                "dangerously_bypass_sandbox": False,
+                    "priority": 20,
+                    "env": {},
+                    "extra": {
+                        "image": "agentcp-worker:test",
+                        "worker_command": ["python3", "/app/entrypoint.py"],
+                    },
+                    "dangerously_bypass_sandbox": False,
             },
         ],
     }

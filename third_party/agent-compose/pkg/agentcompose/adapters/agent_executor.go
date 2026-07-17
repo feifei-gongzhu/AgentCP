@@ -136,6 +136,7 @@ func (e *AgentExecutor) ExecuteAgentRequest(ctx context.Context, session *domain
 		cell.Agent = firstNonEmpty(result.Agent, cell.Agent, agent)
 		cell.AgentThreadID = agentThreadID
 		cell.StopReason = result.StopReason
+		cell.FinalText = result.FinalText
 		cell.AgentResume = resumeInfo
 		failedCell := cell
 		cellMu.Unlock()
@@ -229,6 +230,7 @@ func (e *AgentExecutor) ExecuteAgentRequest(ctx context.Context, session *domain
 	cell.Agent = firstNonEmpty(result.Agent, cell.Agent)
 	cell.AgentThreadID = agentThreadID
 	cell.StopReason = result.StopReason
+	cell.FinalText = result.FinalText
 	cell.AgentResume = resumeInfo
 	cellSnapshot := cell
 	cellMu.Unlock()

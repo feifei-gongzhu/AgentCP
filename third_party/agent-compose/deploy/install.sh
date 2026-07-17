@@ -332,9 +332,11 @@ cleanup() {
   elif [ "$status" -ne 0 ] && [ "$INSTALL_DIR_CREATED" -eq 1 ] && [ "$INSTALL_MUTATED" -eq 0 ]; then
     rmdir "$INSTALL_DIR_CREATED_PATH" 2>/dev/null || true
   fi
-  for temporary in "${installer_temp_files[@]}"; do
-    rm -f "$temporary"
-  done
+  if ((${#installer_temp_files[@]})); then
+    for temporary in "${installer_temp_files[@]}"; do
+      rm -f "$temporary"
+    done
+  fi
   [ -z "$TMP_DIR" ] || rm -rf "$TMP_DIR"
   [ -z "$WORK_DIR" ] || rm -rf "$WORK_DIR"
   if [ "$preserve_rollback" -eq 0 ]; then

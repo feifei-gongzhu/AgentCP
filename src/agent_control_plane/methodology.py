@@ -58,8 +58,8 @@ CLIENT_DIMENSIONS = (
 )
 
 
-WEB_PACK = MethodPack("agentcp-web-v3", "Web 渗透 Method Pack", "web", "3.0", WEB_DIMENSIONS)
-CLIENT_PACK = MethodPack("agentcp-client-v3", "客户端漏洞挖掘 Method Pack", "client", "3.0", CLIENT_DIMENSIONS)
+WEB_PACK = MethodPack("agentcp-web-v3", "Web 渗透 Method Pack", "web", "3.1", WEB_DIMENSIONS)
+CLIENT_PACK = MethodPack("agentcp-client-v3", "客户端漏洞挖掘 Method Pack", "client", "3.1", CLIENT_DIMENSIONS)
 
 
 FOLLOW_UPS = {
@@ -97,7 +97,7 @@ def dynamic_checklist(target: dict[str, Any], pack: MethodPack, previous: dict[s
         if str(item).strip() and str(item) not in out_of_scope
     ]
     return {
-        "version": "3.0",
+        "version": "3.1",
         "method_pack_id": pack.id,
         "project_family": pack.project_family,
         "generated_from": {

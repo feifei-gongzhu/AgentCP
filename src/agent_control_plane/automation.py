@@ -18,7 +18,7 @@ from .directives import authoritative_directives, missing_directive_ids
 from .lifecycle import project_execution_lock, require_initialized_project
 from .memory import active_negative_evidence, matching_negative_evidence
 from .methodology import ensure_methodology
-from .schemas import GateStatus
+from .schemas import GateStatus, new_id, now_iso
 from .scheduler import Scheduler
 from .store import ProjectStore
 from .team import TeamMember, _run_member, load_team
@@ -41,6 +41,11 @@ NON_RETRYABLE_MODEL_ERRORS = {
     "invalid header",
     "缺少环境变量",
     "api_key_env 必须",
+    "no such file or directory",
+    "command not found",
+    "未找到本机 docker cli",
+    "不支持的运行模式",
+    "未返回带合法 kind",
 }
 
 ROLE_ACTIVITIES = {
@@ -157,6 +162,17 @@ def _model_endpoint(base_url: str | None) -> str:
 
 def _model_error_is_retryable(error: str) -> bool:
     lowered = error.casefold()
+    # Some relays incorrectly wrap an upstream timeout/empty body in HTTP 200.
+    # The transport succeeded, but no model response exists; treat it like a
+    # transient gateway failure rather than a successful/non-retryable 2xx.
+    if any(marker in lowered for marker in {
+        "empty or malformed response",
+        "empty response body",
+        "gateway intercepting the request",
+        "invalid json response",
+        "unexpected end of json input",
+    }):
+        return True
     if any(marker in lowered for marker in NON_RETRYABLE_MODEL_ERRORS):
         return False
     status_match = re.search(r"\b(?:http\s*|api error:\s*)(\d{3})\b", lowered)
@@ -197,20 +213,30 @@ class AutomationEngine:
             raise WorkerError("强制门禁正在等待批准，无法启动自动化运行。")
         if max_workers < 1:
             raise WorkerError("max_workers 必须大于 0")
+        active = self.db.latest_resumable_run()
+        if active:
+            raise WorkerError(
+                f"项目已有未结束运行 {active['id']} ({active['status']})，"
+                "请先恢复、批准或取消该运行。"
+            )
+        methodology = ensure_methodology(self.store, self.db)
+        try:
+            run_id = self.db.create_run(
+                self.store.vendor,
+                team_name,
+                timeout,
+                max_workers,
+                execution_lease_seconds=max(60, int(state.gate_interval_minutes) * 60),
+                max_waves=4,
+            )
+        except RuntimeError as exc:
+            raise WorkerError(str(exc)) from exc
         # Starting a new Run is an explicit human action and is the only way to
-        # clear a previous Run-level stop-loss latch.
+        # clear a previous Run-level stop-loss latch. Do this only after the
+        # transaction has successfully created the new Run.
         if state.current_decision == "stop_loss":
             state.current_decision = "continue"
             self.store.save_state(state)
-        methodology = ensure_methodology(self.store, self.db)
-        run_id = self.db.create_run(
-            self.store.vendor,
-            team_name,
-            timeout,
-            max_workers,
-            execution_lease_seconds=max(60, int(state.gate_interval_minutes) * 60),
-            max_waves=4,
-        )
         self.db.add_event(run_id, None, "method_pack_loaded", {
             "method_pack": methodology["method_pack"],
             "seeded_hypotheses": methodology["seeded"],
@@ -767,8 +793,38 @@ class AutomationEngine:
                 )
                 continue
             try:
+                waf_assessment_id = str(
+                    (job.get("payload") or {}).get("waf_assessment_id") or ""
+                ).strip()
+                waf_branch_stop = (
+                    job["role"] == "waf_analyst"
+                    and bool(waf_assessment_id)
+                    and payload.get("kind") == "decision"
+                    and payload.get("action") == "stop_loss"
+                )
+                if waf_branch_stop:
+                    WAFManager().record_result(
+                        self.store,
+                        waf_assessment_id,
+                        status="exhausted",
+                        used_delta=1,
+                    )
+                    self.store.append_jsonl("decision_log.jsonl", {
+                        "id": new_id("D"),
+                        "action": "stop_loss",
+                        "reason": str(payload.get("reason") or "WAF 分支止损"),
+                        "scope": "waf_branch",
+                        "waf_assessment_id": waf_assessment_id,
+                        "created_at": now_iso(),
+                    })
+                    self.db.mark_job_committed(job["id"])
+                    summaries.append(
+                        f"[{job['member_name']}] WAF 分支 {waf_assessment_id} 已止损；"
+                        "其他目标和攻击面继续调度"
+                    )
+                    continue
                 message = apply_worker_output(self.store, payload)
-                if job["role"] == "waf_analyst" and job["payload"].get("waf_assessment_id"):
+                if job["role"] == "waf_analyst" and waf_assessment_id:
                     waf_status = (
                         "exhausted"
                         if payload.get("kind") == "decision" and payload.get("action") == "stop_loss"
@@ -781,15 +837,11 @@ class AutomationEngine:
                     )
                     WAFManager().record_result(
                         self.store,
-                        str(job["payload"]["waf_assessment_id"]),
+                        waf_assessment_id,
                         status=waf_status,
                         used_delta=1,
                         differential_found=True if waf_status == "differential_found" else None,
                     )
-                if payload.get("kind") == "intent":
-                    latest_intents = self.store.read_jsonl("intents.jsonl")
-                    if latest_intents:
-                        self.db.register_direction(latest_intents[-1])
                 self.db.mark_job_committed(job["id"])
                 summaries.append(f"[{job['member_name']}] {message}")
                 if payload.get("kind") == "decision" and payload.get("action") == "stop_loss":
@@ -798,10 +850,13 @@ class AutomationEngine:
                     summaries.append("控制器 stop_loss 已终结当前 Run，后续候选写回已封锁")
                     break
             except Exception as exc:
-                self.db.mark_job_committed(job["id"], str(exc))
-                summaries.append(f"[{job['member_name']}] 候选结果延迟提交: {exc}")
+                error = str(exc)[:4000]
                 if self.store.load_state().gate_status == GateStatus.AWAITING_APPROVAL.value:
+                    self.db.mark_job_committed(job["id"], error)
+                    summaries.append(f"[{job['member_name']}] 候选结果延迟提交: {error}")
                     break
+                self.db.reject_job_candidate(job["id"], error)
+                summaries.append(f"[{job['member_name']}] 损坏候选已拒绝，不再阻塞 Run: {error}")
         return summaries
 
     def _can_advance_wave(self, run: dict[str, Any]) -> bool:

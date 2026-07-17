@@ -23,6 +23,18 @@ def test_expired_lease_can_be_reclaimed(tmp_path: Path) -> None:
     assert reclaimed["attempts"] == 2
 
 
+def test_project_cannot_start_two_active_runs(tmp_path: Path) -> None:
+    database = ControlDatabase(tmp_path / "control.db")
+    first = database.create_run("vendor", "default", 30, 1)
+
+    with pytest.raises(RuntimeError, match=first):
+        database.create_run("vendor", "default", 30, 1)
+
+    database.stop_run(first, "test cleanup")
+    second = database.create_run("vendor", "default", 30, 1)
+    assert second != first
+
+
 def test_failed_job_retries_until_max_attempts(tmp_path: Path) -> None:
     database = ControlDatabase(tmp_path / "control.db")
     run_id = database.create_run("vendor", "default", 30, 1)

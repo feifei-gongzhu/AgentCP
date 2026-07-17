@@ -17,7 +17,7 @@ class Controller:
             return Decision(
                 action=ControllerAction.REQUEST_CONFIRMATION.value,
                 phase=state.phase,
-                reason=f"同一执行节拍已达 {spent} 分钟，按 V3.0 强制暂停并请求用户批准。",
+                reason=f"同一执行节拍已达 {spent} 分钟，按 V3.1 强制暂停并请求用户批准。",
             )
 
         if state.fact_count == 0 and state.elapsed_minutes >= 45:

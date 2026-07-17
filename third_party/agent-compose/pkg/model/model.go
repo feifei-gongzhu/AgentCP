@@ -280,6 +280,7 @@ type NotebookCell struct {
 	Agent         string           `json:"agent,omitempty"`
 	AgentThreadID string           `json:"agent_thread_id,omitempty"`
 	StopReason    string           `json:"stop_reason,omitempty"`
+	FinalText     string           `json:"final_text,omitempty"`
 	AgentResume   *AgentResumeInfo `json:"agent_resume,omitempty"`
 }
 
