@@ -685,7 +685,7 @@ def _audit(store: ProjectStore, action: str, details: dict) -> None:
 
 
 class AgentControlHandler(SimpleHTTPRequestHandler):
-    server_version = "AgentControlPlane/3.1"
+    server_version = "AgentControlPlane/3.2"
 
     def end_headers(self) -> None:
         # The console is a live local control plane. Serving stale JavaScript can
