@@ -187,7 +187,7 @@ projects/vendor-name/
 - 设置模型、服务地址、API Key 环境变量名、沙箱、并发数和优先级。
 - 保存为项目级 `team_config.json`，下一次运行自动生效。
 
-前端支持两种密钥来源：填写环境变量名，或在“会话 API Key”中直接注入。会话 Key 只保存在当前服务进程内存，不写入 `team_config.json`、SQLite、审计日志或 API 响应；服务重启后需要重新输入。Web 配置不能启用 `dangerously_bypass_sandbox`。
+前端支持两种密钥来源：填写环境变量名，或在“会话 API Key”中直接注入。会话 Key 不写入 `team_config.json`、SQLite、审计日志或 API 响应；macOS 会保存到系统钥匙串并在服务重启后自动恢复，其他系统仅保存在当前服务进程内存。Web 配置不能启用 `dangerously_bypass_sandbox`。
 
 团队配置位于：
 

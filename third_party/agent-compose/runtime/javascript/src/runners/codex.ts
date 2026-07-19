@@ -48,12 +48,47 @@ export class CodexRunner {
 
   threadOptions(): Record<string, unknown> {
     return {
+      ...(this.options.model ? { model: this.options.model } : {}),
       workingDirectory: this.options.workspace,
       additionalDirectories: uniqueDirectories([this.options.stateRoot, this.options.home, this.options.runtimeRoot]),
       skipGitRepoCheck: true,
       sandboxMode: "danger-full-access",
       approvalPolicy: "never",
       networkAccessEnabled: true,
+    };
+  }
+
+  codexOptions(): Record<string, unknown> {
+    const env = stringEnv();
+    const baseUrl = env.LLM_API_ENDPOINT || env.OPENAI_BASE_URL;
+    const apiKey = env.LLM_API_KEY || env.OPENAI_API_KEY;
+    const config: Record<string, unknown> = {
+      ...(baseUrl
+        ? {
+            model_provider: "agentcp",
+            model_providers: {
+              agentcp: {
+                name: "AgentCP",
+                base_url: baseUrl,
+                env_key: "LLM_API_KEY",
+                wire_api: "responses",
+                supports_websockets: false,
+              },
+            },
+          }
+        : {}),
+      ...(this.options.systemContext
+        ? { developer_instructions: this.options.systemContext }
+        : {}),
+    };
+    return {
+      codexPathOverride: resolveCodexPath(),
+      env,
+      // Codex SDK does not infer a custom endpoint from OPENAI_BASE_URL. These
+      // constructor fields are the supported bridge to the CLI and also inject
+      // CODEX_API_KEY into the isolated child process without reading host config.
+      ...(apiKey ? { apiKey } : {}),
+      ...(Object.keys(config).length ? { config } : {}),
     };
   }
 
@@ -186,17 +221,17 @@ export class CodexRunner {
 
   async runPrompt(promptText: string): Promise<AgentResult> {
     const { Codex } = await import("@openai/codex-sdk");
-    const stored = await readStoredThread(this.options.stateRoot, "codex");
-    const codex = new Codex({
-      codexPathOverride: resolveCodexPath(),
-      env: stringEnv(),
-      // `config` (the `--config key=value` overrides) is a CodexOptions field on the
-      // constructor; it is NOT read from ThreadOptions/startThread. Injecting the combined
-      // Agent Identity + MPI system context here applies to both start and resume flows.
-      ...(this.options.systemContext
-        ? { config: { developer_instructions: this.options.systemContext } }
-        : {}),
-    });
+    // AgentCP workers externalize memory to the blackboard. Reusing a provider
+    // thread would retain deleted project prompts and stale task context, so the
+    // orchestration adapter explicitly requests a fresh thread for each Job.
+    const statelessWorker = process.env.AGENTCP_STATELESS_WORKER === "1";
+    const stored = statelessWorker
+      ? null
+      : await readStoredThread(this.options.stateRoot, "codex");
+    // `config` (the `--config key=value` overrides) is a CodexOptions field on the
+    // constructor; it is NOT read from ThreadOptions/startThread. The same options
+    // builder is shared with interactive sessions so routing cannot diverge.
+    const codex = new Codex(this.codexOptions());
     const thread = stored?.threadId
       ? codex.resumeThread(stored.threadId, this.threadOptions())
       : codex.startThread(this.threadOptions());

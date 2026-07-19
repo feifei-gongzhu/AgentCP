@@ -43,6 +43,38 @@ def require_initialized_project(store: ProjectStore) -> None:
         raise ProjectLifecycleMissing(f"项目不存在或尚未初始化: {vendor}")
 
 
+def require_executable_target(store: ProjectStore) -> None:
+    """Require a real uploaded artifact before a client audit can start."""
+    target = store.read_json("target.json")
+    project_type = str(target.get("project_type") or "").strip().casefold()
+    client_project = any(marker in project_type for marker in (
+        "客户端", "client", "desktop", "electron", "android", "ios", "apk", "ipa", "移动端", "桌面端",
+    )) and not any(marker in project_type for marker in ("web", "api", "网站", "网页"))
+    if not client_project:
+        return
+    artifact = target.get("uploaded_artifact")
+    if not isinstance(artifact, dict) or not str(artifact.get("path") or "").strip():
+        raise ProjectLifecycleMissing("客户端项目必须先上传测试文件，才能启动审计")
+    artifact_path = Path(str(artifact["path"])).resolve()
+    upload_root = (store.path / "uploads").resolve()
+    try:
+        artifact_path.relative_to(upload_root)
+    except ValueError as exc:
+        raise ProjectLifecycleMissing("客户端目标文件不在当前项目上传目录内") from exc
+    if artifact_path.is_symlink() or not artifact_path.is_file():
+        raise ProjectLifecycleMissing("客户端目标文件不存在，请重新上传")
+    expected_size = int(artifact.get("size") or 0)
+    if expected_size <= 0 or artifact_path.stat().st_size != expected_size:
+        raise ProjectLifecycleMissing("客户端目标文件大小已变化，请重新上传")
+    expected_digest = str(artifact.get("sha256") or "").strip().casefold()
+    digest = hashlib.sha256()
+    with artifact_path.open("rb") as source:
+        for chunk in iter(lambda: source.read(1024 * 1024), b""):
+            digest.update(chunk)
+    if not expected_digest or digest.hexdigest() != expected_digest:
+        raise ProjectLifecycleMissing("客户端目标文件完整性校验失败，请重新上传")
+
+
 def _lock_path(store: ProjectStore) -> Path:
     lock_root = store.path.parent / ".lifecycle-locks"
     lock_root.mkdir(parents=True, exist_ok=True)

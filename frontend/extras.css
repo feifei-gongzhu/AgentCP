@@ -232,6 +232,22 @@
 .target-form-grid textarea, .target-form-grid input, .new-project-box input { width: 100%; }
 .target-stack { display: grid; gap: 10px; }
 .span-all { grid-column: 1 / -1; }
+.client-upload {
+  display: grid;
+  grid-template-columns: minmax(240px, 1fr) minmax(220px, .75fr) auto;
+  align-items: end;
+  gap: 12px;
+  padding: 14px;
+  border: 1px dashed #38526f;
+  border-radius: 10px;
+  background: rgba(28, 51, 76, .22);
+}
+.client-upload[hidden] { display: none; }
+.client-upload > div { align-self: center; }
+.client-upload strong, .client-upload span, .client-upload small { display: block; }
+.client-upload span, .client-upload small { margin-top: 4px; color: var(--muted); font-size: 11px; }
+.client-upload small { grid-column: 1 / -1; }
+.client-upload-picker input { width: 100%; margin-top: 6px; }
 .target-actions {
   display: flex;
   justify-content: space-between;
@@ -312,6 +328,8 @@
   .hub-quality-summary { grid-template-columns: 1fr; }
   .span-all { grid-column: auto; }
   .target-actions, .new-project-box { align-items: stretch; flex-direction: column; }
+  .client-upload { grid-template-columns: 1fr; align-items: stretch; }
+  .client-upload small { grid-column: auto; }
   .gate-approval-head, .gate-approval-actions { align-items: stretch; flex-direction: column; }
   .gate-objective-metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .gate-approval-footer { grid-template-columns: 1fr; }

@@ -8,7 +8,7 @@ const state = {
 const $ = id => document.getElementById(id);
 
 const projectActionIds=[
-  "deleteProjectButton","saveTargetButton","launchButton","cancelButton",
+  "deleteProjectButton","saveTargetButton","uploadClientArtifactButton","launchButton","cancelButton",
   "hintButton","addRoleButton","saveTeamButton","copyBoard",
   "enterProjectButton","startAuditButton","gateContinueButton","gateStopButton","submitFindingReview",
 ];
@@ -110,27 +110,44 @@ function renderFactRow(fact,{withImpact=false,pending=false}={}){
 }
 function latestVerdictMap(project){const result={};(project.human_verdicts||[]).forEach(item=>{result[item.finding_id]=item});return result}
 function verdictLabel(verdict){if(!verdict)return "待人工复核";const action=({accepted:"人工认可",adjusted:"人工调级",refuted:"已驳斥",reclassified:"已降级",retest_requested:"要求复验"})[verdict.action]||verdict.action;return `${action} · ${classificationLabel(verdict.final_classification)} · ${verdict.final_severity||"unknown"}`}
-function renderVulnerabilityRow(fact,verdict){
-  const row=renderFactRow(fact,{withImpact:true,pending:fact.__pending});const action=cell("","human-review-cell");
+function evidenceForFact(fact,indexedEvidence){
+  const configured=String(fact.evidence_path||"").replace(/\/+$/,"");
+  return (indexedEvidence||[]).filter(item=>
+    item.fact_id===fact.id||Boolean(configured&&(item.path===configured||String(item.path||"").startsWith(`${configured}/`)))
+  );
+}
+function reproductionCell(fact,indexedEvidence){
+  const wrapper=cell("","reproduction-cell");const steps=Array.isArray(fact.reproduction_steps)?fact.reproduction_steps.filter(Boolean):[];
+  const matches=evidenceForFact(fact,indexedEvidence);const summary=document.createElement("strong");summary.textContent=`${steps.length} 步复现 · ${matches.length} 份证据`;wrapper.append(summary);
+  if(steps.length){const list=document.createElement("ol");steps.forEach(step=>{const item=document.createElement("li");item.textContent=step;list.append(item)});wrapper.append(list)}
+  else{const missing=document.createElement("small");missing.textContent="缺少结构化复现步骤";wrapper.append(missing)}
+  const evidenceList=document.createElement("div");evidenceList.className="finding-evidence-links";
+  matches.forEach(item=>{const button=document.createElement("button");button.type="button";button.className="button ghost small vulnerability-evidence-open";button.dataset.path=item.path;button.textContent=`查看证据 · ${item.path}`;button.title=`SHA-256 ${item.sha256||"未索引"}`;evidenceList.append(button)});
+  if(!matches.length){const missing=document.createElement("small");missing.textContent=fact.evidence_path?`证据未进入索引：${fact.evidence_path}`:"漏洞未声明证据路径";evidenceList.append(missing)}
+  wrapper.append(evidenceList);return wrapper;
+}
+function renderVulnerabilityRow(fact,verdict,indexedEvidence){
+  const row=renderFactRow(fact,{withImpact:true,pending:fact.__pending});row.append(reproductionCell(fact,indexedEvidence));const action=cell("","human-review-cell");
   const label=document.createElement("small");label.textContent=verdictLabel(verdict);action.append(label);
   const button=document.createElement("button");button.type="button";button.className="button ghost small finding-review-open";button.dataset.findingId=fact.id;button.textContent=verdict?"重新判断":"人工判断";action.append(button);row.append(action);return row;
 }
 function riskLeadFromDirection(direction){
   const intent=direction.intent||{};
   const risk=String(intent.risk_level||"unknown").toLowerCase();
-  const active=["open","claimed"].includes(direction.status);
+  const active=["open","claimed","released"].includes(direction.status);
   const meaningful=["critical","high","medium"].includes(risk)||intent.requires_human_confirmation;
   if(!active||!meaningful)return null;
-  const prefix=direction.status==="claimed"?"执行中":"待验证";
   return {
     id:direction.id,
-    title:`[${prefix}] ${intent.target||"未指定目标"}`,
+    title:intent.hypothesis||intent.target||"未指定目标",
     severity:risk,
     classification:"risk_lead",
     business_impact:intent.expected_business_impact||intent.success_criteria||"需要验证是否能形成具体业务危害闭环",
     impact_score:risk==="critical"?0.9:risk==="high"?0.75:0.55,
     confidence:direction.status==="claimed"?0.45:0.35,
     __direction:true,
+    direction_status:direction.status,
+    created_at:direction.created_at,
     updated_at:direction.updated_at,
   };
 }
@@ -179,6 +196,7 @@ const jobStatusLabels={
   queued:"排队中",
   running:"运行中",
   completed:"已完成",
+  restricted:"模型策略受限",
   failed:"失败",
   cancelled:"已取消",
   paused:"已暂停",
@@ -232,8 +250,67 @@ function formatEventTime(value){
   if(!value)return "—";
   const date=new Date(value);return Number.isNaN(date.getTime())?String(value):date.toLocaleString();
 }
+function ageLabel(value){
+  if(!value)return "时间未知";
+  const timestamp=new Date(value).getTime();
+  if(Number.isNaN(timestamp))return "时间未知";
+  const seconds=Math.max(0,Math.floor((Date.now()-timestamp)/1000));
+  if(seconds<60)return "刚刚";
+  const minutes=Math.floor(seconds/60);if(minutes<60)return `${minutes} 分钟前`;
+  const hours=Math.floor(minutes/60);if(hours<24)return `${hours} 小时前`;
+  return `${Math.floor(hours/24)} 天前`;
+}
+function riskLeadLifecycle(item){
+  if(item.__pending)return {key:"pending_commit",label:"待收敛",detail:"模型结果尚未写入黑板"};
+  if(item.__direction){
+    if(item.direction_status==="claimed")return {key:"validating",label:"验证中",detail:"执行器已认领"};
+    const cooldown=String(item.terminal_reason||"").match(/^policy_blocked_until:(.+)$/);
+    if(cooldown&&new Date(cooldown[1]).getTime()>Date.now())return {key:"blocked",label:"模型策略冷却",detail:`${formatEventTime(cooldown[1])} 后可重新调度`};
+    const createdAt=new Date(item.created_at||item.updated_at||0).getTime();
+    const stale=Number.isFinite(createdAt)&&createdAt>0&&Date.now()-createdAt>=24*60*60*1000;
+    if(stale)return {key:"stale",label:"已积压",detail:"等待超过 24 小时，需调度或人工处理"};
+    if(item.direction_status==="released")return {key:"queued",label:"已释放重排",detail:"前次未闭环，等待重新认领"};
+    return {key:"queued",label:"排队验证",detail:"等待执行器认领"};
+  }
+  if(item.intent_id)return {key:"queued",label:"待关联验证",detail:`已关联方向 ${item.intent_id}`};
+  return {key:"unscheduled",label:"待转验证",detail:"尚未生成可执行验证方向"};
+}
+function riskLeadIdentity(item){
+  const normalize=value=>String(value||"").replace(/^\[(?:候选|待验证|执行中)\]\s*/,"").replace(/\s+/g," ").trim().toLocaleLowerCase();
+  return `${normalize(item.title)}\u001f${normalize(item.business_impact)}`;
+}
+function deduplicateRiskLeads(items){
+  const priority={validating:6,pending_commit:5,queued:4,unscheduled:3,stale:2};
+  const selected=new Map();
+  items.forEach(item=>{
+    const key=riskLeadIdentity(item);const lifecycle=riskLeadLifecycle(item);
+    const current=selected.get(key);const currentLifecycle=current?riskLeadLifecycle(current):null;
+    if(!current||(priority[lifecycle.key]||0)>(priority[currentLifecycle.key]||0))selected.set(key,item);
+  });
+  return [...selected.values()].sort((left,right)=>{
+    const stateDiff=(priority[riskLeadLifecycle(right).key]||0)-(priority[riskLeadLifecycle(left).key]||0);
+    return stateDiff||String(right.updated_at||right.created_at||"").localeCompare(String(left.updated_at||left.created_at||""));
+  });
+}
+function renderRiskLeadRow(item){
+  const row=document.createElement("tr");const lifecycle=riskLeadLifecycle(item);
+  const level=item.__pending?`${item.severity||"unknown"} · 待审查`:(item.severity||"unknown");
+  const title=item.__pending?`[候选] ${item.title}`:item.title;
+  const stateCell=cell("",`lead-state ${lifecycle.key}`);
+  const state=document.createElement("strong");state.textContent=lifecycle.label;
+  const detail=document.createElement("small");detail.textContent=lifecycle.detail;stateCell.append(state,document.createElement("br"),detail);
+  const timestamp=item.created_at||item.updated_at;
+  const timeCell=cell("","lead-time");const absolute=document.createElement("span");absolute.textContent=formatEventTime(timestamp);
+  const age=document.createElement("small");age.textContent=ageLabel(timestamp);timeCell.append(absolute,document.createElement("br"),age);
+  row.append(cell(level,`severity ${item.severity||""}`),cell(title),stateCell,timeCell,cell(item.business_impact||"尚未形成漏洞闭环"),cell(percent(item.impact_score)),cell(percent(item.confidence)));
+  return row;
+}
 function truncateText(value,limit=260){
   const text=String(value||"").trim();return text.length>limit?`${text.slice(0,limit)}…`:text;
+}
+function isModelPolicyRestriction(value){
+  const text=String(value?.error||value||"").toLowerCase();
+  return text.includes("flagged for possible cybersecurity risk")||text.includes("trusted access for cyber")||text.includes("content policy")||text.includes("safety policy refusal");
 }
 function activityForJob(job){
   const intent=job.payload?.direction?.intent;
@@ -249,7 +326,7 @@ function activityForJob(job){
 function latestModelSignal(job,events){
   const matching=[...events].reverse().filter(event=>event.job_id===job.id);
   const progressTypes=["model_tool_started","model_tool_completed","model_assistant_update","model_stream_result"];
-  if(["completed","failed","cancelled"].includes(job.status))return matching.find(event=>["model_call_completed","model_call_failed"].includes(event.event_type))||matching[0];
+  if(["completed","failed","restricted","cancelled"].includes(job.status))return matching.find(event=>["model_call_completed","model_call_failed","model_policy_restricted"].includes(event.event_type))||matching[0];
   if(job.status==="queued")return matching.find(event=>["model_retry_scheduled","model_call_failed"].includes(event.event_type))||matching[0];
   const startIndex=matching.findIndex(event=>event.event_type==="model_call_started");
   const currentAttempt=startIndex<0?matching:matching.slice(0,startIndex+1);
@@ -265,17 +342,21 @@ function jobSignalText(job,event){
   if(job.status==="running")return data.elapsed_seconds==null?"等待 Claude CLI 返回":`等待 Claude CLI 返回 · ${data.elapsed_seconds}s / ${data.timeout_seconds||"?"}s`;
   if(job.status==="queued")return job.attempts?"等待下一次重试":"等待 Worker 领取";
   if(job.status==="completed")return "模型结果已接收并持久化";
+  if(job.status==="restricted")return "模型策略受限，未产生候选结果";
   if(job.status==="cancelled")return "任务已取消";
-  if(job.status==="failed")return "模型任务失败";
+  if(job.status==="failed")return isModelPolicyRestriction(job)?"模型策略受限":"模型任务失败";
   return job.status||"等待状态更新";
 }
 function renderRunFailure(automation){
   const alert=$("runFailure");const run=automation.run||{};const jobs=automation.jobs||[];
   const failedJob=[...jobs].reverse().find(job=>job.error&&["failed","cancelled"].includes(job.status));
+  const restrictedJob=[...jobs].reverse().find(job=>job.error&&job.status==="restricted");
   const runFailed=run.status==="failed";
-  const error=runFailed?(run.error||failedJob?.error):failedJob?.error;
+  const runStopped=["stopped","cancelled"].includes(run.status);
+  const error=runStopped?(run.error||"运行已由用户停止"):runFailed?(run.error||failedJob?.error):restrictedJob?.error||failedJob?.error;
   if(!error){alert.hidden=true;alert.replaceChildren();return}
-  const title=document.createElement("strong");title.textContent=runFailed?"运行失败":"模型任务失败";
+  const policyRestricted=!runFailed&&!runStopped&&Boolean(restrictedJob||isModelPolicyRestriction(failedJob));
+  const title=document.createElement("strong");title.textContent=runStopped?"运行已停止":runFailed?"运行失败":policyRestricted?"模型策略受限":"模型任务失败";
   const detail=document.createElement("span");detail.textContent=truncateText(error,900);detail.title=String(error);
   alert.className=`run-failure${runFailed?" critical":""}`;alert.replaceChildren(title,detail);alert.hidden=false;
 }
@@ -386,6 +467,16 @@ function friendlyEvent(event){
   if(type==="model_call_failed")return {
     kind:"failed",title:/402|insufficient balance/i.test(data.error||"")?"模型账户余额不足，已停止重试":data.retryable?"模型调用失败，可重试":"模型调用失败，已停止重试",summary:member,
     meta:[data.duration_seconds!=null&&`耗时 ${data.duration_seconds}s`,data.status&&`任务状态 ${data.status}`].filter(Boolean).join(" · "),error:data.error,
+  };
+  if(type==="model_policy_restricted")return {
+    kind:"waiting",title:"模型策略受限",summary:member,
+    meta:[data.duration_seconds!=null&&`耗时 ${data.duration_seconds}s`,"已停止重试，其他并发结果继续收敛"].filter(Boolean).join(" · "),
+    detail:data.error,
+  };
+  if(type==="model_policy_fallback_started")return {
+    kind:"retry",title:"切换为内置角色提示词重试",summary:member,
+    meta:"项目提示词保持原样保存；本次调用不再附加触发策略的自定义内容",
+    detail:data.reason,
   };
   if(["model_call_retry","model_call_retried","model_retry_scheduled","model_call_retry_scheduled"].includes(type))return {
     kind:"retry",title:"已安排模型重试",summary:member,
@@ -498,10 +589,24 @@ function renderTargetEditor(target,force=false){
   $("targetSuccessCriteria").value=(state.targetConfig.success_criteria||[]).join("\n");
   $("targetNotes").value=state.targetConfig.notes||"";
   $("saveTargetButton").disabled=!state.vendor;
+  renderClientUpload();
+}
+function renderClientUpload(){
+  const visible=projectTypeOption($("targetProjectType").value)==="客户端";
+  $("clientUploadPanel").hidden=!visible;
+  $("webTargetField").hidden=visible;
+  $("localTargetPathField").hidden=visible;
+  if(!visible)return;
+  const file=$("clientArtifactFile").files?.[0];
+  $("uploadClientArtifactButton").disabled=!state.vendor||!file;
+  const artifact=state.targetConfig?.uploaded_artifact;
+  $("clientUploadStatus").textContent=artifact
+    ? `当前文件：${artifact.name} · ${Number(artifact.size||0).toLocaleString()} bytes · SHA-256 ${String(artifact.sha256||"").slice(0,16)}…`
+    : state.vendor?(file?`待上传：${file.name} · ${file.size.toLocaleString()} bytes`:`请选择文件。单文件默认上限 2 GiB。`):"请先创建或选择项目，再上传文件。";
 }
 function lines(id){return $(id).value.split(/\r?\n/).map(item=>item.trim()).filter(Boolean)}
-function collectTargetConfig(){return {
-  targets:lines("targetTargets"),target_path:$("targetPath").value.trim(),project_type:$("targetProjectType").value.trim(),
+function collectTargetConfig(){const client=projectTypeOption($("targetProjectType").value)==="客户端";return {
+  targets:client?[]:lines("targetTargets"),target_path:client?(state.targetConfig?.uploaded_artifact?state.targetConfig.target_path||"":""):$("targetPath").value.trim(),project_type:$("targetProjectType").value.trim(),
   goal:$("targetGoal").value.trim(),out_of_scope:lines("targetOutOfScope"),success_criteria:lines("targetSuccessCriteria"),notes:$("targetNotes").value.trim()
 }}
 
@@ -517,7 +622,7 @@ function renderProjectCards(){
     const card=document.createElement("article");card.className=`project-card${project.vendor===state.vendor?" selected":""}`;card.dataset.vendor=project.vendor;
     const head=document.createElement("div");head.className="project-card-head";
     const heading=document.createElement("h3");heading.textContent=project.vendor;
-    const badge=document.createElement("span");setBadge(badge,project.gate_status||"idle");head.append(heading,badge);
+    const badge=document.createElement("span");setBadge(badge,project.run_status||project.gate_status||"idle");head.append(heading,badge);
     const summary=document.createElement("p");summary.className="subtle";summary.textContent=project.current_task||project.goal||"尚未定义当前审计任务";
     const meta=document.createElement("div");meta.className="project-card-meta";
     [["阶段",phaseLabel(project.phase)],["目标",`${project.target_count??0} 个`],["事实",`${project.fact_count??0} 条`],["漏洞",`${project.vulnerability_count??0} 个`]].forEach(([label,value])=>{
@@ -545,11 +650,12 @@ function renderProject(project,metrics,automation,config,evidenceResult,auditRes
   $("updatedValue").textContent=data.updated_at?`更新于 ${new Date(data.updated_at).toLocaleString()}`:"尚未更新";
   $("decisionValue").textContent=data.current_decision||"continue";
   $("gateReason").textContent=data.gate_reason||"尚未触发强制节拍";
-  setBadge($("gateBadge"),data.gate_status);
+  setBadge($("gateBadge"),data.gate_status==="awaiting_approval"?"awaiting_approval":automation.run?.status||"idle");
   renderGateApproval(data,automation);
-  const jobs=automation.jobs||[];const terminalJobs=jobs.filter(job=>["completed","failed","cancelled","cancelling"].includes(job.status));
+  const jobs=automation.jobs||[];const terminalJobs=jobs.filter(job=>["completed","failed","restricted","cancelled","cancelling"].includes(job.status));
   const completedJobs=jobs.filter(job=>job.status==="completed").length;const failedJobs=jobs.filter(job=>["failed","cancelled","cancelling"].includes(job.status)).length;
-  const currentRun=metrics.automation.current_run||{jobs:jobs.length,finished_jobs:terminalJobs.length,completed_jobs:completedJobs,failed_jobs:failedJobs,progress_rate:jobs.length?terminalJobs.length/jobs.length:0};
+  const restrictedJobs=jobs.filter(job=>job.status==="restricted").length;
+  const currentRun=metrics.automation.current_run||{jobs:jobs.length,finished_jobs:terminalJobs.length,completed_jobs:completedJobs,failed_jobs:failedJobs,restricted_jobs:restrictedJobs,progress_rate:jobs.length?terminalJobs.length/jobs.length:0};
   const declaredAssets=new Set((project.target.targets||[]).map(value=>String(value).trim().toLowerCase()).filter(Boolean)).size;
   const assetTotal=metrics.assets?.total??Math.max(data.asset_count??0,declaredAssets);
   const pendingFacts=metrics.quality.pending_facts??jobs.filter(job=>job.status==="completed"&&!job.committed_at&&job.result?.payload?.kind==="fact").length;
@@ -562,7 +668,7 @@ function renderProject(project,metrics,automation,config,evidenceResult,auditRes
   $("coverageMetric").textContent=`${Math.round(metrics.coverage.coverage_rate*100)}%`;
   $("coverageMetricNote").textContent=`${metrics.coverage.covered}/${metrics.coverage.dimensions} 个维度已观察`;
   $("jobMetric").textContent=`${Math.round(currentRun.progress_rate*100)}%`;
-  $("jobMetricNote").textContent=currentRun.jobs?`${currentRun.finished_jobs}/${currentRun.jobs} 已结束 · ${currentRun.completed_jobs} 成功 / ${currentRun.failed_jobs} 失败`:"暂无 Job";
+  $("jobMetricNote").textContent=currentRun.jobs?`${currentRun.finished_jobs}/${currentRun.jobs} 已结束 · ${currentRun.completed_jobs} 成功 / ${currentRun.failed_jobs} 失败${currentRun.restricted_jobs?` / ${currentRun.restricted_jobs} 策略受限`:""}`:"暂无 Job";
   setBadge($("runBadge"),automation.run?.status||"idle");
   $("runSummary").textContent=automation.run?`${automation.run.id} · ${automation.run.team} · ${automation.run.stage} · workers ${automation.run.max_workers}`:"暂无自动化运行";
   renderRunFailure(automation);
@@ -578,7 +684,8 @@ function renderProject(project,metrics,automation,config,evidenceResult,auditRes
     const heartbeat=document.createElement("span");heartbeat.textContent=job.last_heartbeat_at?`AgentCP 调度心跳 ${formatEventTime(job.last_heartbeat_at)}`:"尚未收到 AgentCP 调度心跳";activity.append(heartbeat);
     if(job.status==="running"){const caveat=document.createElement("small");caveat.textContent="工具事件来自 Claude stream-json；调度心跳与工具进度独立";activity.append(caveat)}
     if(job.error){const error=document.createElement("code");error.textContent=truncateText(job.error,220);error.title=String(job.error);activity.append(error)}
-    row.append(cell(workerLabel(job)),cell(roleLabel(job.role)),modelCell,taskCell,cell(stageLabel(job.stage)),cell(jobStatusLabel(job.status),`job-status ${job.status||""}`),cell(`${job.attempts??0}/${job.max_attempts??"?"}`),activity);return row;
+    const visibleStatus=job.status==="failed"&&isModelPolicyRestriction(job)?"模型策略受限":jobStatusLabel(job.status);
+    row.append(cell(workerLabel(job)),cell(roleLabel(job.role)),modelCell,taskCell,cell(stageLabel(job.stage)),cell(visibleStatus,`job-status ${job.status||""}`),cell(`${job.attempts??0}/${job.max_attempts??"?"}`),activity);return row;
   });
   const events=[
     ...(automation.events||[]).filter(event=>event.event_type!=="model_agent_compose_log"),
@@ -610,16 +717,20 @@ function renderProject(project,metrics,automation,config,evidenceResult,auditRes
   const factRows=[...project.facts,...pendingFactRows];
   const directionRiskLeads=(project.directions||[]).map(riskLeadFromDirection).filter(Boolean);
   const attackIntel=factRows.filter(fact=>factClassification(fact)==="attack_surface");
-  const riskLeads=[...factRows.filter(fact=>factClassification(fact)==="risk_lead"),...directionRiskLeads];
+  const rawRiskLeads=[...factRows.filter(fact=>factClassification(fact)==="risk_lead"),...directionRiskLeads];
+  const riskLeads=deduplicateRiskLeads(rawRiskLeads);
   const vulnerabilities=factRows.filter(fact=>factClassification(fact)==="vulnerability");
   const verdicts=latestVerdictMap(project);
   const pendingSuffix=pendingFactRows.length?` · ${pendingFactRows.length} 待审查`:"";
   $("attackIntelCount").textContent=`${attackIntel.length} 条${pendingSuffix}`;
-  $("riskLeadsCount").textContent=`${riskLeads.length} 条`;
+  const leadLifecycleCounts=riskLeads.reduce((counts,item)=>{const key=riskLeadLifecycle(item).key;counts[key]=(counts[key]||0)+1;return counts},{});
+  const duplicateCount=rawRiskLeads.length-riskLeads.length;
+  $("riskLeadsCount").textContent=`${riskLeads.length} 条 · 验证中 ${leadLifecycleCounts.validating||0} · 积压 ${leadLifecycleCounts.stale||0}${duplicateCount?` · 合并重复 ${duplicateCount}`:""}`;
   $("vulnerabilitiesCount").textContent=`${vulnerabilities.length} 条`;
   renderRows($("attackIntelBody"),attackIntel,4,fact=>renderFactRow(fact,{pending:fact.__pending}));
-  renderRows($("riskLeadsBody"),riskLeads,5,fact=>renderFactRow(fact,{withImpact:true,pending:fact.__pending}));
-  renderRows($("vulnerabilitiesBody"),vulnerabilities,6,fact=>renderVulnerabilityRow(fact,verdicts[fact.id]));
+  renderRows($("riskLeadsBody"),[...riskLeads].reverse(),7,renderRiskLeadRow);
+  const indexedEvidence=evidenceResult.evidence||[];
+  renderRows($("vulnerabilitiesBody"),vulnerabilities,7,fact=>renderVulnerabilityRow(fact,verdicts[fact.id],indexedEvidence));
   const quality=project.quality_metrics||{};
   const globalQuality=project.global_quality_metrics||{};
   $("qualitySystemVulns").textContent=quality.system_vulnerabilities??vulnerabilities.length;
@@ -639,8 +750,7 @@ function renderProject(project,metrics,automation,config,evidenceResult,auditRes
   renderRows($("negativeEvidenceBody"),negativeEvidence,5,item=>{const row=document.createElement("tr");const validUntil=item.valid_until?new Date(item.valid_until):null;const active=!validUntil||validUntil.getTime()>Date.now();row.append(cell(item.target),cell(item.hypothesis),cell(item.reason),cell(validUntil&&!Number.isNaN(validUntil.getTime())?validUntil.toLocaleString():"未设置"),cell(active?"有效期内剪枝":"已失效，可重新验证"));return row});
   const directionRows=(project.directions||[]).map(direction=>({...direction.intent,direction_id:direction.id,direction_status:direction.status,terminal_reason:direction.terminal_reason}));
   $("intentsCount").textContent=`${directionRows.length} 条`;
-  renderRows($("intentsBody"),directionRows,6,intent=>{const row=document.createElement("tr");const humanDismissed=intent.direction_status==="cancelled"&&String(intent.terminal_reason||"").startsWith("human_dismissed:");const riskText=`潜在 ${intent.risk_level||"未知"} / 操作 ${intent.action_safety_risk||"low"}`;row.append(cell(intent.verb),cell(intent.target),cell(intent.success_criteria),cell(riskText),cell(humanDismissed?"人工否决":intent.direction_status||"open"));const action=cell("");const button=document.createElement("button");button.type="button";button.className=`button ${humanDismissed?"ghost":"danger"} small direction-dismiss`;button.dataset.directionId=intent.direction_id;button.textContent=humanDismissed?"已删除":"删除方向";button.disabled=humanDismissed;action.append(button);row.append(action);if(humanDismissed)row.title=String(intent.terminal_reason).replace(/^human_dismissed:/,"");return row});
-  const indexedEvidence=evidenceResult.evidence||[];
+  renderRows($("intentsBody"),directionRows,6,intent=>{const row=document.createElement("tr");const terminalReason=String(intent.terminal_reason||"");const humanDismissed=intent.direction_status==="cancelled"&&terminalReason.startsWith("human_dismissed:");const policyCooling=intent.direction_status==="released"&&terminalReason.startsWith("policy_blocked_until:")&&new Date(terminalReason.slice("policy_blocked_until:".length)).getTime()>Date.now();const riskText=`潜在 ${intent.risk_level||"未知"} / 操作 ${intent.action_safety_risk||"low"}`;row.append(cell(intent.verb),cell(intent.target),cell(intent.success_criteria),cell(riskText),cell(humanDismissed?"人工否决":policyCooling?"模型策略冷却":intent.direction_status||"open"));const action=cell("");const button=document.createElement("button");button.type="button";button.className=`button ${humanDismissed?"ghost":"danger"} small direction-dismiss`;button.dataset.directionId=intent.direction_id;button.textContent=humanDismissed?"已删除":"删除方向";button.disabled=humanDismissed;action.append(button);row.append(action);if(humanDismissed)row.title=terminalReason.replace(/^human_dismissed:/,"");return row});
   const indexedPaths=new Set(indexedEvidence.map(item=>item.path));
   const pendingEvidence=pendingFactRows
     .map(fact=>({fact_id:`候选 · ${fact.__member}`,path:fact.evidence_path,size_bytes:"待索引",sha256:"待提交",pending:true}))
@@ -675,8 +785,8 @@ function renderEmptyWorkspace(){
   $("hypothesesCount").textContent="0 个假设";$("methodPackSummary").textContent="尚未加载项目方法包。";emptyRow($("hypothesesBody"),7);
   $("researchMemoryCount").textContent="0 条";emptyRow($("researchMemoryBody"),5);
   $("attackIntelCount").textContent="0 条";emptyRow($("attackIntelBody"),4);
-  $("riskLeadsCount").textContent="0 条";emptyRow($("riskLeadsBody"),5);
-  $("vulnerabilitiesCount").textContent="0 条";emptyRow($("vulnerabilitiesBody"),6);
+  $("riskLeadsCount").textContent="0 条";emptyRow($("riskLeadsBody"),7);
+  $("vulnerabilitiesCount").textContent="0 条";emptyRow($("vulnerabilitiesBody"),7);
   $("qualitySystemVulns").textContent="0";$("qualityReviewed").textContent="0";$("qualityConfirmed").textContent="0";$("qualityRefuted").textContent="0";$("qualityFalsePositiveRate").textContent="—";$("qualitySample").textContent="样本 0";$("reviewFinding").replaceChildren();$("submitFindingReview").disabled=true;
   $("qualityRuleSuggestions").textContent="尚未形成重复误报规则建议。";
   $("wafAssessmentsCount").textContent="0 条";emptyRow($("wafAssessmentsBody"),5);
@@ -737,6 +847,20 @@ async function post(path,body,success){
   try{const result=await api(path,{method:"POST",body:JSON.stringify({vendor:state.vendor,...body})});showToast(success(result));await refresh();return result}
   catch(error){showToast(error.message,true);throw error}
 }
+async function openEvidence(path,{scroll=true}={}){
+  const vendor=encodeURIComponent(state.vendor);const encodedPath=encodeURIComponent(path);
+  const result=await api(`/api/evidence/content?vendor=${vendor}&path=${encodedPath}`);
+  const preview=$("evidencePreview");preview.textContent=`${result.path}${result.truncated?"（仅显示前 64 KiB）":""}\n\n${result.content}`;
+  if(scroll)preview.scrollIntoView({behavior:"smooth",block:"center"});
+}
+async function uploadClientFile(vendor,file,projectType="客户端"){
+  const query=new URLSearchParams({vendor,filename:file.name,project_type:projectType});
+  const response=await fetch(`/api/target/upload?${query}`,{method:"POST",headers:{"Content-Type":file.type||"application/octet-stream"},body:file});
+  const raw=await response.text();let payload;
+  try{payload=raw?JSON.parse(raw):{}}catch(_error){throw new Error(`HTTP ${response.status}：上传接口返回非 JSON 响应`)}
+  if(!response.ok||!payload.ok)throw new Error(payload.error||`HTTP ${response.status}`);
+  return payload;
+}
 
 function canLeaveConfiguration(){
   return !(state.route==="config"&&(state.targetDirty||state.teamDirty))||window.confirm("当前配置有未保存的修改，确定离开吗？");
@@ -770,6 +894,7 @@ async function persistPendingConfiguration(){
 async function launchAudit(){
   if(!state.vendor)return showToast("请先创建或选择项目",true);
   if(!state.teamConfig)return showToast("项目配置尚未加载完成",true);
+  if(projectTypeOption(state.targetConfig?.project_type)==="客户端"&&!state.targetConfig?.uploaded_artifact)return showToast("客户端项目必须先上传测试文件",true);
   const confirmed=window.confirm(`即将保存当前配置，并把 ${state.vendor} 的目标信息、黑板上下文及相关源码片段发送给团队配置中的真实模型服务。\n\n确认启动并发审计吗？`);
   if(!confirmed)return;
   $("startAuditButton").disabled=true;$("launchButton").disabled=true;
@@ -813,8 +938,10 @@ $("gateContinueButton").addEventListener("click",()=>submitGateDecision("continu
 $("gateStopButton").addEventListener("click",()=>submitGateDecision("stop_loss"));
 $("intentsBody").addEventListener("click",async event=>{const button=event.target.closest(".direction-dismiss");if(!button||button.disabled)return;const reason=window.prompt("请输入删除这个方向的理由。该方向会立即停止调度，但审计记录仍会保留：");if(reason===null)return;if(!reason.trim())return showToast("必须填写删除理由",true);if(!window.confirm("确认人工否决并停止这个方向？"))return;await post("/api/directions/dismiss",{direction_id:button.dataset.directionId,reason:reason.trim()},()=>"方向已人工否决，不会再参与调度")});
 $("copyBoard").addEventListener("click",async()=>{await navigator.clipboard.writeText($("blackboardText").textContent);showToast("黑板内容已复制")});
-$("evidenceBody").addEventListener("click",async event=>{const button=event.target.closest(".evidence-open");if(!button)return;try{const vendor=encodeURIComponent(state.vendor);const path=encodeURIComponent(button.dataset.path);const result=await api(`/api/evidence/content?vendor=${vendor}&path=${path}`);$("evidencePreview").textContent=`${result.path}${result.truncated?"（仅显示前 64 KiB）":""}\n\n${result.content}`}catch(error){showToast(error.message,true)}});
-$("vulnerabilitiesBody").addEventListener("click",event=>{
+$("evidenceBody").addEventListener("click",async event=>{const button=event.target.closest(".evidence-open");if(!button)return;try{await openEvidence(button.dataset.path,{scroll:false})}catch(error){showToast(error.message,true)}});
+$("vulnerabilitiesBody").addEventListener("click",async event=>{
+  const evidenceButton=event.target.closest(".vulnerability-evidence-open");
+  if(evidenceButton){try{await openEvidence(evidenceButton.dataset.path)}catch(error){showToast(error.message,true)}return}
   const button=event.target.closest(".finding-review-open");if(!button)return;
   $("reviewFinding").value=button.dataset.findingId;const fact=(state.projectData?.facts||[]).find(item=>item.id===button.dataset.findingId);
   if(fact){$("reviewSeverity").value=["info","low","medium","high","critical"].includes(fact.severity)?fact.severity:"medium"}
@@ -841,14 +968,30 @@ $("addRoleButton").addEventListener("click",()=>{if(!state.vendor||!state.teamCo
 $("saveTeamButton").addEventListener("click",async()=>{if(!state.vendor||!state.teamConfig)return showToast("请先创建并加载项目",true);const config=collectTeamConfig();const secrets=collectRuntimeSecrets();const result=await post("/api/config",{config,secrets},()=>"角色配置已保存，API Key 已安全写入系统钥匙串");state.secretStatus=result.secret_status||state.secretStatus;state.teamConfig=structuredClone(result.config||config);state.teamDirty=false;renderTeamEditor(state.teamConfig,true)});
 
 $("target-setup").addEventListener("input",event=>{if(event.target.id!=="newProjectName")state.targetDirty=true});
+$("targetProjectType").addEventListener("change",renderClientUpload);
+$("clientArtifactFile").addEventListener("change",renderClientUpload);
+$("uploadClientArtifactButton").addEventListener("click",async()=>{
+  if(!state.vendor)return showToast("请先创建并选择客户端项目",true);
+  const file=$("clientArtifactFile").files?.[0];if(!file)return showToast("请选择要上传的客户端文件",true);
+  const button=$("uploadClientArtifactButton");button.disabled=true;$("clientUploadStatus").textContent=`正在上传 ${file.name}…`;
+  try{
+    const payload=await uploadClientFile(state.vendor,file,$("targetProjectType").value);
+    state.targetDirty=false;state.targetConfig=structuredClone(payload.target);$("clientArtifactFile").value="";renderTargetEditor(payload.target,true);
+    showToast(`客户端文件已上传：${payload.artifact.name}`);
+  }catch(error){showToast(error.message,true);renderClientUpload()}
+});
 $("saveTargetButton").addEventListener("click",async()=>{if(!state.vendor)return showToast("请先创建项目",true);const target=collectTargetConfig();const result=await post("/api/target",{target},()=>"渗透目标已保存并同步到中央黑板上下文");state.targetDirty=false;renderTargetEditor(result.target,true)});
 $("createProjectButton").addEventListener("click",async()=>{
   const vendor=$("newProjectName").value.trim();if(!vendor)return showToast("请填写新项目名称",true);
-  $("createProjectButton").disabled=true;
+  const client=projectTypeOption($("targetProjectType").value)==="客户端";const file=$("clientArtifactFile").files?.[0];
+  if(client&&!file)return showToast("客户端项目必须选择一个测试文件",true);
+  $("createProjectButton").disabled=true;let createdVendor=null;
   try{
     const result=await api("/api/projects",{method:"POST",body:JSON.stringify({vendor,target:collectTargetConfig()})});
+    createdVendor=result.vendor;
+    if(client){$("clientUploadStatus").textContent=`项目已创建，正在上传 ${file.name}…`;await uploadClientFile(result.vendor,file,$("targetProjectType").value)}
     ++state.requestGeneration;state.newTaskMode=false;state.targetDirty=false;state.teamDirty=false;await loadProjects(result.vendor);$("newProjectName").value="";navigate("config",{replace:true});await refresh();showToast(`项目 ${result.vendor} 已创建，目标配置已生效`);
-  }catch(error){showToast(error.message,true)}finally{$("createProjectButton").disabled=false}
+  }catch(error){showToast(error.message,true);if(createdVendor){await loadProjects(createdVendor);navigate("config",{replace:true});await refresh()}}finally{$("createProjectButton").disabled=false}
 });
 
 window.addEventListener("hashchange",async()=>{
