@@ -1,4 +1,4 @@
-# AgentCP 安全研究引擎 V3.1
+# AgentCP 安全研究引擎 V3.2
 
 > 完整安装、模型配置、自动化、远程协议、恢复与排错请阅读 [docs/USAGE.md](docs/USAGE.md)。
 
