@@ -66,6 +66,7 @@ def test_runtime_secret_from_frontend_reaches_driver_without_persistence(
 
     def fake_driver(config, prompt, timeout=300, cancel_check=None, progress_callback=None):
         captured["config"] = config
+        captured["prompt"] = prompt
         return {"kind": "none", "reason": "ok"}
 
     monkeypatch.setattr(team_module, "run_driver", fake_driver)
@@ -76,6 +77,7 @@ def test_runtime_secret_from_frontend_reaches_driver_without_persistence(
             name="reason-claude",
             type="claude-cli",
             role="reason",
+            custom_prompt="只输出能够被 Executor 直接执行的方向，禁止重复枚举。",
             model="model-id",
             base_url="https://relay.example/anthropic",
             api_key_env="CLAUDE_RELAY_KEY",
@@ -89,4 +91,8 @@ def test_runtime_secret_from_frontend_reaches_driver_without_persistence(
     config = captured["config"]
     assert config.api_key_env == "AGENTCP_RUNTIME_API_KEY"
     assert config.env["AGENTCP_RUNTIME_API_KEY"] == "session-only-secret"
+    assert config.extra["runtime_mode"] == "local-docker"
+    assert "项目所有者为当前 Agent 配置的专属提示词" in captured["prompt"]
+    assert "只输出能够被 Executor 直接执行的方向，禁止重复枚举。" in captured["prompt"]
+    assert "/workspace/evidence/" in captured["prompt"]
     assert "session-only-secret" not in (store.path / "target.json").read_text(encoding="utf-8")

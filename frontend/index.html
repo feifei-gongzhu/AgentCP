@@ -11,7 +11,7 @@
 <body>
   <div class="shell">
     <aside class="sidebar">
-      <div class="brand"><span class="brand-mark">A</span><div><strong>AgentCP</strong><small>RESEARCH ENGINE V3.0</small></div></div>
+      <div class="brand"><span class="brand-mark">A</span><div><strong>AgentCP</strong><small>RESEARCH ENGINE V3.2</small></div></div>
       <nav aria-label="控制台导航">
         <a class="nav-item active" data-route-link="hub" href="#hub"><span>01</span>任务中心</a>
         <a class="nav-item" data-route-link="config" href="#config"><span>02</span>项目配置</a>
@@ -25,7 +25,7 @@
 
     <main>
       <header class="topbar">
-        <div><p id="routeEyebrow" class="eyebrow">SECURITY RESEARCH ORCHESTRATOR</p><h1 id="projectTitle">任务中心</h1></div>
+        <div><p id="routeEyebrow" class="eyebrow">安全研究控制平面</p><h1 id="projectTitle">任务中心</h1></div>
         <div class="top-actions">
           <label class="project-picker" data-route-action="hub">选择项目<select id="projectSelect" aria-label="选择项目"></select></label>
           <button id="enterProjectButton" data-route-action="hub" class="button secondary" type="button">进入项目</button>
@@ -42,7 +42,7 @@
 
       <section id="task-hub" data-view="hub" class="hub-view">
         <div class="hub-intro">
-          <p class="section-label">PROJECT WORKSPACE</p>
+          <p class="section-label">项目工作区</p>
           <h2>选择一个授权项目，或创建新的审计任务</h2>
           <p class="subtle">任务中心只负责项目入口。进入项目后先完成目标、角色和黑板配置，再启动真实模型团队。</p>
         </div>
@@ -58,19 +58,25 @@
       <section id="target-setup" data-view="config" class="content-grid first-section" hidden>
         <article class="panel span-3 target-panel">
           <div class="panel-head">
-            <div><p class="section-label">TARGET ONBOARDING</p><h2>初始化与维护渗透目标</h2></div>
+            <div><p class="section-label">目标配置</p><h2>初始化与维护渗透目标</h2></div>
             <span class="status-badge completed">authorized / *</span>
           </div>
           <p class="subtle">填写 URL、域名、IP、应用包或本地源码目录。授权策略固定为已授权，目标内容会同步写入 <code>target.json</code> 和 <code>目标信息.md</code>。</p>
           <div class="target-form-grid">
-            <label>测试目标（每行一个）<textarea id="targetTargets" rows="5" placeholder="https://app.example.com&#10;api.example.com&#10;10.0.0.25"></textarea></label>
+            <label id="webTargetField">测试目标（每行一个）<textarea id="targetTargets" rows="5" placeholder="https://app.example.com&#10;api.example.com&#10;10.0.0.25"></textarea></label>
             <div class="target-stack">
-              <label>本地目标目录（可选）<input id="targetPath" placeholder="/absolute/path/to/source"></label>
+              <label id="localTargetPathField">本地源码目录（可选）<input id="targetPath" placeholder="/absolute/path/to/source"></label>
               <label>项目类型<select id="targetProjectType"><option value="Web渗透">Web渗透</option><option value="客户端">客户端</option></select></label>
               <label>业务与测试目标<textarea id="targetGoal" rows="3" placeholder="例如：验证账号体系、支付链路和管理后台的高价值风险"></textarea></label>
             </div>
             <label>不收范围（每行一个）<textarea id="targetOutOfScope" rows="4" placeholder="例如：第三方支付生产环境"></textarea></label>
             <label>成功条件（每行一个）<textarea id="targetSuccessCriteria" rows="4" placeholder="例如：形成可复现证据链并说明业务影响"></textarea></label>
+            <div id="clientUploadPanel" class="client-upload span-all" hidden>
+              <div><strong>上传客户端测试文件</strong><span>支持安装包、应用归档、移动端包、固件或源码压缩包。文件只保存到当前项目隔离目录。</span></div>
+              <label class="client-upload-picker">选择文件<input id="clientArtifactFile" type="file"></label>
+              <button id="uploadClientArtifactButton" class="button secondary" type="button">上传并设为当前目标</button>
+              <small id="clientUploadStatus">请先创建或选择项目，再上传文件。单文件默认上限 2 GiB。</small>
+            </div>
             <label class="span-all">补充说明<textarea id="targetNotes" rows="3" placeholder="测试账号用途、版本、环境、特殊前置条件；不要填写密码或 API Key"></textarea></label>
           </div>
           <div class="target-actions">
@@ -86,16 +92,30 @@
       <section id="project-configuration" data-view="config" class="content-grid core-config-grid" hidden>
         <article class="panel span-3">
           <div class="panel-head">
-            <div><p class="section-label">MODEL TEAM</p><h2>项目级角色配置</h2></div>
+            <div><p class="section-label">模型团队</p><h2>项目级角色配置</h2></div>
             <div class="inline-actions"><button id="addRoleButton" class="button ghost small" type="button">添加角色</button><button id="saveTeamButton" class="button secondary small" type="button">保存并应用</button></div>
           </div>
-          <p class="subtle">前端字段会直接进入后端 Driver。“密钥变量”可留空；真实 Key 填入“会话 API Key”，只保存在当前服务内存中。AgentCP 的 Claude 任务始终隔离用户级/本地级路由设置，不读取或改动 CCSwitch。</p>
-          <div class="table-wrap role-editor"><table><thead><tr><th>名称</th><th>职责</th><th>后端</th><th>模型</th><th>服务地址</th><th>密钥变量</th><th>鉴权</th><th>会话 API Key</th><th>沙箱</th><th>并发</th><th>优先级</th><th></th></tr></thead><tbody id="roleConfigBody"></tbody></table></div>
+          <div class="runtime-mode-guide" aria-label="运行模式说明">
+            <div><strong>本地 Docker</strong><span>默认。AgentCP 直接管理容器，不启动 agent-compose，隔离清晰。</span></div>
+            <div><strong>CT agent-compose</strong><span>可选。需要其本地服务与镜像，用于会话编排和扩展运行时。</span></div>
+            <div><strong>本地 CLI</strong><span>直接调用本机 Claude Code / Codex，启动最快，隔离能力较弱。</span></div>
+          </div>
+          <p class="subtle">三种模式按角色独立选择。真实 Key 只填入“会话 API Key”；AgentCP 不读取或改动 CCSwitch。</p>
+          <div class="table-wrap role-editor"><table><thead><tr><th>名称</th><th>职责</th><th>运行模式</th><th>后端</th><th>模型</th><th>服务地址</th><th>密钥变量</th><th>鉴权</th><th>会话 API Key</th><th>沙箱</th><th>并发</th><th>优先级</th><th></th></tr></thead><tbody id="roleConfigBody"></tbody></table></div>
+          <div class="agent-prompt-editor">
+            <div class="agent-prompt-head">
+              <div><strong>Agent 专属提示词</strong><span>项目级持久保存，运行时真实注入该 Agent；后续人工实时指令仍具有更高优先级。</span></div>
+              <label>选择 Agent<select id="rolePromptMember" aria-label="选择要配置提示词的 Agent"></select></label>
+            </div>
+            <textarea id="rolePromptText" rows="9" maxlength="30000" placeholder="例如：优先从业务损失反推验证路径；禁止重复执行已有负向证据覆盖的动作；输出必须包含可执行 success_criteria。"></textarea>
+            <small id="rolePromptStatus">选择一个 Agent 后编辑。提示词会保存在当前项目 team_config.json，请勿填写 API Key。</small>
+          </div>
         </article>
-        <article id="project-blackboard" class="panel span-3 blackboard-panel">
-          <div class="panel-head"><div><p class="section-label">TWO-TIER BLACKBOARD</p><h2>项目黑板知识库</h2></div><button id="copyBoard" class="button ghost small" type="button">复制</button></div>
+        <details id="project-blackboard" class="panel span-3 blackboard-panel advanced-disclosure">
+          <summary><span><strong>项目黑板知识库</strong><small>高级配置 · 查看机器状态与完整工作记忆</small></span></summary>
+          <div class="panel-head disclosure-actions"><div></div><button id="copyBoard" class="button ghost small" type="button">复制</button></div>
           <pre id="blackboardText">读取中…</pre>
-        </article>
+        </details>
       </section>
 
       <section id="overview" data-view="run" class="hero-grid" hidden>
@@ -128,10 +148,10 @@
           <p class="gate-approval-help">批准继续会解除门禁并自动恢复已暂停运行；止损结束会解除门禁并终止对应运行。</p>
         </article>
         <article class="hero-card">
-          <div class="hero-copy"><p class="section-label">CURRENT OPERATION</p><h2 id="currentTask">读取项目状态…</h2><p id="goalText" class="subtle">正在连接中央黑板</p></div>
+          <div class="hero-copy"><p class="section-label">当前任务</p><h2 id="currentTask">读取项目状态…</h2><p id="goalText" class="subtle">正在连接中央黑板</p></div>
           <div class="phase-block"><span>当前阶段</span><strong id="phaseValue">—</strong><small id="updatedValue">—</small></div>
         </article>
-        <article class="decision-card"><p class="section-label">CONTROLLER DECISION</p><strong id="decisionValue">—</strong><p id="gateReason">尚无控制器评估</p></article>
+        <article class="decision-card"><p class="section-label">控制器决策</p><strong id="decisionValue">—</strong><p id="gateReason">尚无控制器评估</p></article>
       </section>
 
       <section data-view="run" class="metric-grid" aria-label="核心指标" hidden>
@@ -139,60 +159,60 @@
         <article class="metric"><span>事实</span><strong id="factMetric">0</strong><small id="factMetricNote">已提交到黑板</small></article>
         <article class="metric"><span>漏洞</span><strong id="vulnMetric">0</strong><small id="vulnMetricNote">Guardian 已验证</small></article>
         <article class="metric"><span>攻击面</span><strong id="coverageMetric">0%</strong><small id="coverageMetricNote">0/10 已观察</small></article>
-        <article class="metric"><span>当前运行</span><strong id="jobMetric">0%</strong><small id="jobMetricNote">暂无 Job</small></article>
+        <article class="metric redundant-metric" hidden><span>当前运行</span><strong id="jobMetric">0%</strong><small id="jobMetricNote">队列已单独展示</small></article>
       </section>
 
       <section id="automation" data-view="run" class="content-grid" hidden>
         <article class="panel span-2">
-          <div class="panel-head"><div><p class="section-label">AUTOMATION</p><h2>并发任务队列</h2></div><span id="runBadge" class="status-badge neutral">idle</span></div>
+          <div class="panel-head"><div><p class="section-label">自动化执行</p><h2>并发任务队列</h2></div><span id="runBadge" class="status-badge neutral">idle</span></div>
           <div id="runSummary" class="run-summary">暂无自动化运行</div>
           <p class="runtime-visibility-note">调度心跳只证明 AgentCP Worker 存活；Claude stream-json 会实时显示工具名、脱敏参数、结果摘要和阶段输出。任务行会保留最近一次工具动作。</p>
           <div id="runFailure" class="run-failure" role="alert" hidden></div>
-          <div class="table-wrap jobs-table"><table><thead><tr><th>Worker</th><th>角色</th><th>模型</th><th>当前在做什么</th><th>阶段</th><th>状态</th><th>尝试</th><th>运行信号 / 最近错误</th></tr></thead><tbody id="jobsBody"></tbody></table></div>
+          <div class="table-wrap jobs-table"><table><thead><tr><th>执行单元</th><th>职责</th><th>模型</th><th>当前在做什么</th><th>阶段</th><th>状态</th><th>尝试</th><th>运行信号 / 最近错误</th></tr></thead><tbody id="jobsBody"></tbody></table></div>
         </article>
         <article class="panel action-panel">
-          <div><p class="section-label">LAUNCH</p><h2>启动真实模型团队</h2></div>
+          <div><p class="section-label">启动控制</p><h2>启动真实模型团队</h2></div>
           <p class="subtle">Reason、Metacog、Reviewer 通过真实模型驱动并发执行，启动前会明确提示上下文发送范围。</p>
           <label>团队<input id="teamInput" value="default"></label>
           <div class="field-row"><label>并发数<input id="workersInput" type="number" min="1" max="12" value="3"></label><label>超时（秒）<input id="timeoutInput" type="number" min="30" max="3600" value="600"></label></div>
           <button id="launchButton" class="button primary" type="button">启动一轮真实审计</button>
           <button id="cancelButton" class="button danger" type="button" disabled>取消当前运行</button>
         </article>
-        <article class="panel span-3">
-          <div class="panel-head"><div><p class="section-label">LIVE EVENTS</p><h2>运行事件流</h2></div><span id="eventsCount">0 条</span></div>
+        <details class="panel span-3 advanced-disclosure">
+          <summary><span><strong>运行诊断事件</strong><small>排错时展开；主进度以任务队列为准</small></span><em id="eventsCount">0 条</em></summary>
           <div id="eventsList" class="event-list"></div>
-        </article>
+        </details>
       </section>
 
       <section id="intelligence" data-view="run" class="content-grid" hidden>
-        <article class="panel span-3">
-          <div class="panel-head"><div><p class="section-label">V3 RESEARCH PORTFOLIO</p><h2>研究假设组合</h2></div><span id="hypothesesCount">0 个假设</span></div>
+        <details class="panel span-3 advanced-disclosure">
+          <summary><span><strong>研究假设组合</strong><small>高级推理账本 · 用于检查规划质量</small></span><em id="hypothesesCount">0 个假设</em></summary>
           <p id="methodPackSummary" class="subtle">尚未加载项目方法包。每个假设都会经过价值、可达性、信息增益、新颖度、前置成熟度和成本评分。</p>
           <div class="table-wrap"><table><thead><tr><th>假设</th><th>目标</th><th>攻击面维度</th><th>优先分</th><th>证据成熟度</th><th>状态</th><th>来源</th></tr></thead><tbody id="hypothesesBody"></tbody></table></div>
-        </article>
-        <article class="panel span-3">
-          <div class="panel-head"><div><p class="section-label">COUNTERFACTUAL · LESSON MEMORY</p><h2>反事实与经验记忆</h2></div><span id="researchMemoryCount">0 条</span></div>
+        </details>
+        <details class="panel span-3 advanced-disclosure">
+          <summary><span><strong>反事实与经验记忆</strong><small>高级调度记忆 · 用于避免原样重试</small></span><em id="researchMemoryCount">0 条</em></summary>
           <p class="subtle">反事实用来推翻当前主线；经验记忆来自已证伪或受阻路径，在有效期内阻止 Agent 原样重试。</p>
           <div class="table-wrap"><table><thead><tr><th>类型</th><th>目标</th><th>可检验命题 / 经验</th><th>推翻标准 / 失效条件</th><th>状态</th></tr></thead><tbody id="researchMemoryBody"></tbody></table></div>
-        </article>
+        </details>
         <article class="panel">
           <div class="panel-head"><div><p class="section-label">攻击面</p><h2>十维覆盖</h2></div><strong id="verifiedCoverage">0 已验证</strong></div>
           <div id="coverageList" class="coverage-list"></div>
         </article>
         <article class="panel span-2">
-          <div class="panel-head"><div><p class="section-label">ATTACK INTEL</p><h2>攻击面情报</h2></div><span id="attackIntelCount">0 条</span></div>
+          <div class="panel-head"><div><p class="section-label">已观察攻击面</p><h2>攻击面情报</h2></div><span id="attackIntelCount">0 条</span></div>
           <div class="table-wrap"><table><thead><tr><th>类型</th><th>情报</th><th>价值说明</th><th>置信度</th></tr></thead><tbody id="attackIntelBody"></tbody></table></div>
         </article>
         <article class="panel span-3">
-          <div class="panel-head"><div><p class="section-label">RISK LEADS</p><h2>风险线索</h2></div><span id="riskLeadsCount">0 条</span></div>
-          <div class="table-wrap"><table><thead><tr><th>级别</th><th>线索</th><th>待验证危害</th><th>影响力</th><th>置信度</th></tr></thead><tbody id="riskLeadsBody"></tbody></table></div>
+          <div class="panel-head"><div><p class="section-label">待验证发现 · 超过 24 小时标记为积压</p><h2>风险线索</h2></div><span id="riskLeadsCount">0 条</span></div>
+          <div class="table-wrap"><table><thead><tr><th>级别</th><th>线索</th><th>验证状态</th><th>创建时间 / 已等待</th><th>待验证危害</th><th>影响力</th><th>置信度</th></tr></thead><tbody id="riskLeadsBody"></tbody></table></div>
         </article>
         <article class="panel span-3">
-          <div class="panel-head"><div><p class="section-label">SYSTEM VULNERABILITY POOL</p><h2>系统漏洞池</h2></div><span id="vulnerabilitiesCount">0 条</span></div>
-          <div class="table-wrap"><table><thead><tr><th>级别</th><th>漏洞</th><th>已验证危害</th><th>影响力</th><th>置信度</th><th>人工结论</th></tr></thead><tbody id="vulnerabilitiesBody"></tbody></table></div>
+          <div class="panel-head"><div><p class="section-label">已验证发现</p><h2>系统漏洞池</h2></div><span id="vulnerabilitiesCount">0 条</span></div>
+          <div class="table-wrap"><table><thead><tr><th>级别</th><th>漏洞</th><th>已验证危害</th><th>影响力</th><th>置信度</th><th>复现方式与证据</th><th>人工结论</th></tr></thead><tbody id="vulnerabilitiesBody"></tbody></table></div>
         </article>
         <article class="panel span-3 quality-panel">
-          <div class="panel-head"><div><p class="section-label">QUALITY · HUMAN REFUTATION</p><h2>人工驳斥与长期误报率</h2></div><span id="qualitySample">样本 0</span></div>
+          <div class="panel-head"><div><p class="section-label">人工质量裁决</p><h2>人工驳斥与长期误报率</h2></div><span id="qualitySample">样本 0</span></div>
           <div class="quality-summary">
             <div><span>系统漏洞</span><strong id="qualitySystemVulns">0</strong></div>
             <div><span>已复核</span><strong id="qualityReviewed">0</strong></div>
@@ -212,14 +232,14 @@
           </div>
           <button id="submitFindingReview" class="button secondary" type="button">提交人工结论</button>
         </article>
-        <article class="panel span-3">
-          <div class="panel-head"><div><p class="section-label">WAF ADAPTIVE VALIDATION</p><h2>WAF 对抗分支</h2></div><span id="wafAssessmentsCount">0 条</span></div>
+        <details class="panel span-3 advanced-disclosure">
+          <summary><span><strong>WAF 对抗分支</strong><small>仅在识别到稳定拦截后产生</small></span><em id="wafAssessmentsCount">0 条</em></summary>
           <div class="table-wrap"><table><thead><tr><th>目标</th><th>原始假设</th><th>状态</th><th>阻断信号</th><th>预算</th></tr></thead><tbody id="wafAssessmentsBody"></tbody></table></div>
-        </article>
-        <article class="panel span-3">
-          <div class="panel-head"><div><p class="section-label">NEGATIVE EVIDENCE</p><h2>负向证据与已否定路径</h2></div><span id="negativeEvidenceCount">0 条</span></div>
+        </details>
+        <details class="panel span-3 advanced-disclosure">
+          <summary><span><strong>负向证据与已否定路径</strong><small>调度剪枝依据 · 不计入漏洞或风险线索</small></span><em id="negativeEvidenceCount">0 条</em></summary>
           <div class="table-wrap"><table><thead><tr><th>目标</th><th>被验证假设</th><th>客观结果</th><th>有效期</th><th>调度作用</th></tr></thead><tbody id="negativeEvidenceBody"></tbody></table></div>
-        </article>
+        </details>
         <article class="panel span-3">
           <div class="panel-head"><div><p class="section-label">INTENTS</p><h2>方向池</h2></div><span id="intentsCount">0 条</span></div>
           <p class="subtle">人工删除会将方向标记为“人工否决”并停止后续调度；审计记录和删除理由仍会保留。</p>
@@ -249,6 +269,6 @@
     </main>
   </div>
   <div id="toast" class="toast" role="status" aria-live="polite"></div>
-  <script src="/frontend/app.js" defer></script>
+  <script src="/frontend/app.js?v=3.2" defer></script>
 </body>
 </html>

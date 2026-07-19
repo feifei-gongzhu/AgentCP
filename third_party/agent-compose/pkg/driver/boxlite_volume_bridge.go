@@ -185,11 +185,6 @@ func CleanupBoxliteVolumeBridgeMounts(sessionDir string) error {
 	return nil
 }
 
-func boxliteVolumeBridgeIsMountPoint(path string) bool {
-	mounts, err := boxliteVolumeBridgeMountPoints(path)
-	return err == nil && len(mounts) > 0
-}
-
 func boxliteVolumeBridgeMountPoints(root string) ([]string, error) {
 	data, err := os.ReadFile("/proc/self/mountinfo")
 	if err != nil {

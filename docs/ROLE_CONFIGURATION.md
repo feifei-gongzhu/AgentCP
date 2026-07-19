@@ -13,9 +13,9 @@ projects/{项目名}/team_config.json
 前端支持两种密钥来源：
 
 - “密钥变量”填写环境变量名称。
-- “会话 API Key”直接填写真实密钥，后端只保存在当前服务进程内存。
+- “会话 API Key”直接填写真实密钥；macOS 保存到系统钥匙串，其他系统仅保存在当前服务进程内存。
 
-会话密钥不会进入项目文件、SQLite、审计日志或 API 响应，服务重启后自动清空。
+会话密钥不会进入项目文件、SQLite、审计日志或 API 响应。macOS 服务重启后会从系统钥匙串恢复；其他系统服务重启后需要重新输入。
 
 ## 2. 推荐的标准角色
 
@@ -385,7 +385,7 @@ Container 还需要 `extra.image`、`extra.worker_command`、网络、资源和�
 | 模型 | 传给 `claude --model` |
 | 服务地址 | 设置为子进程的 `ANTHROPIC_BASE_URL` |
 | 密钥变量 | 从服务环境读取对应变量 |
-| 会话 API Key | 注入当前 Worker 子进程环境，不落盘 |
+| 会话 API Key | 注入当前 Worker 子进程环境；不进入项目文件，macOS 使用系统钥匙串持久化 |
 | 鉴权 `bearer` | 设置 `ANTHROPIC_AUTH_TOKEN` |
 | 鉴权 `x-api-key` | 设置 `ANTHROPIC_API_KEY` |
 | 沙箱 `read-only` | 使用 Claude `plan` 权限模式和只读工具集合 |
@@ -404,6 +404,6 @@ Reason / Metacog / Reviewer 沙箱：read-only
 Executor 沙箱：workspace-write
 ```
 
-保存后，后端会立即持有该会话密钥。下一次启动自动化时，Driver 使用上述地址、模型、鉴权和权限配置调用 Claude Code。页面刷新不会丢失会话密钥，但服务进程重启后必须重新输入。
+保存后，后端会立即持有该会话密钥。下一次启动自动化时，Driver 使用上述地址、模型、鉴权和权限配置调用 Claude Code。页面刷新不会丢失会话密钥；macOS 服务重启后会自动恢复，其他系统重启后需要重新输入。
 
 AgentCP 启动的所有 Claude 子进程都会排除 Claude 的 `user` / `local` 设置，并清理继承的 Anthropic、Bedrock、Vertex 与 Foundry 路由及模型变量；角色配置了中转站时，再仅注入当前角色在前端保存的地址、模型和会话 Key。因此 AgentCP 不会读取、修改或切换 CCSwitch 的配置；CCSwitch 中正在运行的其他任务也不属于 AgentCP 的进程管理范围。

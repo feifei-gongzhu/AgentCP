@@ -31,6 +31,7 @@ func TransitionFromAgentCell(run domain.ProjectRunRecord, sandbox *domain.Sandbo
 		"agent":         cell.Agent,
 		"agentThreadId": cell.AgentThreadID,
 		"stopReason":    cell.StopReason,
+		"finalText":     cell.FinalText,
 		"success":       cell.Success,
 		"exitCode":      cell.ExitCode,
 	})

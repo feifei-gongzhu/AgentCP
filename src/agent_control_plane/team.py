@@ -10,7 +10,7 @@ from collections.abc import Callable
 from .dashboard import render_dashboard
 from .directives import authoritative_directives, directive_ids, missing_directive_ids
 from .drivers import DriverConfig, run_driver
-from .lifecycle import project_execution_lock, require_initialized_project
+from .lifecycle import project_execution_lock, require_executable_target, require_initialized_project
 from .schemas import now_iso
 from .scheduler import Scheduler
 from .store import ROOT, ProjectStore
@@ -27,6 +27,8 @@ class TeamMember:
     type: str | None = None
     backend: str = "codex"
     role: str = "reason"
+    runtime_mode: str = "local-docker"
+    custom_prompt: str | None = None
     model: str | None = None
     base_url: str | None = None
     api_key_env: str | None = None
@@ -55,6 +57,10 @@ def load_team(name: str, store: ProjectStore | None = None) -> list[TeamMember]:
     for item in data.get("members", []):
         if "type" in item and "backend" not in item:
             item["backend"] = item["type"]
+        item["runtime_mode"] = {
+            "host-native": "local-cli",
+            "ct-agent-compose": "agent-compose",
+        }.get(str(item.get("runtime_mode") or "local-docker"), str(item.get("runtime_mode") or "local-docker"))
         members.append(TeamMember(**item))
     return sorted(members, key=lambda item: item.priority)
 
@@ -70,7 +76,13 @@ def _run_member(
 ) -> dict[str, Any]:
     owner_directives = authoritative_directives(store)
     observed_directive_ids = directive_ids(owner_directives)
-    prompt = build_worker_prompt(store, member.role, owner_directives)
+    prompt = build_worker_prompt(
+        store,
+        member.role,
+        owner_directives,
+        custom_prompt=member.custom_prompt,
+        member_name=member.name,
+    )
     if context_suffix:
         prompt += "\n\n当前调度器候选状态（只读）：\n" + context_suffix
     if dry_run:
@@ -83,19 +95,40 @@ def _run_member(
             "created_at": now_iso(),
         }
     extra = dict(member.extra or {})
+    extra["runtime_mode"] = member.runtime_mode or "local-docker"
     member_env = dict(member.env or {})
     api_key_env = member.api_key_env
     runtime_secret = RuntimeSecretStore.get(store.vendor, member.name)
     if runtime_secret:
         api_key_env = "AGENTCP_RUNTIME_API_KEY"
         member_env[api_key_env] = runtime_secret
-    # Every production backend is executed by agent-compose in V3. These
-    # identifiers are runtime routing data and never contain a provider secret.
+    # Runtime routing data never contains the provider secret. The three modes
+    # share one DriverConfig but have independent execution paths.
     extra.setdefault("project_path", str(store.path.resolve()))
     extra.setdefault("member_name", member.name)
     target_path = str(store.read_json("target.json").get("target_path", "")).strip()
     if target_path:
         extra.setdefault("target_path", target_path)
+    if extra["runtime_mode"] == "local-docker":
+        prompt += (
+            "\n\n运行目录约定：AgentCP 项目根目录挂载在 /workspace。"
+            "所有 evidence_path/evidence_sink 必须写为相对 AgentCP 项目根目录的路径，"
+            "并将实际文件写入 /workspace/evidence/。"
+            "工具输出必须有界：搜索前先缩小到具体包、文件或类名，禁止用 class C 这类"
+            "宽泛模式扫描整棵反编译树；rg/find/sed 的单次终端输出不得超过 200 行，"
+            "更多结果应直接写入 evidence_sink，再在会话中只读取精确命中和摘要。"
+        )
+        if target_path:
+            prompt += "用户配置的本地目标源码以只读方式挂载在 /target。"
+    elif extra["runtime_mode"] == "agent-compose":
+        prompt += (
+            "\n\n运行目录约定：CT agent-compose 自有工作区是 /workspace；"
+            "AgentCP 项目根目录挂载在 /agentcp-project。"
+            "所有 evidence_path/evidence_sink 必须写为相对 AgentCP 项目根目录的路径，"
+            "并将实际文件写入 /agentcp-project/evidence/。"
+        )
+        if target_path:
+            prompt += "用户配置的本地目标源码以只读方式挂载在 /target。"
     if (member.type or member.backend) == "container":
         if target_path:
             prompt += "\n\n容器内目标源码以只读方式挂载在 /target；项目证据目录位于 /workspace/evidence。"
@@ -131,6 +164,8 @@ def run_team(
 ) -> str:
     with project_execution_lock(store):
         require_initialized_project(store)
+        if not dry_run:
+            require_executable_target(store)
         return _run_team_locked(store, team_name, timeout, dry_run, max_workers)
 
 

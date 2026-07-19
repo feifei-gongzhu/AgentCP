@@ -16,7 +16,10 @@ describe("CodexRunner", () => {
   it("exposes Codex thread options without constructor-only config", async () => {
     await withTempSession(async (root) => {
       const systemContext = "## MPI Catalog\n\ncatalog body";
-      const runner = new CodexRunner(runnerOptions(root, systemContext));
+      const runner = new CodexRunner({
+        ...runnerOptions(root, systemContext),
+        model: "configured-model",
+      });
 
       const threadOptions = runner.threadOptions();
 
@@ -25,6 +28,7 @@ describe("CodexRunner", () => {
         `${root}/home`,
         `${root}/runtime`,
       ]);
+      expect(threadOptions.model).toBe("configured-model");
       expect(threadOptions).not.toHaveProperty("config");
     });
   });

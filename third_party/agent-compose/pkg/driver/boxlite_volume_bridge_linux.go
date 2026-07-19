@@ -2,6 +2,11 @@ package driver
 
 import "golang.org/x/sys/unix"
 
+func boxliteVolumeBridgeIsMountPoint(path string) bool {
+	mounts, err := boxliteVolumeBridgeMountPoints(path)
+	return err == nil && len(mounts) > 0
+}
+
 func mountBoxliteVolumeBridgeSource(sourcePath string, targetPath string, readOnly bool) error {
 	if boxliteVolumeBridgeIsMountPoint(targetPath) {
 		if err := unmountBoxliteVolumeBridgeMount(targetPath); err != nil {

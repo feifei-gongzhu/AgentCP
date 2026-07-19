@@ -8,6 +8,7 @@ from src.agent_control_plane.drivers import (
     CodexCliDriver,
     DriverConfig,
     DriverError,
+    run_driver,
 )
 from src.agent_control_plane.store import ROOT
 
@@ -22,6 +23,17 @@ def emit_claude_result(line_callback, result: str = '{"kind":"none","reason":"ok
             "duration_ms": 12,
             "num_turns": 1,
         }) + "\n")
+
+
+def test_driver_boundary_rejects_protocol_metadata() -> None:
+    with pytest.raises(DriverError, match="合法 kind"):
+        run_driver(
+            DriverConfig(
+                type="mock",
+                extra={"payload": {"provider": "claude", "success": True}},
+            ),
+            "prompt",
+        )
 
 
 def test_claude_frontend_provider_is_isolated_and_prompt_uses_stdin(

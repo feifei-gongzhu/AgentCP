@@ -360,16 +360,16 @@ func (r BindResolver) Resolve(source string) (string, error) {
 		return "", fmt.Errorf("bind mount source is required")
 	}
 	path := source
+	projectRoot := strings.TrimSpace(r.ProjectRoot)
 	if !filepath.IsAbs(path) {
-		root := strings.TrimSpace(r.ProjectRoot)
-		if root == "" {
+		if projectRoot == "" {
 			var err error
-			root, err = os.Getwd()
+			projectRoot, err = os.Getwd()
 			if err != nil {
 				return "", fmt.Errorf("resolve current dir: %w", err)
 			}
 		}
-		path = filepath.Join(root, path)
+		path = filepath.Join(projectRoot, path)
 	}
 	absPath, err := filepath.Abs(filepath.Clean(path))
 	if err != nil {
@@ -377,6 +377,19 @@ func (r BindResolver) Resolve(source string) (string, error) {
 	}
 	if evaluated, err := filepath.EvalSymlinks(absPath); err == nil {
 		absPath = evaluated
+		// macOS exposes /var through /private/var. Preserve the project root's
+		// lexical alias when the resolved bind path still belongs to that root;
+		// otherwise equivalent paths get different mount IDs and duplicate
+		// workspace mounts.
+		if projectRoot != "" {
+			lexicalRoot, lexicalErr := filepath.Abs(filepath.Clean(projectRoot))
+			resolvedRoot, resolvedErr := filepath.EvalSymlinks(lexicalRoot)
+			if lexicalErr == nil && resolvedErr == nil {
+				if relative, relativeErr := filepath.Rel(resolvedRoot, absPath); relativeErr == nil && relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+					absPath = filepath.Join(lexicalRoot, relative)
+				}
+			}
+		}
 	}
 	info, err := os.Stat(absPath)
 	if err != nil {

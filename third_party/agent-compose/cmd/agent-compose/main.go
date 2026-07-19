@@ -545,6 +545,7 @@ func newRootCommand(out, errOut io.Writer, runDaemon daemonRunner) *cobra.Comman
 	runCmd.Flags().StringVar(&runOptions.Command, "command", "", "Bash command to execute in the agent sandbox")
 	runCmd.Flags().StringVar(&runOptions.SandboxID, "sandbox", "", "Reuse an existing sandbox")
 	runCmd.Flags().StringVar(&runOptions.Driver, "driver", "", "Runtime driver override for a new sandbox")
+	runCmd.Flags().StringVar(&runOptions.OutputSchemaFile, "output-schema-file", "", "JSON Schema file for structured agent output")
 	runCmd.Flags().BoolVar(&runOptions.KeepRunning, "keep-running", false, "Keep the sandbox runtime running after completion")
 	runCmd.Flags().BoolVar(&runOptions.Remove, "rm", false, "Remove the sandbox after a successful run")
 	runCmd.Flags().BoolVar(&runOptions.Jupyter, "jupyter", false, "Enable Jupyter for this run")
@@ -1014,17 +1015,18 @@ type composeListProjectsOptions struct {
 }
 
 type composeRunOptions struct {
-	Prompt        string
-	Command       string
-	SandboxID     string
-	Driver        string
-	KeepRunning   bool
-	Remove        bool
-	Jupyter       bool
-	JupyterExpose bool
-	Detach        bool
-	Interactive   bool
-	TTY           bool
+	Prompt           string
+	Command          string
+	SandboxID        string
+	Driver           string
+	OutputSchemaFile string
+	KeepRunning      bool
+	Remove           bool
+	Jupyter          bool
+	JupyterExpose    bool
+	Detach           bool
+	Interactive      bool
+	TTY              bool
 }
 
 type composeSchedulerTriggerOptions struct {
@@ -1910,6 +1912,16 @@ func runComposeRunCommand(cmd *cobra.Command, cli cliOptions, options composeRun
 		CleanupPolicy:   cleanupPolicy,
 		ClientRequestId: manualRunClientRequestID(normalized.Name, agentName, firstNonEmptyString(prompt, commandText)),
 		Jupyter:         jupyter,
+	}
+	if schemaPath := strings.TrimSpace(normalizedOptions.OutputSchemaFile); schemaPath != "" {
+		schema, readErr := os.ReadFile(schemaPath)
+		if readErr != nil {
+			return commandExitError{Code: exitCodeUsage, Err: fmt.Errorf("read output schema: %w", readErr)}
+		}
+		if !json.Valid(schema) {
+			return commandExitError{Code: exitCodeUsage, Err: fmt.Errorf("output schema file is not valid JSON")}
+		}
+		runReq.OutputSchemaJson = string(schema)
 	}
 	if normalizedOptions.Detach {
 		return startDetachedRun(cmd, cli, normalized.Name, client, runReq)

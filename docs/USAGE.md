@@ -36,7 +36,20 @@ Worker 不直接修改黑板，Worker 之间不直接通信。所有协作都通
 - Codex CLI：使用 `codex` Worker。
 - Claude CLI：使用 `claude-cli` Worker。
 - Ollama：使用本地模型。
-- Docker：使用 Container Worker。
+- Docker：使用默认的本地 Docker 隔离模式或 Container Worker。
+- agent-compose：仅选择“CT agent-compose”运行模式时需要。
+
+### 运行模式
+
+项目配置中的每个角色都可以独立选择运行模式：
+
+- **本地 Docker（默认）**：AgentCP 直接创建本地容器并运行模型，不启动 agent-compose daemon。需要预先构建 `agent-compose-guest:latest`，项目位于容器 `/workspace`，可选目标源码只读挂载到 `/target`。
+- **CT agent-compose（可选）**：使用仓库内 vendored agent-compose 的 daemon、session 与 sandbox。只有选择该模式时才需要构建其 Go 二进制。
+- **本地 CLI**：直接调用本机 Claude Code、Codex CLI、Ollama 或兼容 HTTP API，不要求 Docker。该模式没有容器级隔离，应继续使用 `read-only` 或 `workspace-write` 权限，并仅向可信目标开放。
+
+每个角色下方还提供独立的“Agent 专属提示词”编辑器。内容保存在当前项目的 `team_config.json`，不会影响其他项目或其他 Agent；运行时会在基础角色方法论和项目上下文之后注入。项目所有者在运行界面提交的实时指令仍具有更高优先级。不要在提示词中填写 API Key。
+
+如果本地 Docker 未启动、`docker` 命令不存在或本地镜像构建失败，运行事件流会直接显示具体准备阶段错误，不再表现为无原因等待。
 
 ## 3. 获取项目并准备 Python
 
@@ -174,7 +187,7 @@ projects/vendor-name/
 - 设置模型、服务地址、API Key 环境变量名、沙箱、并发数和优先级。
 - 保存为项目级 `team_config.json`，下一次运行自动生效。
 
-前端支持两种密钥来源：填写环境变量名，或在“会话 API Key”中直接注入。会话 Key 只保存在当前服务进程内存，不写入 `team_config.json`、SQLite、审计日志或 API 响应；服务重启后需要重新输入。Web 配置不能启用 `dangerously_bypass_sandbox`。
+前端支持两种密钥来源：填写环境变量名，或在“会话 API Key”中直接注入。会话 Key 不写入 `team_config.json`、SQLite、审计日志或 API 响应；macOS 会保存到系统钥匙串并在服务重启后自动恢复，其他系统仅保存在当前服务进程内存。Web 配置不能启用 `dangerously_bypass_sandbox`。
 
 团队配置位于：
 

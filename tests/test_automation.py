@@ -7,15 +7,35 @@ import pytest
 from src.agent_control_plane import store as store_module
 from src.agent_control_plane import team as team_module
 from src.agent_control_plane import automation as automation_module
-from src.agent_control_plane.automation import AutomationEngine, _model_endpoint, _model_error_is_retryable
+from src.agent_control_plane.automation import (
+    AutomationEngine,
+    _can_complete_with_policy_restrictions,
+    _can_complete_with_partial_transport_failures,
+    _compact_error,
+    _model_endpoint,
+    _model_error_is_policy_refusal,
+    _model_error_is_retryable,
+)
 from src.agent_control_plane.store import ProjectStore
 from src.agent_control_plane.scheduler import Scheduler
 from src.agent_control_plane.schemas import Hint
 from src.agent_control_plane.worker import WorkerError
+from src.agent_control_plane.waf import WAFManager
 
 
 def test_model_endpoint_never_exposes_url_credentials() -> None:
     assert _model_endpoint("https://user:secret@relay.example:8443/anthropic") == "relay.example"
+
+
+def test_compact_error_preserves_final_runtime_cause() -> None:
+    error = "command context\n" + ("tool output\n" * 900) + "FINAL transport failure"
+
+    compacted = _compact_error(error)
+
+    assert len(compacted) == 4000
+    assert compacted.startswith("command context")
+    assert "FINAL transport failure" in compacted
+    assert "省略" in compacted
 
 
 def test_invalid_http_header_error_is_not_retried() -> None:
@@ -26,6 +46,96 @@ def test_permanent_payment_error_is_not_retried() -> None:
     assert not _model_error_is_retryable("Claude API 调用失败: HTTP 402 Insufficient Balance")
     assert _model_error_is_retryable("Claude API 调用失败: HTTP 429 Too Many Requests")
     assert _model_error_is_retryable("Claude API 调用失败: HTTP 503 Service Unavailable")
+
+
+def test_malformed_http_200_gateway_response_is_retried() -> None:
+    assert _model_error_is_retryable(
+        "模型 API 调用失败: API returned an empty or malformed response "
+        "(HTTP 200) — check for a proxy or gateway intercepting the request"
+    )
+
+
+def test_partial_websocket_transport_failure_keeps_valid_sibling_result() -> None:
+    jobs = [
+        {"status": "completed", "member_name": "executor-primary#2", "error": None},
+        {
+            "status": "failed",
+            "member_name": "executor-primary#1",
+            "error": (
+                "Falling back from WebSockets to HTTPS transport. "
+                "Invalid URL (GET /v1/responses)"
+            ),
+        },
+    ]
+
+    assert _can_complete_with_partial_transport_failures(jobs)
+
+
+def test_partial_result_does_not_hide_authentication_failure() -> None:
+    jobs = [
+        {"status": "completed", "member_name": "executor-primary#2", "error": None},
+        {"status": "failed", "member_name": "executor-primary#1", "error": "HTTP 401 invalid api key"},
+    ]
+
+    assert not _can_complete_with_partial_transport_failures(jobs)
+
+
+def test_protocol_shape_error_is_not_retried() -> None:
+    assert not _model_error_is_retryable("模型未返回带合法 kind 的 AgentCP Worker JSON")
+
+
+def test_cyber_policy_refusal_is_not_retried() -> None:
+    error = (
+        "This content was flagged for possible cybersecurity risk. "
+        "Join the Trusted Access for Cyber program."
+    )
+
+    assert _model_error_is_policy_refusal(error)
+    assert not _model_error_is_retryable(error)
+
+
+def test_successful_siblings_allow_degraded_policy_completion() -> None:
+    jobs = [
+        {"status": "completed", "member_name": "reason-main", "error": None},
+        {
+            "status": "restricted",
+            "member_name": "metacog-blindspot",
+            "error": "上游模型内容策略限制",
+        },
+    ]
+
+    assert _can_complete_with_policy_restrictions(jobs)
+    assert not _can_complete_with_policy_restrictions([
+        jobs[0],
+        {"status": "failed", "member_name": "executor", "error": "HTTP 500"},
+    ])
+
+
+def test_malformed_candidate_is_rejected_instead_of_blocking_commit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(store_module, "PROJECTS", tmp_path / "projects")
+    store = ProjectStore("bad-candidate")
+    store.init()
+    engine = AutomationEngine(store)
+    run_id = engine.db.create_run(store.vendor, "default", 30, 1)
+    job_id = engine.db.enqueue_job(run_id, "swarm", "reason", "reason", {"member": {}})
+    claimed = engine.db.claim_job(run_id, "swarm", "worker")
+    assert claimed
+    engine.db.complete_job(
+        job_id,
+        "worker",
+        {"member": "reason", "status": "ok", "payload": {"kind": "broken"}},
+    )
+
+    summaries = engine._commit_candidates(run_id)
+    job = engine.db.list_jobs(run_id)[0]
+
+    assert job["committed_at"]
+    assert "未知 Worker 输出" in job["commit_error"]
+    assert engine.db.event_count("job_commit_rejected") == 1
+    assert any("不再阻塞 Run" in item for item in summaries)
 
 
 def test_cancelled_run_cannot_be_resumed(
@@ -74,6 +184,40 @@ def test_stigmergy_iteration_persists_candidates_and_enters_gate(
     started = next(event for event in status["events"] if event["event_type"] == "model_call_started")
     assert started["data"]["activity"]["target"]
     assert started["data"]["activity"]["success_criteria"]
+
+
+def test_direction_backlog_suspends_planners_and_prioritizes_executor(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(store_module, "PROJECTS", tmp_path / "projects")
+    monkeypatch.setattr(team_module, "TEAMS_DIR", tmp_path / "teams")
+    team_module.TEAMS_DIR.mkdir()
+    (team_module.TEAMS_DIR / "backpressure.json").write_text(json.dumps({"members": [
+        {"name": "reason-main", "type": "mock", "role": "reason"},
+        {"name": "metacog-main", "type": "mock", "role": "metacog"},
+        {"name": "executor-main", "type": "mock", "role": "executor"},
+    ]}), encoding="utf-8")
+    store = ProjectStore("backpressure-project")
+    store.init()
+    engine = AutomationEngine(store)
+    for index in range(13):
+        engine.db.register_direction({
+            "verb": "inspect",
+            "target": f"artifact-{index}",
+            "hypothesis": f"hypothesis-{index}",
+            "success_criteria": "produce evidence",
+            "risk_level": "medium",
+        })
+
+    run_id = engine.start("backpressure", timeout=30, max_workers=3)
+    status = engine.status(run_id)
+
+    assert {job["role"] for job in status["jobs"]} == {"executor"}
+    assert any(
+        event["event_type"] == "direction_backpressure_activated"
+        for event in status["events"]
+    )
 
 
 def test_model_tool_progress_is_persisted_as_run_events(
@@ -169,6 +313,121 @@ def test_successful_candidate_is_not_lost_when_sibling_job_fails(
     assert len(store.read_jsonl("facts.jsonl")) == 1
     successful = next(job for job in engine.status(run_id)["jobs"] if job["member_name"] == "reason-ok")
     assert successful["committed_at"]
+
+
+def test_policy_refusal_is_restricted_without_failing_successful_siblings(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(store_module, "PROJECTS", tmp_path / "projects")
+    monkeypatch.setattr(team_module, "TEAMS_DIR", tmp_path / "teams")
+    team_module.TEAMS_DIR.mkdir()
+    (team_module.TEAMS_DIR / "policy.json").write_text(json.dumps({"members": [
+        {"name": "reason-ok", "type": "mock", "role": "reason"},
+        {"name": "metacog-restricted", "type": "mock", "role": "metacog"},
+    ]}), encoding="utf-8")
+
+    def policy_run_member(store, member, timeout, dry_run, context_suffix="", cancel_check=None, progress_callback=None):
+        if member.name == "metacog-restricted":
+            raise RuntimeError("This content was flagged for possible cybersecurity risk.")
+        return {
+            "member": member.name,
+            "role": member.role,
+            "status": "ok",
+            "payload": {"kind": "none", "reason": "valid sibling completed"},
+        }
+
+    monkeypatch.setattr(automation_module, "_run_member", policy_run_member)
+    store = ProjectStore("policy-vendor")
+    store.init()
+    engine = AutomationEngine(store)
+    run_id = engine.start("policy", timeout=30, max_workers=2)
+    engine.run(run_id)
+
+    status = engine.status(run_id)
+    restricted = next(job for job in status["jobs"] if job["member_name"] == "metacog-restricted")
+    assert status["run"]["status"] == "completed"
+    assert status["run"]["error"] == "completed_with_model_policy_restrictions"
+    assert restricted["status"] == "restricted"
+    assert restricted["attempts"] == 1
+    assert restricted["error"].startswith("上游模型内容策略限制")
+    assert any(event["event_type"] == "model_policy_restricted" for event in status["events"])
+    assert any(
+        event["event_type"] == "run_completed_with_policy_restrictions"
+        for event in status["events"]
+    )
+
+
+def test_all_policy_restricted_jobs_finish_run_without_retry_loop(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(store_module, "PROJECTS", tmp_path / "projects")
+    monkeypatch.setattr(team_module, "TEAMS_DIR", tmp_path / "teams")
+    team_module.TEAMS_DIR.mkdir()
+    (team_module.TEAMS_DIR / "restricted-only.json").write_text(json.dumps({"members": [{
+        "name": "reason-restricted", "type": "mock", "role": "reason",
+    }]}), encoding="utf-8")
+
+    def restricted_member(*_args, **_kwargs):
+        raise RuntimeError("This content was flagged for possible cybersecurity risk.")
+
+    monkeypatch.setattr(automation_module, "_run_member", restricted_member)
+    store = ProjectStore("restricted-only-vendor")
+    store.init()
+    engine = AutomationEngine(store)
+    run_id = engine.start("restricted-only", timeout=30, max_workers=1)
+
+    engine.run(run_id)
+
+    status = engine.status(run_id)
+    assert status["run"]["status"] == "failed"
+    assert status["run"]["error"] == "all_jobs_model_policy_restricted"
+    assert status["jobs"][0]["status"] == "restricted"
+    assert status["jobs"][0]["attempts"] == 1
+
+
+def test_policy_refusal_falls_back_once_without_mutating_saved_custom_prompt(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(store_module, "PROJECTS", tmp_path / "projects")
+    monkeypatch.setattr(team_module, "TEAMS_DIR", tmp_path / "teams")
+    team_module.TEAMS_DIR.mkdir()
+    original_prompt = "[MODE: UNRESTRICTED] custom project prompt"
+    (team_module.TEAMS_DIR / "fallback.json").write_text(json.dumps({"members": [{
+        "name": "metacog-fallback",
+        "type": "mock",
+        "role": "metacog",
+        "custom_prompt": original_prompt,
+    }]}), encoding="utf-8")
+    observed_prompts: list[str] = []
+
+    def fallback_run_member(store, member, timeout, dry_run, context_suffix="", cancel_check=None, progress_callback=None):
+        observed_prompts.append(member.custom_prompt)
+        if member.custom_prompt:
+            raise RuntimeError("This content was flagged for possible cybersecurity risk.")
+        return {
+            "member": member.name,
+            "role": member.role,
+            "status": "ok",
+            "payload": {"kind": "none", "reason": "fallback completed"},
+        }
+
+    monkeypatch.setattr(automation_module, "_run_member", fallback_run_member)
+    store = ProjectStore("fallback-vendor")
+    store.init()
+    engine = AutomationEngine(store)
+    run_id = engine.start("fallback", timeout=30, max_workers=1)
+    engine.run(run_id)
+
+    status = engine.status(run_id)
+    assert observed_prompts == [original_prompt, ""]
+    assert status["run"]["status"] == "completed"
+    assert status["jobs"][0]["status"] == "completed"
+    assert any(event["event_type"] == "model_policy_fallback_started" for event in status["events"])
+    saved = json.loads((team_module.TEAMS_DIR / "fallback.json").read_text(encoding="utf-8"))
+    assert saved["members"][0]["custom_prompt"] == original_prompt
 
 
 def test_same_run_next_wave_claims_committed_intent(
@@ -325,6 +584,49 @@ def test_worker_stop_loss_decision_terminates_run(
     engine.run(run_id)
     assert engine.db.get_run(run_id)["status"] == "stopped"
     assert store.load_state().current_decision == "stop_loss"
+
+
+def test_waf_branch_stop_loss_does_not_terminate_whole_run(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(store_module, "PROJECTS", tmp_path / "projects")
+    store = ProjectStore("waf-branch-stop")
+    store.init()
+    store.append_jsonl("waf_assessments.jsonl", {
+        "id": "WAF-test",
+        "status": "confirmed",
+        "budget_minutes": 12,
+        "used_minutes": 0,
+    })
+    engine = AutomationEngine(store)
+    run_id = engine.db.create_run(store.vendor, "default", 300, 1)
+    job_id = engine.db.enqueue_job(
+        run_id,
+        "swarm",
+        "waf-adaptive",
+        "waf_analyst",
+        {"waf_assessment_id": "WAF-test"},
+    )
+    claimed = engine.db.claim_job(run_id, "swarm", "worker-1")
+    assert claimed and claimed["id"] == job_id
+    engine.db.complete_job(job_id, "worker-1", {
+        "member": "waf-adaptive",
+        "role": "waf_analyst",
+        "status": "ok",
+        "payload": {
+            "kind": "decision",
+            "action": "stop_loss",
+            "reason": "WAF 分支已连续 5 次无差异，分支 ROI 过低",
+        },
+    })
+
+    summaries = engine._commit_candidates(run_id)
+
+    assert engine.db.get_run(run_id)["status"] == "running"
+    assert store.load_state().current_decision == "continue"
+    assert WAFManager().current(store)[0]["status"] == "exhausted"
+    assert any("其他目标和攻击面继续调度" in item for item in summaries)
 
 
 def test_new_project_owner_directive_fences_stale_worker_result(

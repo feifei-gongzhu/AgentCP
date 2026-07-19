@@ -14,6 +14,7 @@ def reset_secret_cache() -> None:
 
 
 def test_project_keys_survive_memory_reset_via_keychain(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(secrets_module.sys, "platform", "darwin")
     keychain: dict[str, dict[str, str]] = {}
     monkeypatch.setattr(secrets_module, "_keychain_read", lambda vendor: dict(keychain.get(vendor, {})))
     monkeypatch.setattr(secrets_module, "_keychain_write", lambda vendor, values: keychain.__setitem__(vendor, dict(values)))
@@ -35,6 +36,7 @@ def test_project_keys_survive_memory_reset_via_keychain(monkeypatch: pytest.Monk
 
 
 def test_removed_role_is_removed_from_persistent_project_keys(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(secrets_module.sys, "platform", "darwin")
     keychain = {"project": {"keep": "sk-keep", "remove": "sk-remove"}}
     monkeypatch.setattr(secrets_module, "_keychain_read", lambda vendor: dict(keychain.get(vendor, {})))
     monkeypatch.setattr(secrets_module, "_keychain_write", lambda vendor, values: keychain.__setitem__(vendor, dict(values)))
@@ -46,6 +48,7 @@ def test_removed_role_is_removed_from_persistent_project_keys(monkeypatch: pytes
 
 
 def test_failed_keychain_write_rolls_back_runtime_value(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(secrets_module.sys, "platform", "darwin")
     monkeypatch.setattr(secrets_module, "_keychain_read", lambda vendor: {"reason": "old-key"})
 
     def fail_write(vendor: str, values: dict[str, str]) -> None:
@@ -60,9 +63,32 @@ def test_failed_keychain_write_rolls_back_runtime_value(monkeypatch: pytest.Monk
 
 
 def test_project_delete_removes_persistent_keychain_entry(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(secrets_module.sys, "platform", "darwin")
     deleted: list[str] = []
     monkeypatch.setattr(secrets_module, "_keychain_delete", deleted.append)
 
     RuntimeSecretStore.clear("project", persistent=True)
 
     assert deleted == ["project"]
+
+
+def test_non_macos_uses_memory_without_invoking_keychain(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(secrets_module.sys, "platform", "linux")
+
+    def unexpected(*args: object, **kwargs: object) -> None:
+        raise AssertionError("non-macOS hosts must not invoke Keychain")
+
+    monkeypatch.setattr(secrets_module, "_keychain_read", unexpected)
+    monkeypatch.setattr(secrets_module, "_keychain_write", unexpected)
+    monkeypatch.setattr(secrets_module, "_keychain_delete", unexpected)
+
+    RuntimeSecretStore.set_many(
+        "project",
+        {"reason": "sk-session"},
+        {"reason"},
+        persist=True,
+    )
+
+    assert RuntimeSecretStore.get("project", "reason") == "sk-session"
+    RuntimeSecretStore.clear("project", persistent=True)
+    assert RuntimeSecretStore.status("project", ["reason"]) == {"reason": False}

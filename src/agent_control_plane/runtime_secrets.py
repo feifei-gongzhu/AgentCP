@@ -93,7 +93,11 @@ class RuntimeSecretStore:
     def _ensure_loaded(cls, vendor: str) -> None:
         if vendor in cls._loaded_projects:
             return
-        values = _keychain_read(vendor)
+        # macOS persists Web-entered secrets in Keychain. Other supported
+        # hosts keep the same API but intentionally fall back to process
+        # memory, so saving an otherwise valid team configuration never
+        # depends on a platform-specific credential helper.
+        values = _keychain_read(vendor) if sys.platform == "darwin" else {}
         for member, secret in values.items():
             cls._values[(vendor, member)] = secret
         cls._loaded_projects.add(vendor)
@@ -130,7 +134,7 @@ class RuntimeSecretStore:
                 if secret:
                     cls._values[(vendor, member)] = secret
             cls._loaded_projects.add(vendor)
-            if persist:
+            if persist and sys.platform == "darwin":
                 project_values = {
                     member: secret
                     for (project, member), secret in cls._values.items()
@@ -164,5 +168,5 @@ class RuntimeSecretStore:
             for key in [key for key in cls._values if key[0] == vendor]:
                 cls._values.pop(key, None)
             cls._loaded_projects.discard(vendor)
-            if persistent:
+            if persistent and sys.platform == "darwin":
                 _keychain_delete(vendor)

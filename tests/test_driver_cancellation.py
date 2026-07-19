@@ -2,6 +2,7 @@ import json
 import sys
 import time
 import subprocess
+from pathlib import Path
 
 import pytest
 
@@ -32,6 +33,32 @@ def test_claude_process_can_be_cancelled_through_shared_runner() -> None:
         )
 
 
+def test_shared_runner_drains_large_output_without_deadlock() -> None:
+    driver = CodexCliDriver(DriverConfig(), timeout=5)
+    result = driver._run_cancellable(
+        [
+            sys.executable,
+            "-c",
+            "import sys; sys.stdin.read(); sys.stdout.write('x' * 200000)",
+        ],
+        input_text="prompt",
+    )
+
+    assert result.returncode == 0
+    assert len(result.stdout) == 200000
+
+
+def test_shared_runner_preserves_real_error_when_stdin_closes_early() -> None:
+    driver = CodexCliDriver(DriverConfig(), timeout=5)
+    result = driver._run_cancellable(
+        [sys.executable, "-c", "import sys; sys.stderr.write('startup rejected'); raise SystemExit(2)"],
+        input_text="x" * 500000,
+    )
+
+    assert result.returncode == 2
+    assert "startup rejected" in result.stderr
+
+
 def test_container_command_is_restricted_by_default() -> None:
     driver = ContainerWorkerDriver(
         DriverConfig(
@@ -40,7 +67,8 @@ def test_container_command_is_restricted_by_default() -> None:
         )
     )
     command = driver._docker_command()
-    assert command[:3] == ["docker", "run", "--rm"]
+    assert Path(command[0]).name == "docker"
+    assert command[1:3] == ["run", "--rm"]
     assert command[command.index("--network") + 1] == "none"
     assert "no-new-privileges:true" in command
     assert "ALL" in command
