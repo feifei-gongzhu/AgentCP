@@ -14,12 +14,21 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
-from .agent_compose import AgentComposeError, AgentComposeRuntime, profile_from_driver_config
+from .agent_compose import (
+    AgentComposeError,
+    AgentComposeRuntime,
+    find_docker_binary,
+    profile_from_driver_config,
+)
+from .local_docker import LocalDockerError, LocalDockerRuntime
 from .store import ROOT
 
 
 OUTPUT_SCHEMA = Path(__file__).resolve().parent / "worker_output_schema.json"
 ProgressCallback = Callable[[dict[str, Any]], None]
+VALID_WORKER_KINDS = frozenset({
+    "fact", "intent", "plan_batch", "decision", "negative_evidence", "none",
+})
 
 
 class DriverError(RuntimeError):
@@ -47,6 +56,20 @@ def _merged_env(config: DriverConfig) -> dict[str, str]:
     return env
 
 
+def _project_working_directory(config: DriverConfig) -> Path:
+    value = str(config.extra.get("project_path", "") or "").strip()
+    if not value:
+        return ROOT
+    path = Path(value).resolve()
+    if not path.is_dir():
+        raise DriverError(f"项目工作目录不存在: {path}")
+    try:
+        path.relative_to(ROOT.resolve())
+    except ValueError as exc:
+        raise DriverError("宿主机 Worker 的项目目录必须位于 AgentCP 工作区内") from exc
+    return path
+
+
 def _extract_json(text: str) -> dict[str, Any]:
     stripped = text.strip()
     if not stripped:
@@ -59,6 +82,14 @@ def _extract_json(text: str) -> dict[str, Any]:
         if start >= 0 and end > start:
             return json.loads(stripped[start : end + 1])
         raise DriverError(f"模型输出不是合法 JSON: {stripped}")
+
+
+def _validate_worker_payload(payload: Any) -> dict[str, Any]:
+    if not isinstance(payload, dict):
+        raise DriverError("Model Worker 返回值必须是 JSON 对象")
+    if payload.get("kind") not in VALID_WORKER_KINDS:
+        raise DriverError("模型未返回带合法 kind 的 AgentCP Worker JSON")
+    return payload
 
 
 def _redact_secret(text: str, secret: str | None, limit: int | None = None) -> str:
@@ -189,7 +220,7 @@ class CodexCliDriver(BaseDriver):
             "exec",
             "--skip-git-repo-check",
             "--cd",
-            str(ROOT),
+            str(_project_working_directory(self.config)),
             "--output-schema",
             str(OUTPUT_SCHEMA),
             "--output-last-message",
@@ -259,41 +290,55 @@ class CodexCliDriver(BaseDriver):
             cwd=str(cwd_override) if cwd_override else None,
             **process_options,
         )
-        if input_text is not None and process.stdin is not None:
-            process.stdin.write(input_text)
-            process.stdin.close()
         stdout_lines: list[str] = []
         stderr_lines: list[str] = []
-        reader_threads: list[threading.Thread] = []
-        if line_callback is not None:
-            def read_stdout() -> None:
-                if process.stdout is None:
-                    return
-                retained = 0
-                for line in iter(process.stdout.readline, ""):
-                    if retained < 8 * 1024 * 1024:
-                        stdout_lines.append(line)
-                        retained += len(line)
+        def read_stdout() -> None:
+            if process.stdout is None:
+                return
+            retained = 0
+            for line in iter(process.stdout.readline, ""):
+                if retained < 8 * 1024 * 1024:
+                    stdout_lines.append(line)
+                    retained += len(line)
+                if line_callback is not None:
                     try:
                         line_callback(line)
                     except Exception:
                         continue
 
-            def read_stderr() -> None:
-                if process.stderr is None:
-                    return
-                retained = 0
-                for line in iter(process.stderr.readline, ""):
-                    if retained < 1024 * 1024:
-                        stderr_lines.append(line)
-                        retained += len(line)
+        def read_stderr() -> None:
+            if process.stderr is None:
+                return
+            retained = 0
+            for line in iter(process.stderr.readline, ""):
+                if retained < 1024 * 1024:
+                    stderr_lines.append(line)
+                    retained += len(line)
 
-            reader_threads = [
-                threading.Thread(target=read_stdout, daemon=True),
-                threading.Thread(target=read_stderr, daemon=True),
-            ]
-            for reader in reader_threads:
-                reader.start()
+        reader_threads = [
+            threading.Thread(target=read_stdout, daemon=True),
+            threading.Thread(target=read_stderr, daemon=True),
+        ]
+        for reader in reader_threads:
+            reader.start()
+
+        prompt_delivery_failed = threading.Event()
+        writer: threading.Thread | None = None
+        if input_text is not None and process.stdin is not None:
+            def write_stdin() -> None:
+                try:
+                    assert process.stdin is not None
+                    process.stdin.write(input_text)
+                    process.stdin.close()
+                except (BrokenPipeError, OSError):
+                    prompt_delivery_failed.set()
+                    try:
+                        process.stdin.close()
+                    except (BrokenPipeError, OSError):
+                        pass
+
+            writer = threading.Thread(target=write_stdin, daemon=True)
+            writer.start()
         deadline = time.monotonic() + self.timeout
         while process.poll() is None:
             if self.cancel_check():
@@ -303,14 +348,19 @@ class CodexCliDriver(BaseDriver):
                 _terminate_process_tree(process)
                 raise DriverError(f"模型执行超时: {self.timeout}s")
             time.sleep(0.2)
-        if line_callback is not None:
-            for reader in reader_threads:
-                reader.join(timeout=2)
-            stdout = "".join(stdout_lines)
-            stderr = "".join(stderr_lines)
-        else:
-            stdout = process.stdout.read() if process.stdout else ""
-            stderr = process.stderr.read() if process.stderr else ""
+        if writer is not None:
+            writer.join(timeout=2)
+        for reader in reader_threads:
+            reader.join(timeout=2)
+        stdout = "".join(stdout_lines)
+        stderr = "".join(stderr_lines)
+        if prompt_delivery_failed.is_set() and process.returncode == 0:
+            return subprocess.CompletedProcess(
+                cmd,
+                1,
+                stdout,
+                "模型子进程在接收 Prompt 前已退出\n" + stderr,
+            )
         return subprocess.CompletedProcess(cmd, process.returncode, stdout, stderr)
 
 class ClaudeCliDriver(BaseDriver):
@@ -346,7 +396,8 @@ class ClaudeCliDriver(BaseDriver):
                 raise DriverError(f"缺少环境变量: {self.config.api_key_env}")
             auth_mode = self.config.auth_mode
             if auth_mode == "auto":
-                auth_mode = "bearer" if self.config.api_key_env.endswith("AUTH_TOKEN") else "x-api-key"
+                endpoint = (self.config.base_url or "").lower()
+                auth_mode = "x-api-key" if "api.anthropic.com" in endpoint else "bearer"
             if auth_mode == "bearer":
                 env["ANTHROPIC_AUTH_TOKEN"] = secret
                 env.pop("ANTHROPIC_API_KEY", None)
@@ -418,7 +469,7 @@ class ClaudeCliDriver(BaseDriver):
             cmd,
             input_text=prompt,
             env_override=env,
-            cwd_override=ROOT,
+            cwd_override=_project_working_directory(self.config),
             line_callback=consume_stream_line,
         )
         if stream_error:
@@ -544,7 +595,7 @@ class ContainerWorkerDriver(CodexCliDriver):
         if target_path is not None and not target_path.exists():
             raise DriverError(f"container target_path 不存在: {target_path}")
         cmd = [
-            self.config.command or "docker",
+            self.config.command or find_docker_binary(),
             "run",
             "--rm",
             "--init",
@@ -589,7 +640,7 @@ class MockDriver(BaseDriver):
 
 
 class AgentComposeDriver(BaseDriver):
-    """Mandatory V3 runtime for every real model-backed worker."""
+    """Container-isolated V3 runtime backed by the local agent-compose build."""
 
     def run(self, prompt: str) -> dict[str, Any]:
         try:
@@ -600,6 +651,21 @@ class AgentComposeDriver(BaseDriver):
                 progress_callback=self.progress_callback,
             ).run(prompt)
         except AgentComposeError as exc:
+            raise DriverError(str(exc)) from exc
+
+
+class LocalDockerDriver(BaseDriver):
+    """AgentCP-owned Docker runtime; no agent-compose daemon is involved."""
+
+    def run(self, prompt: str) -> dict[str, Any]:
+        try:
+            return LocalDockerRuntime(
+                self.config,
+                timeout=self.timeout,
+                cancel_check=self.cancel_check,
+                progress_callback=self.progress_callback,
+            ).run(prompt)
+        except LocalDockerError as exc:
             raise DriverError(str(exc)) from exc
 
 
@@ -620,17 +686,28 @@ def run_driver(
     cancel_check: Callable[[], bool] | None = None,
     progress_callback: ProgressCallback | None = None,
 ) -> dict[str, Any]:
+    runtime_mode = str(config.extra.get("runtime_mode") or "local-docker").strip().lower()
+    runtime_mode = {"host-native": "local-cli", "ct-agent-compose": "agent-compose"}.get(runtime_mode, runtime_mode)
+    if runtime_mode not in {"local-docker", "agent-compose", "local-cli"}:
+        raise DriverError(f"未知运行模式: {runtime_mode}")
     if config.type == "mock":
         driver_cls = MockDriver
-    elif config.type in DRIVERS or config.type in {"claude", "gemini", "opencode"}:
-        # AgentCP owns methodology and scheduling. agent-compose exclusively
-        # owns process isolation, provider execution, sessions and cancellation.
+    elif runtime_mode == "local-cli":
+        if config.type == "container":
+            raise DriverError("本地 CLI 模式不能选择 Container Worker")
+        if config.type not in DRIVERS:
+            raise DriverError(f"本地 CLI 模式不支持模型后端: {config.type}")
+        driver_cls = DRIVERS[config.type]
+    elif runtime_mode == "agent-compose" and (config.type in DRIVERS or config.type in {"claude", "gemini", "opencode"}):
         driver_cls = AgentComposeDriver
+    elif runtime_mode == "local-docker" and (config.type in DRIVERS or config.type in {"claude", "gemini", "opencode"}):
+        driver_cls = ContainerWorkerDriver if config.type == "container" else LocalDockerDriver
     else:
         raise DriverError(f"未知模型后端: {config.type}")
-    return driver_cls(
+    payload = driver_cls(
         config,
         timeout=timeout,
         cancel_check=cancel_check,
         progress_callback=progress_callback,
     ).run(prompt)
+    return _validate_worker_payload(payload)

@@ -79,9 +79,11 @@ cleanup_test() {
   local backup
   chmod -R u+w -- "$TMP_ROOT" 2>/dev/null || true
   rm -rf -- "$TMP_ROOT"
-  for backup in "${PRESERVED_BACKUPS[@]}"; do
-    rm -rf -- "$backup"
-  done
+  if ((${#PRESERVED_BACKUPS[@]})); then
+    for backup in "${PRESERVED_BACKUPS[@]}"; do
+      rm -rf -- "$backup"
+    done
+  fi
 }
 trap cleanup_test EXIT
 

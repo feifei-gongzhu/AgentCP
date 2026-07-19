@@ -3,7 +3,9 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import queue
 import re
+import shutil
 import signal
 import socket
 import subprocess
@@ -15,6 +17,10 @@ from typing import Any, Callable
 
 
 ProgressCallback = Callable[[dict[str, Any]], None]
+DEFAULT_LOCAL_GUEST_IMAGE = "agent-compose-guest:latest"
+VALID_WORKER_KINDS = frozenset({
+    "fact", "intent", "plan_batch", "decision", "negative_evidence", "none",
+})
 
 
 class AgentComposeError(RuntimeError):
@@ -32,12 +38,13 @@ class AgentComposeProfile:
     api_key: str | None
     sandbox: str
     target_path: Path | None = None
-    guest_image: str = "ghcr.io/chaitin/agent-compose-guest:latest"
+    guest_image: str = DEFAULT_LOCAL_GUEST_IMAGE
     external_host: str | None = None
 
 
 _LOCKS: dict[str, threading.RLock] = {}
 _LOCKS_GUARD = threading.Lock()
+_IMAGE_BUILD_LOCK = threading.Lock()
 
 
 def _runtime_lock(path: Path) -> threading.RLock:
@@ -70,9 +77,159 @@ def _find_binary() -> Path:
         binary = Path(__file__).resolve().parents[2] / "third_party" / "agent-compose" / "build" / "agent-compose"
     if not binary.is_file() or not os.access(binary, os.X_OK):
         raise AgentComposeError(
-            "agent-compose 是 V3 必需运行时，但未找到可执行文件: " + str(binary)
+            "当前角色选择了 agent-compose 模式，但未找到可执行文件: " + str(binary)
         )
     return binary
+
+
+def find_docker_binary() -> str:
+    """Resolve Docker independently from a GUI/launchd service's limited PATH."""
+    configured = os.environ.get("AGENTCP_DOCKER_BIN", "").strip()
+    if configured:
+        candidate = Path(configured).expanduser().resolve()
+        if candidate.is_file() and os.access(candidate, os.X_OK):
+            return str(candidate)
+        raise AgentComposeError(f"AGENTCP_DOCKER_BIN 指向的文件不可执行: {candidate}")
+    discovered = shutil.which("docker")
+    if discovered:
+        return str(Path(discovered).resolve())
+    for value in (
+        "/usr/local/bin/docker",
+        "/opt/homebrew/bin/docker",
+        "/Applications/Docker.app/Contents/Resources/bin/docker",
+    ):
+        candidate = Path(value)
+        if candidate.is_file() and os.access(candidate, os.X_OK):
+            return str(candidate.resolve())
+    raise AgentComposeError(
+        "未找到本机 Docker CLI；请启动 Docker Desktop，或设置 AGENTCP_DOCKER_BIN"
+    )
+
+
+def docker_image_exists(image: str) -> bool:
+    try:
+        docker_binary = find_docker_binary()
+        result = subprocess.run(
+            [docker_binary, "image", "inspect", image],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=10,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return result.returncode == 0
+
+
+def ensure_local_guest_image(
+    image: str,
+    *,
+    cancel_check: Callable[[], bool] | None = None,
+    progress_callback: ProgressCallback | None = None,
+    runtime: str = "local-docker",
+) -> None:
+    """Ensure the vendored worker image exists before any local Docker run."""
+    image = image.strip()
+    if not image:
+        raise AgentComposeError("本地 Docker 模式缺少 guest image 名称")
+    if docker_image_exists(image):
+        return
+    cancel_check = cancel_check or (lambda: False)
+    progress_callback = progress_callback or (lambda _event: None)
+    with _IMAGE_BUILD_LOCK:
+        if docker_image_exists(image):
+            return
+        source_root = Path(__file__).resolve().parents[2] / "third_party" / "agent-compose"
+        builder = source_root / "scripts" / "build-agent-compose-guest.sh"
+        if not builder.is_file():
+            raise AgentComposeError(f"本地 guest image 构建脚本不存在: {builder}")
+        docker_binary = find_docker_binary()
+        try:
+            docker = subprocess.run(
+                [docker_binary, "info"],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+                text=True,
+                timeout=15,
+                check=False,
+            )
+        except FileNotFoundError as exc:
+            raise AgentComposeError("本机 Docker CLI 路径已经失效") from exc
+        except subprocess.TimeoutExpired as exc:
+            raise AgentComposeError("本机 Docker 状态检查超时") from exc
+        if docker.returncode != 0:
+            raise AgentComposeError(
+                "默认运行模式需要本机 Docker，但 Docker 当前不可用: "
+                + docker.stderr.strip()[:1000]
+            )
+        progress_callback({
+            "event": "local_guest_image_build_started",
+            "runtime": runtime,
+            "image": image,
+        })
+        env = os.environ.copy()
+        env["IMAGE_TAG"] = image
+        env["PATH"] = str(Path(docker_binary).parent) + os.pathsep + env.get("PATH", "")
+        process = subprocess.Popen(
+            [str(builder)],
+            cwd=str(source_root),
+            env=env,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+            start_new_session=True,
+        )
+        recent: list[str] = []
+        deadline = time.monotonic() + 1800
+        assert process.stdout is not None
+        output_queue: queue.Queue[str | None] = queue.Queue()
+
+        def read_build_output() -> None:
+            assert process.stdout is not None
+            for output_line in iter(process.stdout.readline, ""):
+                output_queue.put(output_line)
+            output_queue.put(None)
+
+        reader = threading.Thread(target=read_build_output, daemon=True)
+        reader.start()
+        while process.poll() is None:
+            try:
+                line = output_queue.get(timeout=0.2)
+            except queue.Empty:
+                line = ""
+            if line:
+                recent.append(line.rstrip())
+                recent = recent[-30:]
+                progress_callback({
+                    "event": "local_guest_image_build_progress",
+                    "runtime": runtime,
+                    "image": image,
+                    "text": line.rstrip()[:1500],
+                })
+            if cancel_check():
+                _terminate_process(process)
+                raise AgentComposeError("本地 guest image 构建已被取消")
+            if time.monotonic() >= deadline:
+                _terminate_process(process)
+                raise AgentComposeError("本地 guest image 构建超过 1800 秒")
+        reader.join(timeout=2)
+        while not output_queue.empty():
+            line = output_queue.get_nowait()
+            if line:
+                recent.append(line.rstrip())
+        if process.returncode != 0 or not docker_image_exists(image):
+            raise AgentComposeError(
+                "本地 guest image 构建失败:\n" + "\n".join(recent[-30:])[-5000:]
+            )
+        progress_callback({
+            "event": "local_guest_image_build_completed",
+            "runtime": runtime,
+            "image": image,
+        })
 
 
 def _reserve_port() -> int:
@@ -121,7 +278,7 @@ def _terminate_owned_daemon(pid: int, binary: Path) -> None:
 
 
 class AgentComposeRuntime:
-    """AgentCP's mandatory execution adapter for the agent-compose runtime."""
+    """AgentCP's local-Docker execution adapter for agent-compose."""
 
     def __init__(
         self,
@@ -154,6 +311,8 @@ class AgentComposeRuntime:
         if not prompt.strip():
             raise AgentComposeError("提交给 agent-compose 的 Prompt 为空")
         self.runtime_dir.mkdir(parents=True, exist_ok=True)
+        if not self.profile.external_host:
+            self._ensure_local_guest_image()
         with _runtime_lock(self.runtime_dir):
             host = self._ensure_daemon()
             self._write_compose_file()
@@ -167,7 +326,7 @@ class AgentComposeRuntime:
                 "--host", host,
                 "--file", str(self.compose_file),
                 "--json", "up",
-            ], timeout=min(60, self.timeout))
+            ], timeout=min(180, self.timeout))
 
         self.progress_callback({
             "event": "agent_compose_run_started",
@@ -189,14 +348,14 @@ class AgentComposeRuntime:
             "sandbox_id": detail.get("sandbox_id"),
             "duration_ms": detail.get("duration_ms"),
         })
-        result_text = str(detail.get("result_json") or detail.get("output") or "").strip()
-        if not result_text:
-            raise AgentComposeError("agent-compose 运行成功，但模型未返回结果")
-        return _extract_json(result_text)
+        return _extract_worker_result(detail)
 
     def _run_detached(self, host: str, prompt: str) -> dict[str, Any]:
         metadata = self._read_metadata()
         reusable_sandbox = str(metadata.get("sandbox_id") or "").strip()
+        output_schema = Path(__file__).with_name("worker_output_schema.json")
+        if not output_schema.is_file():
+            raise AgentComposeError(f"AgentCP Worker JSON Schema 不存在: {output_schema}")
         run_args = [
             "--host", host,
             "--file", str(self.compose_file),
@@ -204,6 +363,8 @@ class AgentComposeRuntime:
             self.agent_name,
             "--prompt", prompt,
         ]
+        if self.profile.provider != "codex":
+            run_args.extend(["--output-schema-file", str(output_schema)])
         if reusable_sandbox:
             run_args.extend(["--sandbox", reusable_sandbox])
         try:
@@ -290,26 +451,44 @@ class AgentComposeRuntime:
         def read_lines() -> None:
             if process.stdout is None:
                 return
-            for raw in iter(process.stdout.readline, ""):
-                line = _redact_runtime_text(raw.strip(), self.profile.api_key)
-                if not line:
-                    continue
-                tool = re.search(r"\[tool:([^\]]+)\]", line)
-                if tool:
-                    self.progress_callback({
-                        "event": "tool_started",
-                        "runtime": "agent-compose",
-                        "tool_use_id": f"ac-{run_id}-{time.monotonic_ns()}",
-                        "tool_name": tool.group(1)[:120],
-                        "input_summary": "等待 agent-compose 工具参数",
-                    })
-                else:
+            pending: list[str] = []
+            pending_length = 0
+
+            def flush_pending() -> None:
+                nonlocal pending_length
+                text = "".join(pending).strip()
+                pending.clear()
+                pending_length = 0
+                if text:
                     self.progress_callback({
                         "event": "agent_compose_log",
                         "runtime": "agent-compose",
                         "run_id": run_id,
-                        "text": line[:2000],
+                        "text": text[:2000],
                     })
+
+            try:
+                for raw in iter(process.stdout.readline, ""):
+                    fragment = _agent_compose_log_fragment(raw, self.profile.api_key)
+                    if not fragment:
+                        continue
+                    tool = re.search(r"\[tool:([^\]]+)\]", fragment)
+                    if tool:
+                        flush_pending()
+                        self.progress_callback({
+                            "event": "tool_started",
+                            "runtime": "agent-compose",
+                            "tool_use_id": f"ac-{run_id}-{time.monotonic_ns()}",
+                            "tool_name": tool.group(1)[:120],
+                            "input_summary": "等待 agent-compose 工具参数",
+                        })
+                        continue
+                    pending.append(fragment)
+                    pending_length += len(fragment)
+                    if pending_length >= 480:
+                        flush_pending()
+            finally:
+                flush_pending()
 
         thread = threading.Thread(target=read_lines, daemon=True)
         thread.start()
@@ -332,7 +511,9 @@ class AgentComposeRuntime:
         volumes: list[dict[str, Any]] = [{
             "type": "bind",
             "source": str(self.profile.project_path.resolve()),
-            "target": "/workspace",
+            # /workspace is owned by agent-compose itself. AgentCP state and
+            # evidence use a separate mount to avoid duplicate Docker targets.
+            "target": "/agentcp-project",
             "read_only": not writable,
         }]
         if self.profile.target_path is not None:
@@ -346,10 +527,12 @@ class AgentComposeRuntime:
             "provider": self.profile.provider,
             "system_prompt": (
                 "You are an AgentCP V3 worker. Follow the supplied blackboard methodology, "
-                "operate only on the mounted authorized target, and return exactly one JSON object."
+                "operate only on the mounted authorized target, use /agentcp-project for project "
+                "state and evidence, and return exactly one JSON object."
             ),
             "image": self.profile.guest_image,
             "driver": {"docker": {}},
+            "env": {"AGENTCP_STATELESS_WORKER": {"value": "1"}},
             "volumes": volumes,
         }
         if self.profile.model:
@@ -361,6 +544,18 @@ class AgentComposeRuntime:
             json.dumps(document, ensure_ascii=False, indent=2) + "\n",
             encoding="utf-8",
         )
+
+    def _ensure_local_guest_image(self) -> None:
+        ensure_local_guest_image(
+            self.profile.guest_image,
+            cancel_check=self.cancel_check,
+            progress_callback=self.progress_callback,
+            runtime="agent-compose",
+        )
+
+    @staticmethod
+    def _docker_image_exists(image: str) -> bool:
+        return docker_image_exists(image)
 
     def _ensure_daemon(self) -> str:
         if self.profile.external_host:
@@ -581,12 +776,16 @@ def profile_from_driver_config(config: Any) -> AgentComposeProfile:
         api_key=api_key,
         sandbox=config.sandbox,
         target_path=target_path,
-        guest_image=str(extra.get("guest_image") or "ghcr.io/chaitin/agent-compose-guest:latest"),
+        guest_image=str(extra.get("guest_image") or DEFAULT_LOCAL_GUEST_IMAGE),
         external_host=external_host,
     )
 
 
 def _terminate_process(process: subprocess.Popen[str]) -> None:
+    # A log follower commonly exits on its own immediately after the model run.
+    # Never let best-effort cleanup overwrite an otherwise successful result.
+    if process.poll() is not None:
+        return
     try:
         os.killpg(process.pid, signal.SIGTERM)
         process.wait(timeout=3)
@@ -596,7 +795,7 @@ def _terminate_process(process: subprocess.Popen[str]) -> None:
         except ProcessLookupError:
             pass
         process.wait(timeout=3)
-    except ProcessLookupError:
+    except (ProcessLookupError, PermissionError):
         pass
 
 
@@ -618,6 +817,62 @@ def _extract_json(text: str) -> dict[str, Any]:
     return value
 
 
+def _extract_worker_result(detail: dict[str, Any]) -> dict[str, Any]:
+    """Extract the model's final AgentCP payload, never agent-compose metadata."""
+    metadata_text = str(detail.get("result_json") or "").strip()
+    metadata: dict[str, Any] = {}
+    if metadata_text:
+        try:
+            decoded = json.loads(metadata_text)
+        except json.JSONDecodeError:
+            decoded = None
+        if isinstance(decoded, dict):
+            metadata = decoded
+
+    candidates = [
+        str(metadata.get("finalText") or "").strip(),
+        str(detail.get("output") or "").strip(),
+    ]
+    for text in [*candidates, str(detail.get("error") or "").strip()]:
+        error = _model_api_error(text)
+        if error:
+            raise AgentComposeError(error)
+
+    # New agent-compose builds expose finalText in result_json. Keep accepting a
+    # direct Worker payload for compatibility with tests and external runtimes.
+    if metadata.get("kind") in VALID_WORKER_KINDS:
+        return metadata
+    for text in candidates:
+        if not text:
+            continue
+        try:
+            payload = _extract_json(text)
+        except AgentComposeError:
+            continue
+        if payload.get("kind") in VALID_WORKER_KINDS:
+            return payload
+
+    raise AgentComposeError(
+        "agent-compose 运行结束，但未返回带合法 kind 的 AgentCP Worker JSON"
+    )
+
+
+def _model_api_error(text: str) -> str | None:
+    if not text:
+        return None
+    match = re.search(
+        r"API\s+Error:\s*(?:(\d{3})\s*)?([^\r\n]+)",
+        text,
+        flags=re.IGNORECASE,
+    )
+    if not match:
+        return None
+    status = match.group(1)
+    message = match.group(2).strip() or "模型服务返回错误"
+    status_text = f"HTTP {status} " if status else ""
+    return f"模型 API 调用失败: {status_text}{message}".strip()
+
+
 def _redact_runtime_text(value: str, secret: str | None) -> str:
     text = value
     if secret:
@@ -633,6 +888,12 @@ def _redact_runtime_text(value: str, secret: str | None) -> str:
         text,
     )
     return text
+
+
+def _agent_compose_log_fragment(raw: str, secret: str | None) -> str:
+    """Remove the repeated runner prefix without destroying token spacing."""
+    text = _redact_runtime_text(raw.rstrip("\r\n"), secret)
+    return re.sub(r"^[^|\r\n]{1,160}\|", "", text, count=1)
 
 
 def _resolved_anthropic_auth_mode(auth_mode: str, base_url: str | None) -> str:

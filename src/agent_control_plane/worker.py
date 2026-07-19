@@ -42,6 +42,9 @@ def build_worker_prompt(
     store: ProjectStore,
     role: str,
     owner_directives: list[dict[str, Any]] | None = None,
+    *,
+    custom_prompt: str | None = None,
+    member_name: str | None = None,
 ) -> str:
     prompt_file = PROMPT_DIR / f"{role}.md"
     if not prompt_file.exists():
@@ -106,6 +109,14 @@ def build_worker_prompt(
         + "\n\n当前项目上下文如下：\n"
         + json.dumps(context, ensure_ascii=False, indent=2)
     )
+    if custom_prompt and custom_prompt.strip():
+        prompt += (
+            "\n\n# 项目所有者为当前 Agent 配置的专属提示词\n"
+            f"适用执行单元：{member_name or role}\n"
+            "这是项目级持久指令，必须在当前角色职责内执行。"
+            "若它与项目所有者之后提交的实时指令冲突，以实时指令为准。\n"
+            + custom_prompt.strip()
+        )
     if open_hints:
         prompt += (
             "\n\n# 项目所有者指令（AgentCP 内部最高控制优先级）\n"
@@ -288,6 +299,7 @@ def apply_worker_output(store: ProjectStore, payload: dict[str, Any]) -> str:
             raise WorkerError("Intent action_safety_risk 非法。")
         intent.requires_human_confirmation = intent.action_safety_risk in {"high", "critical"}
         store.append_jsonl("intents.jsonl", intent)
+        ControlDatabase(store.path / "control_plane.db").register_direction(asdict(intent))
         if intent.requires_human_confirmation:
             state = store.load_state()
             state.gate_status = GateStatus.AWAITING_APPROVAL.value

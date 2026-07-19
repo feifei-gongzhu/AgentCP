@@ -2,7 +2,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { EventEmitter } from "node:events";
 import { Readable } from "node:stream";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { captureStdio, runnerOptions, withTempSession } from "./helpers.js";
 
 const codexState = vi.hoisted(() => ({
@@ -115,6 +115,10 @@ vi.mock("node:child_process", () => ({
 }));
 
 describe("runner execution", () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
   beforeEach(() => {
     codexState.constructorOptions = [];
     codexState.events = [];
@@ -137,13 +141,18 @@ describe("runner execution", () => {
   it("runs a new Codex thread and persists the resulting thread", async () => {
     const { CodexRunner } = await import("../src/runners/codex.js");
     await withTempSession(async (root) => {
+      vi.stubEnv("LLM_API_ENDPOINT", "https://relay.example/v1");
+      vi.stubEnv("LLM_API_KEY", "test-runtime-key");
       codexState.events = [
         { type: "thread.started", thread_id: "thread-started" },
         { type: "item.completed", item: { id: "a1", type: "agent_message", text: "codex answer" } },
       ];
       const stdio = captureStdio();
       try {
-        const result = await new CodexRunner(runnerOptions(root, "catalog body")).runPrompt("prompt");
+        const result = await new CodexRunner({
+          ...runnerOptions(root, "catalog body"),
+          model: "configured-model",
+        }).runPrompt("prompt");
 
         expect(result).toMatchObject({
           provider: "codex",
@@ -156,7 +165,20 @@ describe("runner execution", () => {
       }
 
       expect(codexState.constructorOptions.at(-1)).toMatchObject({
-        config: { developer_instructions: "catalog body" },
+        apiKey: "test-runtime-key",
+        config: {
+          developer_instructions: "catalog body",
+          model_provider: "agentcp",
+          model_providers: {
+            agentcp: {
+              name: "AgentCP",
+              base_url: "https://relay.example/v1",
+              env_key: "LLM_API_KEY",
+              wire_api: "responses",
+              supports_websockets: false,
+            },
+          },
+        },
       });
       const stored = JSON.parse(await fs.readFile(path.join(root, "state", "agents", "providers", "codex.json"), "utf8"));
       expect(stored.threadId).toBe("thread-new");
@@ -257,6 +279,26 @@ describe("runner execution", () => {
         stdio.restore();
       }
       expect(codexState.resumed).toBe("old-thread");
+    });
+  });
+
+  it("starts a fresh Codex thread for an AgentCP stateless worker", async () => {
+    const { CodexRunner } = await import("../src/runners/codex.js");
+    await withTempSession(async (root) => {
+      vi.stubEnv("AGENTCP_STATELESS_WORKER", "1");
+      const providerRoot = path.join(root, "state", "agents", "providers");
+      await fs.mkdir(providerRoot, { recursive: true });
+      await fs.writeFile(path.join(providerRoot, "codex.json"), JSON.stringify({
+        provider: "codex",
+        threadId: "stale-thread-with-deleted-prompt",
+      }), "utf8");
+      codexState.events = [{ type: "item.completed", item: { id: "a2", type: "agent_message", text: "fresh" } }];
+
+      await new CodexRunner(runnerOptions(root)).runPrompt("current blackboard prompt");
+
+      expect(codexState.resumed).toBe("");
+      const stored = JSON.parse(await fs.readFile(path.join(providerRoot, "codex.json"), "utf8"));
+      expect(stored.threadId).toBe("thread-new");
     });
   });
 

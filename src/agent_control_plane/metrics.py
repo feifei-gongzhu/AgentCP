@@ -32,6 +32,10 @@ def project_asset_inventory(store: ProjectStore, facts: list[dict] | None = None
         for value in target.get("targets", [])
         if (canonical := _canonical_asset(value))
     }
+    artifact = target.get("uploaded_artifact")
+    if isinstance(artifact, dict) and artifact.get("path"):
+        identity = str(artifact.get("sha256") or artifact.get("name") or artifact["path"]).casefold()
+        assets.add(f"file:{identity}")
     for fact in facts if facts is not None else store.read_jsonl("facts.jsonl"):
         for value in fact.get("assets", []) or []:
             canonical = _canonical_asset(value)
@@ -71,11 +75,16 @@ def _collect_metrics_locked(store: ProjectStore) -> dict[str, Any]:
     vulnerabilities = sum(item.get("status") == "vulnerability" for item in facts)
     phenomena = sum(item.get("status") == "phenomenon" for item in facts)
     assets = project_asset_inventory(store, facts)
+    target = store.read_json("target.json")
     declared_assets = {
         canonical
-        for value in store.read_json("target.json").get("targets", [])
+        for value in target.get("targets", [])
         if (canonical := _canonical_asset(value))
     }
+    artifact = target.get("uploaded_artifact")
+    if isinstance(artifact, dict) and artifact.get("path"):
+        identity = str(artifact.get("sha256") or artifact.get("name") or artifact["path"]).casefold()
+        declared_assets.add(f"file:{identity}")
 
     database_path = store.path / "control_plane.db"
     runs: list[dict] = []
@@ -91,14 +100,16 @@ def _collect_metrics_locked(store: ProjectStore) -> dict[str, Any]:
 
     completed_jobs = sum(item.get("status") == "completed" for item in jobs)
     failed_jobs = sum(item.get("status") == "failed" for item in jobs)
+    restricted_jobs = sum(item.get("status") == "restricted" for item in jobs)
     retry_count = sum(max(0, int(item.get("attempts", 0)) - 1) for item in jobs)
     direction_total = len(directions) + duplicate_directions
     current_run = runs[-1] if runs else None
     current_jobs = [item for item in jobs if current_run and item.get("run_id") == current_run.get("id")]
-    terminal_statuses = {"completed", "failed", "cancelled", "cancelling"}
+    terminal_statuses = {"completed", "failed", "restricted", "cancelled", "cancelling"}
     terminal_jobs = [item for item in current_jobs if item.get("status") in terminal_statuses]
     current_completed = sum(item.get("status") == "completed" for item in current_jobs)
     current_failed = sum(item.get("status") in {"failed", "cancelled", "cancelling"} for item in current_jobs)
+    current_restricted = sum(item.get("status") == "restricted" for item in current_jobs)
     pending_facts = sum(
         item.get("status") == "completed"
         and not item.get("committed_at")
@@ -145,6 +156,7 @@ def _collect_metrics_locked(store: ProjectStore) -> dict[str, Any]:
             "jobs": len(jobs),
             "completed_jobs": completed_jobs,
             "failed_jobs": failed_jobs,
+            "restricted_jobs": restricted_jobs,
             "retry_count": retry_count,
             "job_success_rate": completed_jobs / len(jobs) if jobs else 0.0,
             "current_run": {
@@ -154,6 +166,7 @@ def _collect_metrics_locked(store: ProjectStore) -> dict[str, Any]:
                 "finished_jobs": len(terminal_jobs),
                 "completed_jobs": current_completed,
                 "failed_jobs": current_failed,
+                "restricted_jobs": current_restricted,
                 "progress_rate": len(terminal_jobs) / len(current_jobs) if current_jobs else 0.0,
                 "success_rate": current_completed / len(terminal_jobs) if terminal_jobs else 0.0,
             },

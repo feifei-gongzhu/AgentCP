@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import json
+import hashlib
+import hmac
+import ipaddress
 import os
 import re
 import shutil
@@ -38,6 +41,7 @@ class ProjectNotFound(WebAppError):
 
 
 DEFAULT_VENDOR = "production-security"
+MAX_CLIENT_UPLOAD_BYTES = 2 * 1024 * 1024 * 1024
 _PROJECT_ACTIVITY_CONDITION = threading.Condition(threading.RLock())
 _PROJECT_ACTIVITY: dict[str, int] = {}
 _PROJECTS_BEING_DELETED: set[str] = set()
@@ -344,13 +348,17 @@ def _normalize_target(vendor: str, payload: dict, current: dict | None = None) -
         payload.get("success_criteria", base.get("success_criteria", [])),
         "success_criteria",
     )
-    if not targets and not target_path:
+    project_type = str(payload.get("project_type", base.get("project_type", "")) or "").strip()
+    if not targets and not target_path and not _is_client_project_type(project_type):
         raise WebAppError("请至少填写一个目标地址，或填写本地目标目录")
-    for field in ("goal", "project_type", "notes"):
+    for field in ("goal", "notes"):
         value = str(payload.get(field, base.get(field, "")) or "").strip()
         if len(value) > 10000:
             raise WebAppError(f"{field} 内容过长")
         base[field] = value
+    if len(project_type) > 10000:
+        raise WebAppError("project_type 内容过长")
+    base["project_type"] = project_type
     base.update({
         "vendor": vendor,
         "targets": targets,
@@ -369,6 +377,15 @@ def _target_markdown(target: dict) -> str:
     def bullets(items: list[str]) -> str:
         return "\n".join(f"- {item}" for item in items) or "- 无"
 
+    artifact = target.get("uploaded_artifact") if isinstance(target.get("uploaded_artifact"), dict) else {}
+    artifact_section = (
+        "\n## 已上传客户端文件\n\n"
+        f"- 文件名：{artifact.get('name') or '未知'}\n"
+        f"- 大小：{artifact.get('size') or 0} bytes\n"
+        f"- SHA-256：{artifact.get('sha256') or '未知'}\n"
+        f"- 保存路径：{artifact.get('path') or target.get('target_path') or '未知'}\n"
+        if artifact else ""
+    )
     return (
         f"# {target['vendor']} 目标信息\n\n"
         "## 授权\n\n"
@@ -377,7 +394,7 @@ def _target_markdown(target: dict) -> str:
         "- 授权范围：*\n\n"
         "## 测试目标\n\n"
         f"{bullets(target.get('targets', []))}\n\n"
-        f"- 本地目标目录：{target.get('target_path') or '无'}\n"
+        f"- 本地目标路径：{target.get('target_path') or '无'}\n"
         f"- 项目类型：{target.get('project_type') or '未填写'}\n"
         f"- 测试目标：{target.get('goal') or '未填写'}\n\n"
         "## 不收范围\n\n"
@@ -386,6 +403,7 @@ def _target_markdown(target: dict) -> str:
         f"{bullets(target.get('success_criteria', []))}\n\n"
         "## 补充说明\n\n"
         f"{target.get('notes') or '无'}\n"
+        f"{artifact_section}"
     )
 
 
@@ -406,6 +424,121 @@ def _save_target(store: ProjectStore, payload: dict) -> dict:
     return target
 
 
+def _is_client_project_type(value: object) -> bool:
+    text = str(value or "").strip().casefold()
+    return any(marker in text for marker in (
+        "客户端", "client", "desktop", "electron", "android", "ios", "apk", "ipa", "移动端", "桌面端",
+    )) and not any(marker in text for marker in ("web", "api", "网站", "网页"))
+
+
+def _client_upload_limit() -> int:
+    raw = os.environ.get("AGENTCP_MAX_CLIENT_UPLOAD_BYTES", "").strip()
+    if not raw:
+        return MAX_CLIENT_UPLOAD_BYTES
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise WebAppError("AGENTCP_MAX_CLIENT_UPLOAD_BYTES 必须是正整数") from exc
+    if value <= 0:
+        raise WebAppError("AGENTCP_MAX_CLIENT_UPLOAD_BYTES 必须是正整数")
+    return value
+
+
+def _safe_upload_filename(value: object) -> str:
+    original = str(value or "").replace("\\", "/").split("/")[-1].strip()
+    cleaned = re.sub(r"[^\w.() +@-]+", "_", original, flags=re.UNICODE).strip(" .")
+    if not cleaned:
+        raise WebAppError("上传文件名为空或不合法")
+    return cleaned[:160]
+
+
+def _store_client_upload(
+    store: ProjectStore,
+    filename: object,
+    stream,
+    content_length: int,
+    project_type: object | None = None,
+) -> tuple[dict, dict]:
+    active_run = ControlDatabase(store.path / "control_plane.db").latest_resumable_run()
+    if active_run is not None:
+        raise WebAppError(
+            f"运行 {active_run['id']} 当前为 {active_run['status']}，请先结束当前审计再替换客户端目标文件"
+        )
+    current = store.read_json("target.json")
+    selected_type = str(project_type or current.get("project_type") or "").strip()
+    if not _is_client_project_type(selected_type):
+        raise WebAppError("只有客户端项目可以上传测试文件，请先选择“客户端”项目类型")
+    limit = _client_upload_limit()
+    if content_length <= 0:
+        raise WebAppError("上传文件为空或缺少 Content-Length")
+    if content_length > limit:
+        raise WebAppError(f"上传文件超过大小限制：最大 {limit} bytes")
+
+    safe_name = _safe_upload_filename(filename)
+    upload_root = store.path / "uploads"
+    upload_root.mkdir(parents=True, exist_ok=True)
+    destination = upload_root / f"{uuid4().hex[:12]}-{safe_name}"
+    temporary = upload_root / f".upload-{uuid4().hex}.part"
+    digest = hashlib.sha256()
+    remaining = content_length
+    try:
+        with temporary.open("xb") as output:
+            while remaining:
+                chunk = stream.read(min(1024 * 1024, remaining))
+                if not chunk:
+                    raise WebAppError("上传连接提前结束，文件未完整接收")
+                output.write(chunk)
+                digest.update(chunk)
+                remaining -= len(chunk)
+        os.replace(temporary, destination)
+        target = _save_target(store, {
+            **current,
+            "project_type": selected_type,
+            # All runtime modes can mount directories. CT agent-compose rejects
+            # file bind mounts, so mount the isolated upload directory and keep
+            # the selected file path in uploaded_artifact.
+            "target_path": str(upload_root.resolve()),
+        })
+        artifact = {
+            "name": safe_name,
+            "path": str(destination.resolve()),
+            "size": content_length,
+            "sha256": digest.hexdigest(),
+            "uploaded_at": now_iso(),
+        }
+        target["uploaded_artifact"] = artifact
+        store.write_json("target.json", target)
+        store.write_text("目标信息.md", _target_markdown(target))
+        previous_artifact = current.get("uploaded_artifact")
+        if isinstance(previous_artifact, dict):
+            previous_path_value = str(previous_artifact.get("path") or "").strip()
+            if previous_path_value:
+                previous_path = Path(previous_path_value).resolve()
+                try:
+                    previous_path.relative_to(upload_root.resolve())
+                except ValueError:
+                    previous_path = None
+                if (
+                    previous_path is not None
+                    and previous_path != destination.resolve()
+                    and not previous_path.is_symlink()
+                    and previous_path.is_file()
+                ):
+                    try:
+                        previous_path.unlink()
+                    except OSError:
+                        # The new target is already durable and valid. A stale
+                        # file cleanup failure must not roll it back or leave
+                        # target.json pointing at a deleted replacement.
+                        pass
+        return artifact, target
+    except Exception:
+        temporary.unlink(missing_ok=True)
+        if destination.exists() and str(current.get("target_path") or "") != str(destination):
+            destination.unlink(missing_ok=True)
+        raise
+
+
 def _config_path(store: ProjectStore) -> Path:
     return store.path / "team_config.json"
 
@@ -413,9 +546,17 @@ def _config_path(store: ProjectStore) -> Path:
 def _load_config(store: ProjectStore) -> dict:
     path = _config_path(store)
     if path.exists():
-        return json.loads(path.read_text(encoding="utf-8"))
-    fallback = ROOT / "teams" / "default.json"
-    return json.loads(fallback.read_text(encoding="utf-8"))
+        config = json.loads(path.read_text(encoding="utf-8"))
+    else:
+        fallback = ROOT / "teams" / "default.json"
+        config = json.loads(fallback.read_text(encoding="utf-8"))
+    for member in config.get("members", []):
+        runtime_mode = str(member.get("runtime_mode") or "local-docker")
+        member["runtime_mode"] = {
+            "host-native": "local-cli",
+            "ct-agent-compose": "agent-compose",
+        }.get(runtime_mode, runtime_mode)
+    return config
 
 
 def _redact_config(config: dict) -> dict:
@@ -456,6 +597,7 @@ def _save_config(store: ProjectStore, config: dict) -> None:
     allowed_roles = {"reason", "metacog", "executor", "pentester", "reviewer", "waf_analyst"}
     allowed_sandboxes = {"read-only", "workspace-write", "danger-full-access"}
     allowed_auth_modes = {"auto", "bearer", "x-api-key"}
+    allowed_runtime_modes = {"local-docker", "agent-compose", "local-cli"}
     names: set[str] = set()
     for member in config["members"]:
         name = str(member.get("name", "")).strip()
@@ -468,6 +610,17 @@ def _save_config(store: ProjectStore, config: dict) -> None:
             raise WebAppError(f"不支持的角色: {member.get('role')}")
         if member.get("sandbox", "read-only") not in allowed_sandboxes:
             raise WebAppError(f"不支持的沙箱模式: {member.get('sandbox')}")
+        runtime_mode = str(member.get("runtime_mode", "local-docker") or "local-docker")
+        runtime_mode = {"host-native": "local-cli", "ct-agent-compose": "agent-compose"}.get(runtime_mode, runtime_mode)
+        if runtime_mode not in allowed_runtime_modes:
+            raise WebAppError(f"不支持的运行模式: {runtime_mode}")
+        if runtime_mode == "local-cli" and member.get("type", "codex") == "container":
+            raise WebAppError("本地 CLI 模式不能选择 Container Worker")
+        member["runtime_mode"] = runtime_mode
+        custom_prompt = str(member.get("custom_prompt", "") or "").strip()
+        if len(custom_prompt) > 30000:
+            raise WebAppError("单个 Agent 的专属提示词不能超过 30000 字符")
+        member["custom_prompt"] = custom_prompt or None
         auth_mode = str(member.get("auth_mode", "auto") or "auto")
         if auth_mode not in allowed_auth_modes:
             raise WebAppError(f"不支持的鉴权方式: {auth_mode}")
@@ -477,14 +630,22 @@ def _save_config(store: ProjectStore, config: dict) -> None:
             raise WebAppError("密钥变量必须填写环境变量名，不能填写真实 API Key")
         member["api_key_env"] = api_key_env or None
         member_type = member.get("type", "codex")
+        if member_type == "ollama" and runtime_mode != "local-cli":
+            raise WebAppError("Ollama 目前仅支持本地 CLI 模式")
+        if member_type == "container":
+            extra = member.get("extra") or {}
+            if runtime_mode != "local-docker":
+                raise WebAppError("Container Worker 仅支持本地 Docker 模式")
+            if not str(extra.get("image", "")).strip() or not isinstance(extra.get("worker_command"), list):
+                raise WebAppError("Container Worker 必须在 extra 中配置 image 和 worker_command")
         if member_type in {"claude-cli", "openai-compatible"} and not str(member.get("model", "") or "").strip():
             raise WebAppError(f"{member_type} 必须填写模型 ID")
         if member_type == "openai-compatible" and not str(member.get("base_url", "") or "").strip():
             raise WebAppError("openai-compatible 必须填写服务地址")
         if member_type == "claude-cli" and member.get("base_url") and not api_key_env:
             raise WebAppError("Claude 中转站配置必须填写密钥环境变量名")
-        if member_type == "claude-cli" and member.get("sandbox") == "danger-full-access":
-            raise WebAppError("Claude CLI 不允许在宿主机使用 danger-full-access；请使用 Container Worker")
+        if member_type == "claude-cli" and runtime_mode == "local-cli" and member.get("sandbox") == "danger-full-access":
+            raise WebAppError("Claude CLI 不允许在宿主机使用 danger-full-access；请改用本地 Docker")
         if bool(member.get("dangerously_bypass_sandbox", False)):
             raise WebAppError("Web 配置禁止绕过沙箱")
         max_running = int(member.get("max_running", 1))
@@ -524,11 +685,24 @@ def _audit(store: ProjectStore, action: str, details: dict) -> None:
 
 
 class AgentControlHandler(SimpleHTTPRequestHandler):
-    server_version = "AgentControlPlane/0.1"
+    server_version = "AgentControlPlane/3.2"
+
+    def end_headers(self) -> None:
+        # The console is a live local control plane. Serving stale JavaScript can
+        # mislabel current backend states after a safe service reload, so frontend
+        # assets must always be revalidated instead of relying on browser cache.
+        if urlparse(self.path).path.startswith("/frontend/"):
+            self.send_header("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0")
+            self.send_header("Pragma", "no-cache")
+            self.send_header("Expires", "0")
+        super().end_headers()
 
     def translate_path(self, path: str) -> str:
-        candidate = (ROOT / urlparse(path).path.lstrip("/")).resolve()
-        root = ROOT.resolve()
+        request_path = urlparse(path).path
+        if not request_path.startswith("/frontend/"):
+            return str(ROOT.resolve() / "__forbidden__")
+        root = (ROOT / "frontend").resolve()
+        candidate = (root / request_path.removeprefix("/frontend/")).resolve()
         try:
             candidate.relative_to(root)
         except ValueError:
@@ -569,7 +743,8 @@ class AgentControlHandler(SimpleHTTPRequestHandler):
         expected = os.environ.get("AGENTCP_SERVER_TOKEN")
         if not expected:
             return True
-        return self.headers.get("Authorization") == f"Bearer {expected}"
+        supplied = self.headers.get("Authorization", "")
+        return hmac.compare_digest(supplied, f"Bearer {expected}")
 
     def do_GET(self) -> None:
         self._response_started = False
@@ -605,16 +780,26 @@ class AgentControlHandler(SimpleHTTPRequestHandler):
                         state = store.load_state()
                         target = store.read_json("target.json")
                         quality = QualityLedger().project_metrics(store)
+                        latest_run = ControlDatabase(
+                            store.path / "control_plane.db"
+                        ).latest_run()
                         if quality_summary is None:
                             quality_summary = QualityLedger().global_metrics(store)
                         projects.append({
                             "vendor": vendor,
                             "phase": state.phase,
                             "gate_status": state.gate_status,
+                            "run_status": (
+                                "awaiting_approval"
+                                if state.gate_status == GateStatus.AWAITING_APPROVAL.value
+                                else str((latest_run or {}).get("status") or "idle")
+                            ),
                             "updated_at": state.updated_at,
                             "current_task": state.current_task,
                             "goal": target.get("goal", ""),
-                            "target_count": len(target.get("targets") or []),
+                            "target_count": len(target.get("targets") or []) + (
+                                1 if isinstance(target.get("uploaded_artifact"), dict) else 0
+                            ),
                             "fact_count": state.fact_count,
                             "vulnerability_count": state.vulnerability_count,
                             "quality_metrics": quality,
@@ -724,7 +909,14 @@ class AgentControlHandler(SimpleHTTPRequestHandler):
             except Exception as exc:
                 self._json({"ok": False, "error": str(exc)}, status=_error_status(exc))
             return
-        return super().do_GET()
+        if parsed.path == "/frontend":
+            self.send_response(302)
+            self.send_header("Location", "/frontend/")
+            self.end_headers()
+            return
+        if parsed.path.startswith("/frontend/"):
+            return super().do_GET()
+        self.send_error(404, "Not Found")
 
     def do_POST(self) -> None:
         self._response_started = False
@@ -734,6 +926,26 @@ class AgentControlHandler(SimpleHTTPRequestHandler):
             self._json({"ok": False, "error": "unauthorized"}, status=401)
             return
         try:
+            if parsed.path == "/api/target/upload":
+                query = parse_qs(parsed.query)
+                vendor = query.get("vendor", [DEFAULT_VENDOR])[0]
+                filename = query.get("filename", [""])[0]
+                project_type = query.get("project_type", [""])[0]
+                try:
+                    content_length = int(self.headers.get("Content-Length", "0"))
+                except ValueError as exc:
+                    raise WebAppError("Content-Length 不合法") from exc
+                with _project_activity(vendor):
+                    store = _safe_project(vendor)
+                    artifact, target = _store_client_upload(
+                        store, filename, self.rfile, content_length, project_type,
+                    )
+                    _audit(store, "client_artifact_uploaded", {
+                        "name": artifact["name"], "size": artifact["size"], "sha256": artifact["sha256"],
+                    })
+                    render_dashboard(store)
+                    self._json({"ok": True, "artifact": artifact, "target": target}, status=201)
+                return
             payload = self._read_json()
             if parsed.path == "/api/projects/delete":
                 self._handle_POST(parsed)
@@ -1014,6 +1226,15 @@ def _merge_secret_values(old: dict, new: dict) -> dict:
 
 
 def serve(host: str = "127.0.0.1", port: int = 8765) -> None:
+    normalized_host = host.strip().strip("[]").casefold()
+    try:
+        loopback = normalized_host == "localhost" or ipaddress.ip_address(normalized_host).is_loopback
+    except ValueError:
+        loopback = False
+    if not loopback and not os.environ.get("AGENTCP_SERVER_TOKEN", "").strip():
+        raise WebAppError(
+            "非本机回环地址启动服务时必须设置 AGENTCP_SERVER_TOKEN"
+        )
     for vendor in _project_names():
         try:
             refresh_asset_count(_safe_project(vendor))
