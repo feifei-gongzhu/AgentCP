@@ -4,9 +4,37 @@ import pytest
 
 from src.agent_control_plane import store as store_module
 from src.agent_control_plane.store import ProjectStore
-from src.agent_control_plane.memory import relevant_lessons
+from src.agent_control_plane.memory import matching_negative_evidence, relevant_lessons
 from src.agent_control_plane.worker import apply_worker_output
 from src.agent_control_plane.waf import WAFManager
+
+
+def test_natural_language_method_does_not_resurrect_rejected_direction() -> None:
+    intent = {
+        "verb": "inspect",
+        "target": "AndroidManifest.xml中Service与Receiver的属性",
+        "hypothesis": "系统绑定组件可能遗漏对应BIND权限",
+    }
+    negative = {
+        "target": "AndroidManifest.xml中Service与Receiver的属性",
+        "hypothesis": "系统绑定组件可能遗漏对应BIND权限",
+        "method": "使用ElementTree解析Manifest并逐项核对组件权限和导出状态",
+        "evidence_type": "target_negative",
+    }
+
+    assert matching_negative_evidence(intent, [negative]) == negative
+
+
+def test_explicit_negative_evidence_verb_still_scopes_pruning_method() -> None:
+    intent = {"verb": "forge", "target": "push handlers", "hypothesis": "unsigned push reaches admin command"}
+    negative = {
+        "target": "push handlers",
+        "hypothesis": "unsigned push reaches admin command",
+        "intent_verb": "inspect",
+        "method": "long natural-language audit procedure",
+    }
+
+    assert matching_negative_evidence(intent, [negative]) is None
 
 
 def test_waf_block_creates_bounded_adaptive_branch(

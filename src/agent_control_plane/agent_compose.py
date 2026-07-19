@@ -362,8 +362,9 @@ class AgentComposeRuntime:
             "--json", "run", "--keep-running", "--detach",
             self.agent_name,
             "--prompt", prompt,
-            "--output-schema-file", str(output_schema),
         ]
+        if self.profile.provider != "codex":
+            run_args.extend(["--output-schema-file", str(output_schema)])
         if reusable_sandbox:
             run_args.extend(["--sandbox", reusable_sandbox])
         try:
@@ -531,6 +532,7 @@ class AgentComposeRuntime:
             ),
             "image": self.profile.guest_image,
             "driver": {"docker": {}},
+            "env": {"AGENTCP_STATELESS_WORKER": {"value": "1"}},
             "volumes": volumes,
         }
         if self.profile.model:

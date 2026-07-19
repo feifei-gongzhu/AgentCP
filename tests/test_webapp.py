@@ -1,4 +1,6 @@
 from pathlib import Path
+from io import BytesIO
+import hashlib
 
 import pytest
 
@@ -7,6 +9,8 @@ from src.agent_control_plane import webapp as webapp_module
 from src.agent_control_plane.store import ProjectStore
 from src.agent_control_plane.automation import AutomationEngine
 from src.agent_control_plane.scheduler import Scheduler
+from src.agent_control_plane.lifecycle import ProjectLifecycleMissing, require_executable_target
+from src.agent_control_plane.metrics import project_asset_inventory
 
 
 def test_project_listing_only_returns_initialized_projects(
@@ -136,6 +140,7 @@ def test_frontend_assets_are_wired_to_control_api() -> None:
     assert "AgentCP" in index
     assert "/api/automation/launch" in script
     assert "/api/projects" in script
+    assert "project.run_status" in script
     assert "/api/evidence" in script
     assert 'id="roleConfigBody"' in index
     assert 'id="rolePromptMember"' in index
@@ -144,6 +149,10 @@ def test_frontend_assets_are_wired_to_control_api() -> None:
     assert 'id="saveTeamButton"' in index
     assert 'post("/api/config"' in script
     assert 'id="targetTargets"' in index
+    assert 'id="clientUploadPanel"' in index
+    assert 'id="clientArtifactFile"' in index
+    assert 'id="uploadClientArtifactButton"' in index
+    assert "/api/target/upload" in script
     assert 'id="createProjectButton"' in index
     assert 'post("/api/target"' in script
     assert 'api("/api/projects"' in script
@@ -164,6 +173,16 @@ def test_frontend_assets_are_wired_to_control_api() -> None:
     assert 'data-route-link="run"' in index
     assert 'id="projectCards"' in index
     assert 'id="hubFalsePositiveRate"' in index
+    assert "创建时间 / 已等待" in index
+    assert "超过 24 小时标记为积压" in index
+    assert "riskLeadLifecycle" in script
+    assert "deduplicateRiskLeads" in script
+    assert 'direction_status:direction.status' in script
+    assert 'created_at:direction.created_at' in script
+    assert "复现方式与证据" in index
+    assert "reproductionCell" in script
+    assert "evidenceForFact" in script
+    assert "vulnerability-evidence-open" in script
     assert "project-card-quality" in script
     assert "quality_summary" in script
     assert 'id="startAuditButton"' in index
@@ -198,6 +217,25 @@ def test_frontend_assets_are_wired_to_control_api() -> None:
         "submitFindingReview",
     ):
         assert f'"{action_id}"' in script
+
+
+def test_static_handler_only_serves_frontend_assets() -> None:
+    handler = object.__new__(webapp_module.AgentControlHandler)
+
+    frontend = Path(handler.translate_path("/frontend/app.js"))
+    repository_file = Path(handler.translate_path("/.git/config"))
+    project_file = Path(handler.translate_path("/projects/vendor/target.json"))
+
+    assert frontend == (webapp_module.ROOT / "frontend" / "app.js").resolve()
+    assert repository_file.name == "__forbidden__"
+    assert project_file.name == "__forbidden__"
+
+
+def test_remote_bind_requires_server_token(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("AGENTCP_SERVER_TOKEN", raising=False)
+
+    with pytest.raises(webapp_module.WebAppError, match="AGENTCP_SERVER_TOKEN"):
+        webapp_module.serve("0.0.0.0", 8765)
 
 
 def test_web_team_config_persists_per_agent_custom_prompt(
@@ -650,6 +688,90 @@ def test_frontend_target_save_keeps_authorization_policy_locked(
 def test_target_requires_address_or_local_path() -> None:
     with pytest.raises(webapp_module.WebAppError, match="至少填写一个目标地址"):
         webapp_module._normalize_target("client-security", {"targets": []}, {})
+
+
+def test_client_target_can_be_initialized_empty_but_cannot_run_before_upload(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(store_module, "PROJECTS", tmp_path / "projects")
+    target = webapp_module._normalize_target(
+        "client-empty", {"project_type": "客户端", "targets": [], "target_path": ""}, {},
+    )
+    assert target["targets"] == [] and target["target_path"] == ""
+    store = ProjectStore("client-empty")
+    store.init()
+    webapp_module._save_target(store, target)
+    with pytest.raises(ProjectLifecycleMissing, match="必须先上传测试文件"):
+        require_executable_target(store)
+
+
+def test_client_upload_is_streamed_hashed_and_becomes_target_path(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(store_module, "PROJECTS", tmp_path / "projects")
+    store = ProjectStore("client-upload")
+    store.init()
+    webapp_module._save_target(store, {
+        "targets": [],
+        "project_type": "客户端",
+        "goal": "审计客户端安装包",
+    })
+    content = b"client-package-bytes\x00\x01"
+
+    artifact, target = webapp_module._store_client_upload(
+        store,
+        "../Desktop Client (arm64).dmg",
+        BytesIO(content),
+        len(content),
+    )
+
+    uploaded = Path(artifact["path"])
+    assert uploaded.parent == store.path / "uploads"
+    assert uploaded.read_bytes() == content
+    assert artifact["name"] == "Desktop Client (arm64).dmg"
+    assert artifact["sha256"] == hashlib.sha256(content).hexdigest()
+    assert target["target_path"] == str(store.path / "uploads")
+    assert store.read_json("target.json")["uploaded_artifact"] == artifact
+    assert artifact["sha256"] in store.read_text("目标信息.md")
+    assert project_asset_inventory(store) == [f"file:{artifact['sha256']}"]
+    require_executable_target(store)
+
+    replacement = b"replacement-client-package"
+    next_artifact, _ = webapp_module._store_client_upload(
+        store,
+        "replacement.dmg",
+        BytesIO(replacement),
+        len(replacement),
+    )
+    assert not uploaded.exists()
+    assert Path(next_artifact["path"]).read_bytes() == replacement
+    assert len(list((store.path / "uploads").iterdir())) == 1
+    require_executable_target(store)
+
+    Path(next_artifact["path"]).write_bytes(b"tampered-client-package")
+    with pytest.raises(ProjectLifecycleMissing, match="校验失败|大小已变化"):
+        require_executable_target(store)
+
+
+def test_client_upload_rejects_web_project_and_oversized_body(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(store_module, "PROJECTS", tmp_path / "projects")
+    store = ProjectStore("web-upload")
+    store.init()
+    webapp_module._save_target(store, {"targets": ["https://example.test"], "project_type": "Web渗透"})
+    with pytest.raises(webapp_module.WebAppError, match="只有客户端项目"):
+        webapp_module._store_client_upload(store, "app.zip", BytesIO(b"x"), 1)
+    with pytest.raises(webapp_module.WebAppError, match="超过大小限制"):
+        webapp_module._store_client_upload(
+            store, "app.zip", BytesIO(b""), webapp_module.MAX_CLIENT_UPLOAD_BYTES + 1, "客户端",
+        )
+    AutomationEngine(store).db.create_run(store.vendor, "default", 600, 1)
+    with pytest.raises(webapp_module.WebAppError, match="请先结束当前审计"):
+        webapp_module._store_client_upload(store, "app.zip", BytesIO(b"x"), 1, "客户端")
 
 
 @pytest.mark.parametrize("vendor", ["../escape", ".hidden", "bad/name", "bad name"])

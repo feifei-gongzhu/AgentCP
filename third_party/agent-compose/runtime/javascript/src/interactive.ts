@@ -1,5 +1,3 @@
-import { resolveCodexPath } from "./codex-path.js";
-import { stringEnv } from "./env.js";
 import { buildPromptRuntimeOptions } from "./prompt.js";
 import { CodexRunner } from "./runners/codex.js";
 import { readStoredThread, writeStoredThread } from "./session-state.js";
@@ -55,13 +53,7 @@ export class CodexInteractiveSession {
   async start(): Promise<void> {
     const { Codex } = await import("@openai/codex-sdk");
     const stored = await readStoredThread(this.options.stateRoot, "codex");
-    const codex = new Codex({
-      codexPathOverride: resolveCodexPath(),
-      env: stringEnv(),
-      ...(this.options.systemContext
-        ? { config: { developer_instructions: this.options.systemContext } }
-        : {}),
-    });
+    const codex = new Codex(this.runner.codexOptions());
     this.thread = stored?.threadId
       ? codex.resumeThread(stored.threadId, this.runner.threadOptions())
       : codex.startThread(this.runner.threadOptions());

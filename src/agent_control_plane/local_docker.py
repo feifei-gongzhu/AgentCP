@@ -148,18 +148,30 @@ class LocalDockerRuntime:
             "prompt",
             "--provider", self.profile.provider,
             "--message-file", "/agent-input/prompt.txt",
-            "--output-schema-file", "/agent-input/worker_output_schema.json",
             "--state-root", "/agent-state/state",
             "--home", "/agent-state/home",
             "--workspace", "/workspace",
         ])
+        # Codex Responses enforces OpenAI's strict-schema subset: every object
+        # property must also be listed in `required`. AgentCP's worker protocol is
+        # a discriminated union with kind-specific optional fields, so the shared
+        # Claude-compatible schema is intentionally not sent to Codex. The final
+        # payload is still parsed and kind-validated by _extract_final_text and
+        # then passes through AgentCP's deterministic Guardian.
+        if self.profile.provider != "codex":
+            command.extend([
+                "--output-schema-file", "/agent-input/worker_output_schema.json",
+            ])
         if self.profile.model:
             command.extend(["--model", self.profile.model])
         return command, environment
 
     def _provider_environment(self) -> dict[str, str]:
         secret = str(self.profile.api_key or "")
-        values = {"LLM_API_KEY": secret}
+        values = {
+            "LLM_API_KEY": secret,
+            "AGENTCP_STATELESS_WORKER": "1",
+        }
         if self.profile.model:
             values["LLM_MODEL"] = self.profile.model
         if self.profile.base_url:
@@ -387,8 +399,18 @@ def _extract_runtime_payload(stdout: str) -> dict[str, Any]:
 def _extract_final_text(final_text: str) -> dict[str, Any]:
     try:
         payload = json.loads(final_text)
-    except json.JSONDecodeError as exc:
-        raise LocalDockerError("模型未返回合法的 AgentCP Worker JSON") from exc
+    except json.JSONDecodeError:
+        # Without Codex strict structured-output mode, tolerate a single JSON
+        # object wrapped by a short explanation or Markdown fence. Validation
+        # below still rejects protocol metadata and unknown kinds.
+        start = final_text.find("{")
+        end = final_text.rfind("}")
+        if start < 0 or end <= start:
+            raise LocalDockerError("模型未返回合法的 AgentCP Worker JSON")
+        try:
+            payload = json.loads(final_text[start:end + 1])
+        except json.JSONDecodeError as exc:
+            raise LocalDockerError("模型未返回合法的 AgentCP Worker JSON") from exc
     if not isinstance(payload, dict) or payload.get("kind") not in VALID_WORKER_KINDS:
         raise LocalDockerError("模型未返回带合法 kind 的 AgentCP Worker JSON")
     return payload
@@ -418,7 +440,23 @@ def _safe_name(value: str) -> str:
 
 
 def _redact(text: str, secret: str | None) -> str:
-    return text.replace(secret, "[REDACTED]")[:4000] if secret else text[:4000]
+    redacted = text.replace(secret, "[REDACTED]") if secret else text
+    return _compact_diagnostic(redacted)
+
+
+def _compact_diagnostic(text: str, limit: int = 4000) -> str:
+    """Keep the command context and, crucially, the process failure tail.
+
+    Model CLIs often print a long tool transcript before the actual transport or
+    runtime error. Keeping only the first N characters hid the actionable cause
+    and made every failure look like the last Bash command had failed.
+    """
+    if len(text) <= limit:
+        return text
+    marker = f"\n... [omitted {len(text) - limit} diagnostic characters] ...\n"
+    head_size = min(900, max(0, limit - len(marker)))
+    tail_size = max(0, limit - len(marker) - head_size)
+    return text[:head_size] + marker + text[-tail_size:]
 
 
 def _terminate(process: subprocess.Popen[str]) -> None:

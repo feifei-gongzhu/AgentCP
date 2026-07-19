@@ -23,7 +23,19 @@ from src.agent_control_plane.local_docker import (
     LocalDockerError,
     LocalDockerRuntime,
     _extract_runtime_payload,
+    _redact,
 )
+
+
+def test_local_docker_error_redaction_preserves_failure_tail() -> None:
+    output = "begin secret\n" + ("wide search result\n" * 500) + "FINAL provider error"
+
+    redacted = _redact(output, "secret")
+
+    assert len(redacted) == 4000
+    assert redacted.startswith("begin [REDACTED]")
+    assert "FINAL provider error" in redacted
+    assert "omitted" in redacted
 
 
 def _fake_binary(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
@@ -137,6 +149,47 @@ def test_local_docker_runtime_rejects_protocol_metadata() -> None:
 
     with pytest.raises(LocalDockerError, match="合法 kind"):
         _extract_runtime_payload(stdout)
+
+
+def test_local_docker_runtime_accepts_fenced_worker_json_without_strict_schema() -> None:
+    stdout = '__AGENT_RESULT__{"provider":"codex","finalText":"Result:\\n```json\\n{\\"kind\\":\\"none\\",\\"reason\\":\\"done\\"}\\n```"}\n'
+
+    assert _extract_runtime_payload(stdout) == {"kind": "none", "reason": "done"}
+
+
+def test_local_docker_codex_omits_incompatible_shared_output_schema(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    input_root = tmp_path / "input"
+    input_root.mkdir()
+    (input_root / "worker_output_schema.json").write_text("{}", encoding="utf-8")
+    runtime_root = tmp_path / "runtime"
+    runtime_root.mkdir()
+    monkeypatch.setattr(
+        "src.agent_control_plane.local_docker.find_docker_binary",
+        lambda: "/usr/bin/docker",
+    )
+    runtime = LocalDockerRuntime(
+        DriverConfig(
+            type="codex",
+            model="configured-model",
+            base_url="https://relay.example/v1",
+            api_key_env="TEST_KEY",
+            env={"TEST_KEY": "secret"},
+            extra={"project_path": str(project), "member_name": "worker"},
+        ),
+        timeout=30,
+        cancel_check=lambda: False,
+        progress_callback=lambda _event: None,
+    )
+
+    command, _environment = runtime._command(input_root, runtime_root)
+
+    assert "--output-schema-file" not in command
+    assert command[-2:] == ["--model", "configured-model"]
 
 
 def test_local_docker_preflights_shared_guest_image(
@@ -514,6 +567,53 @@ def test_detached_run_polls_status_and_exposes_native_progress(
     assert [item["status"] for item in events if item["event"] == "agent_compose_status"] == [
         "running", "succeeded",
     ]
+
+
+def test_agent_compose_codex_omits_incompatible_shared_output_schema(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _fake_binary(tmp_path, monkeypatch)
+    project = tmp_path / "project"
+    project.mkdir()
+    runtime = AgentComposeRuntime(
+        AgentComposeProfile(
+            project_path=project,
+            member_name="reason-main",
+            provider="codex",
+            model="configured-model",
+            base_url="https://relay.example/v1",
+            auth_mode="bearer",
+            api_key="secret",
+            sandbox="read-only",
+        ),
+        timeout=30,
+        progress_callback=lambda _event: None,
+    )
+    runtime.runtime_dir.mkdir(parents=True)
+    calls: list[list[str]] = []
+    details = iter([
+        {"id": "run-codex", "sandbox_id": "sandbox-codex", "status": "running"},
+        {"id": "run-codex", "sandbox_id": "sandbox-codex", "status": "succeeded", "result_json": '{"kind":"none","reason":"done"}'},
+    ])
+
+    def fake_execute(args, timeout):
+        calls.append(args)
+        return next(details)
+
+    class FakeThread:
+        def join(self, timeout=None):
+            return None
+
+    monkeypatch.setattr(runtime, "_execute_json", fake_execute)
+    monkeypatch.setattr(runtime, "_follow_logs", lambda host, run_id: (object(), FakeThread()))
+    monkeypatch.setattr(agent_compose_module, "_terminate_process", lambda process: None)
+    monkeypatch.setattr(agent_compose_module.time, "sleep", lambda seconds: None)
+
+    detail = runtime._run_detached("http://127.0.0.1:1234", "audit")
+
+    assert detail["status"] == "succeeded"
+    assert "--output-schema-file" not in calls[0]
 
 
 def test_agent_compose_log_redaction_covers_frontend_secret_and_bearer() -> None:

@@ -38,7 +38,11 @@ def matching_negative_evidence(
     hypothesis = _normal(intent.get("hypothesis") or intent.get("success_criteria"))
     for item in negatives:
         negative_target = _normal(item.get("target"))
-        negative_method = _normal(item.get("method"))
+        # ``method`` is an auditable natural-language procedure, not the
+        # Intent verb enum.  Comparing it to ``inspect``/``forge`` made valid
+        # negative evidence impossible to match and repeatedly resurrected
+        # rejected directions.  Only compare an explicitly structured verb.
+        negative_method = _normal(item.get("intent_verb") or item.get("verb"))
         negative_hypothesis = _normal(item.get("hypothesis"))
         target_matches = bool(target and negative_target and (
             target == negative_target or target in negative_target or negative_target in target

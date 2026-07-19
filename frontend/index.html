@@ -63,14 +63,20 @@
           </div>
           <p class="subtle">填写 URL、域名、IP、应用包或本地源码目录。授权策略固定为已授权，目标内容会同步写入 <code>target.json</code> 和 <code>目标信息.md</code>。</p>
           <div class="target-form-grid">
-            <label>测试目标（每行一个）<textarea id="targetTargets" rows="5" placeholder="https://app.example.com&#10;api.example.com&#10;10.0.0.25"></textarea></label>
+            <label id="webTargetField">测试目标（每行一个）<textarea id="targetTargets" rows="5" placeholder="https://app.example.com&#10;api.example.com&#10;10.0.0.25"></textarea></label>
             <div class="target-stack">
-              <label>本地目标目录（可选）<input id="targetPath" placeholder="/absolute/path/to/source"></label>
+              <label id="localTargetPathField">本地源码目录（可选）<input id="targetPath" placeholder="/absolute/path/to/source"></label>
               <label>项目类型<select id="targetProjectType"><option value="Web渗透">Web渗透</option><option value="客户端">客户端</option></select></label>
               <label>业务与测试目标<textarea id="targetGoal" rows="3" placeholder="例如：验证账号体系、支付链路和管理后台的高价值风险"></textarea></label>
             </div>
             <label>不收范围（每行一个）<textarea id="targetOutOfScope" rows="4" placeholder="例如：第三方支付生产环境"></textarea></label>
             <label>成功条件（每行一个）<textarea id="targetSuccessCriteria" rows="4" placeholder="例如：形成可复现证据链并说明业务影响"></textarea></label>
+            <div id="clientUploadPanel" class="client-upload span-all" hidden>
+              <div><strong>上传客户端测试文件</strong><span>支持安装包、应用归档、移动端包、固件或源码压缩包。文件只保存到当前项目隔离目录。</span></div>
+              <label class="client-upload-picker">选择文件<input id="clientArtifactFile" type="file"></label>
+              <button id="uploadClientArtifactButton" class="button secondary" type="button">上传并设为当前目标</button>
+              <small id="clientUploadStatus">请先创建或选择项目，再上传文件。单文件默认上限 2 GiB。</small>
+            </div>
             <label class="span-all">补充说明<textarea id="targetNotes" rows="3" placeholder="测试账号用途、版本、环境、特殊前置条件；不要填写密码或 API Key"></textarea></label>
           </div>
           <div class="target-actions">
@@ -198,12 +204,12 @@
           <div class="table-wrap"><table><thead><tr><th>类型</th><th>情报</th><th>价值说明</th><th>置信度</th></tr></thead><tbody id="attackIntelBody"></tbody></table></div>
         </article>
         <article class="panel span-3">
-          <div class="panel-head"><div><p class="section-label">待验证发现</p><h2>风险线索</h2></div><span id="riskLeadsCount">0 条</span></div>
-          <div class="table-wrap"><table><thead><tr><th>级别</th><th>线索</th><th>待验证危害</th><th>影响力</th><th>置信度</th></tr></thead><tbody id="riskLeadsBody"></tbody></table></div>
+          <div class="panel-head"><div><p class="section-label">待验证发现 · 超过 24 小时标记为积压</p><h2>风险线索</h2></div><span id="riskLeadsCount">0 条</span></div>
+          <div class="table-wrap"><table><thead><tr><th>级别</th><th>线索</th><th>验证状态</th><th>创建时间 / 已等待</th><th>待验证危害</th><th>影响力</th><th>置信度</th></tr></thead><tbody id="riskLeadsBody"></tbody></table></div>
         </article>
         <article class="panel span-3">
           <div class="panel-head"><div><p class="section-label">已验证发现</p><h2>系统漏洞池</h2></div><span id="vulnerabilitiesCount">0 条</span></div>
-          <div class="table-wrap"><table><thead><tr><th>级别</th><th>漏洞</th><th>已验证危害</th><th>影响力</th><th>置信度</th><th>人工结论</th></tr></thead><tbody id="vulnerabilitiesBody"></tbody></table></div>
+          <div class="table-wrap"><table><thead><tr><th>级别</th><th>漏洞</th><th>已验证危害</th><th>影响力</th><th>置信度</th><th>复现方式与证据</th><th>人工结论</th></tr></thead><tbody id="vulnerabilitiesBody"></tbody></table></div>
         </article>
         <article class="panel span-3 quality-panel">
           <div class="panel-head"><div><p class="section-label">人工质量裁决</p><h2>人工驳斥与长期误报率</h2></div><span id="qualitySample">样本 0</span></div>
@@ -263,6 +269,6 @@
     </main>
   </div>
   <div id="toast" class="toast" role="status" aria-live="polite"></div>
-  <script src="/frontend/app.js" defer></script>
+  <script src="/frontend/app.js?v=3.1-vulnerability-evidence-2" defer></script>
 </body>
 </html>

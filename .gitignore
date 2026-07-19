@@ -28,3 +28,7 @@ build/
 *.swp
 *.tmp
 *.log
+
+# Target-specific local analysis inputs and one-off research helpers.
+/analysis_input/
+/scripts/

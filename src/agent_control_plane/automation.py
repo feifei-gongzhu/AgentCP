@@ -5,8 +5,8 @@ import re
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import asdict
-from datetime import datetime, timezone
+from dataclasses import asdict, replace
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
@@ -15,7 +15,7 @@ from uuid import uuid4
 from .database import ControlDatabase
 from .dashboard import render_dashboard
 from .directives import authoritative_directives, missing_directive_ids
-from .lifecycle import project_execution_lock, require_initialized_project
+from .lifecycle import project_execution_lock, require_executable_target, require_initialized_project
 from .memory import active_negative_evidence, matching_negative_evidence
 from .methodology import ensure_methodology
 from .schemas import GateStatus, new_id, now_iso
@@ -28,6 +28,7 @@ from .waf import WAFManager
 
 
 LOW_VALUE_CATEGORIES = {"other", "asset", "electron_config", "supply_chain"}
+DIRECTION_BACKLOG_HIGH_WATERMARK = 12
 NON_RETRYABLE_MODEL_ERRORS = {
     "no available channel",
     "invalid api key",
@@ -54,6 +55,16 @@ ROLE_ACTIVITIES = {
     "reviewer": ("审查候选结果与证据质量", "决定接受、驳回或请求人工确认"),
     "waf_analyst": ("刻画已确认的 WAF 干扰分支", "产出受预算约束的等价差异验证 Intent"),
 }
+
+
+def _compact_error(error: str, limit: int = 4000) -> str:
+    """Bound persisted errors without discarding the actionable final cause."""
+    if len(error) <= limit:
+        return error
+    marker = f"\n... [省略 {len(error) - limit} 个诊断字符] ...\n"
+    head_size = min(900, max(0, limit - len(marker)))
+    tail_size = max(0, limit - len(marker) - head_size)
+    return error[:head_size] + marker + error[-tail_size:]
 
 
 def _candidate_review_context(store: ProjectStore, candidates: list[dict[str, Any]]) -> str:
@@ -162,6 +173,8 @@ def _model_endpoint(base_url: str | None) -> str:
 
 def _model_error_is_retryable(error: str) -> bool:
     lowered = error.casefold()
+    if _model_error_is_policy_refusal(error):
+        return False
     # Some relays incorrectly wrap an upstream timeout/empty body in HTTP 200.
     # The transport succeeded, but no model response exists; treat it like a
     # transient gateway failure rather than a successful/non-retryable 2xx.
@@ -182,6 +195,42 @@ def _model_error_is_retryable(error: str) -> bool:
     if "returncode=1" in lowered and (" 401 " in lowered or " 403 " in lowered):
         return False
     return True
+
+
+def _model_error_is_policy_refusal(error: str) -> bool:
+    lowered = error.casefold()
+    return any(marker in lowered for marker in {
+        "flagged for possible cybersecurity risk",
+        "trusted access for cyber",
+        "content policy",
+        "safety policy refusal",
+    })
+
+
+def _can_complete_with_policy_restrictions(jobs: list[dict[str, Any]]) -> bool:
+    restricted = [item for item in jobs if item.get("status") == "restricted"]
+    completed = [item for item in jobs if item.get("status") == "completed"]
+    return bool(restricted and completed)
+
+
+def _is_transient_provider_transport_failure(error: str) -> bool:
+    lowered = error.casefold()
+    return (
+        "falling back from websockets" in lowered
+        and "invalid url (get /v1/responses)" in lowered
+    ) or any(marker in lowered for marker in {
+        "connection reset", "connection refused", "connection timed out",
+        "unexpected eof", "upstream timeout", "bad gateway", "service unavailable",
+    })
+
+
+def _can_complete_with_partial_transport_failures(jobs: list[dict[str, Any]]) -> bool:
+    failed = [item for item in jobs if item.get("status") == "failed"]
+    completed = [item for item in jobs if item.get("status") == "completed"]
+    return bool(failed and completed) and all(
+        _is_transient_provider_transport_failure(str(item.get("error") or ""))
+        for item in failed
+    )
 
 
 class AutomationEngine:
@@ -208,6 +257,7 @@ class AutomationEngine:
             return self._start_locked(team_name, timeout, max_workers)
 
     def _start_locked(self, team_name: str, timeout: int, max_workers: int) -> str:
+        require_executable_target(self.store)
         state = self.store.load_state()
         if state.gate_status == GateStatus.AWAITING_APPROVAL.value:
             raise WorkerError("强制门禁正在等待批准，无法启动自动化运行。")
@@ -328,13 +378,26 @@ class AutomationEngine:
         ]
 
         active_waf_branches = WAFManager().active(self.store)
-        selected = reason_members + executor_members + other_members
+        direction_backlog = self.db.open_direction_count()
+        backlog_mode = direction_backlog >= DIRECTION_BACKLOG_HIGH_WATERMARK
+        # Planning must not outrun validation.  Once the actionable queue reaches
+        # the high-water mark, spend the whole wave on existing directions and
+        # suspend Reason/Metacog direction generation until the queue drains.
+        selected = executor_members + other_members
+        if not backlog_mode:
+            selected = reason_members + selected
         if active_waf_branches:
             selected += waf_members
-        if self._should_trigger_metacog(run):
+        if not backlog_mode and self._should_trigger_metacog(run):
             selected += metacog_members
+        if backlog_mode:
+            self.db.add_event(run_id, None, "direction_backpressure_activated", {
+                "open_directions": direction_backlog,
+                "high_watermark": DIRECTION_BACKLOG_HIGH_WATERMARK,
+                "action": "suspend_reason_and_metacog_prioritize_executors",
+            })
         if not selected:
-            selected = metacog_members or reviewer_members
+            selected = reviewer_members if backlog_mode else (metacog_members or reviewer_members)
         for member in selected:
             for slot in range(max(1, member.max_running)):
                 job_member_name = member.name if member.max_running == 1 else f"{member.name}#{slot + 1}"
@@ -358,12 +421,19 @@ class AutomationEngine:
                     )
                     if not direction:
                         continue
+                    persistent_work_dir = self.store.path / ".agentcp-work"
+                    persistent_work_dir.mkdir(parents=True, exist_ok=True)
                     payload["direction"] = direction
                     payload["context_suffix"] = json.dumps(
                         {
                             "已认领 Intent": direction["intent"],
                             "证据目录": str(self.store.path / "evidence"),
-                            "执行约束": "只执行该 Intent；原始证据必须写入 evidence_sink。",
+                            "容器内持久工作目录": "/workspace/.agentcp-work",
+                            "执行约束": (
+                                "只执行该 Intent；原始证据必须写入 evidence_sink。"
+                                "需要被后续 Job 复用的解压目录、中间索引和分析缓存必须写入 "
+                                "/workspace/.agentcp-work，禁止写入容器临时目录 /tmp。"
+                            ),
                         },
                         ensure_ascii=False,
                         indent=2,
@@ -461,11 +531,67 @@ class AutomationEngine:
             return summaries
         wave = int(run.get("wave", 1))
         jobs = self.db.list_jobs(run_id, "swarm", wave=wave)
+        if (
+            any(item["status"] == "restricted" for item in jobs)
+            and not any(item["status"] == "failed" for item in jobs)
+        ):
+            summaries.extend(self._commit_candidates(run_id))
+            restricted = [
+                item["member_name"] for item in jobs
+                if item["status"] == "restricted"
+            ]
+            completed_count = sum(item["status"] == "completed" for item in jobs)
+            self.db.add_event(run_id, None, "run_completed_with_policy_restrictions", {
+                "restricted_members": restricted,
+                "completed_jobs": completed_count,
+            })
+            if _can_complete_with_policy_restrictions(jobs):
+                self.db.finish_run(
+                    run_id,
+                    "completed",
+                    "completed_with_model_policy_restrictions",
+                )
+                Scheduler(self.store).complete_subtask(
+                    f"自动化运行 {run_id} 已收敛有效结果；"
+                    f"{len(restricted)} 个执行单元受模型内容策略限制"
+                )
+            else:
+                self.db.finish_run(
+                    run_id,
+                    "failed",
+                    "all_jobs_model_policy_restricted",
+                )
+                Scheduler(self.store).complete_subtask(
+                    f"自动化运行 {run_id} 未产生候选结果；"
+                    "所有执行单元均受上游模型策略限制"
+                )
+            return summaries
         if any(item["status"] == "failed" for item in jobs):
             # A failed sibling must not discard valid results already returned
             # by other concurrent workers. Converge those candidates first,
-            # then mark the overall run as partially failed.
+            # then distinguish a provider policy restriction from an actual
+            # runtime/infrastructure failure.
             summaries.extend(self._commit_candidates(run_id))
+            if _can_complete_with_partial_transport_failures(jobs):
+                failed_members = [
+                    item["member_name"] for item in jobs
+                    if item["status"] == "failed"
+                ]
+                self.db.add_event(run_id, None, "run_completed_with_transport_warnings", {
+                    "failed_members": failed_members,
+                    "completed_jobs": sum(item["status"] == "completed" for item in jobs),
+                    "released_directions": len(failed_members),
+                })
+                self.db.finish_run(
+                    run_id,
+                    "completed",
+                    "completed_with_provider_transport_warnings",
+                )
+                Scheduler(self.store).complete_subtask(
+                    f"自动化运行 {run_id} 已提交有效结果；"
+                    f"{len(failed_members)} 个执行单元发生中转传输故障，方向已释放重排"
+                )
+                return summaries
             self.db.finish_run(run_id, "failed", "one_or_more_jobs_failed")
             Scheduler(self.store).complete_subtask(f"自动化运行 {run_id} 存在失败任务")
             return summaries
@@ -577,20 +703,45 @@ class AutomationEngine:
                 retry_context = _retry_context(self.db, run["id"], job)
                 if retry_context:
                     context_suffix += "\n\n同一 Job 重试上下文（只读）：\n" + retry_context
-                result = _run_member(
-                    self.store,
-                    member,
-                    timeout=call_timeout,
-                    dry_run=False,
-                    context_suffix=context_suffix,
-                    cancel_check=lambda: (
-                        (self.db.get_run(run["id"]) or {}).get("status") in {
-                            "stopping", "stopped", "cancelled",
-                        }
-                        or self.db.job_status(job["id"]) in {"cancelling", "cancelled"}
-                    ),
-                    progress_callback=persist_model_progress,
+                cancel_check = lambda: (
+                    (self.db.get_run(run["id"]) or {}).get("status") in {
+                        "stopping", "stopped", "cancelled",
+                    }
+                    or self.db.job_status(job["id"]) in {"cancelling", "cancelled"}
                 )
+                try:
+                    result = _run_member(
+                        self.store,
+                        member,
+                        timeout=call_timeout,
+                        dry_run=False,
+                        context_suffix=context_suffix,
+                        cancel_check=cancel_check,
+                        progress_callback=persist_model_progress,
+                    )
+                except Exception as first_error:
+                    # Preserve the project prompt as the primary invocation. If
+                    # the provider rejects that invocation specifically by policy,
+                    # retry once with the built-in role prompt instead of repeating
+                    # identical policy-evasion text. The saved configuration is not
+                    # mutated and the fallback is fully visible in the event log.
+                    if not member.custom_prompt or not _model_error_is_policy_refusal(str(first_error)):
+                        raise
+                    self.db.add_event(run["id"], job["id"], "model_policy_fallback_started", {
+                        "member": member.name,
+                        "reason": "项目角色提示词触发上游内容策略；改用内置角色提示词重试一次",
+                        "activity": activity,
+                    })
+                    fallback_member = replace(member, custom_prompt="")
+                    result = _run_member(
+                        self.store,
+                        fallback_member,
+                        timeout=call_timeout,
+                        dry_run=False,
+                        context_suffix=context_suffix,
+                        cancel_check=cancel_check,
+                        progress_callback=persist_model_progress,
+                    )
                 self.db.complete_job(
                     job["id"], worker_id, result,
                     control_version=int(job["control_version"]),
@@ -629,18 +780,32 @@ class AutomationEngine:
                 runtime_secret = RuntimeSecretStore.get(self.store.vendor, member.name)
                 if runtime_secret:
                     error = error.replace(runtime_secret, "[REDACTED]")
-                error = error[:4000]
+                error = _compact_error(error)
+                policy_restricted = _model_error_is_policy_refusal(error)
                 retryable = _model_error_is_retryable(error)
-                status = self.db.fail_job(
-                    job["id"], worker_id, error, retryable=retryable,
-                    control_version=int(job["control_version"]),
+                visible_error = (
+                    "上游模型内容策略限制：当前执行单元未产生候选结果；"
+                    "已停止重试，其他并发结果继续收敛。"
+                    if policy_restricted else error
                 )
-                self.db.add_event(run["id"], job["id"], "model_call_failed", {
+                status = (
+                    self.db.restrict_job(
+                        job["id"], worker_id, visible_error,
+                        control_version=int(job["control_version"]),
+                    )
+                    if policy_restricted else
+                    self.db.fail_job(
+                        job["id"], worker_id, visible_error, retryable=retryable,
+                        control_version=int(job["control_version"]),
+                    )
+                )
+                event_type = "model_policy_restricted" if policy_restricted else "model_call_failed"
+                self.db.add_event(run["id"], job["id"], event_type, {
                     "member": member.name,
                     "duration_seconds": round(time.monotonic() - call_started, 1),
                     "status": status,
                     "retryable": retryable,
-                    "error": error,
+                    "error": visible_error,
                     "activity": activity,
                 })
                 if status == "queued":
@@ -651,12 +816,22 @@ class AutomationEngine:
                         "activity": activity,
                     })
                 if direction and status != "queued":
+                    policy_cooldown = (
+                        datetime.now(timezone.utc) + timedelta(hours=6)
+                    ).isoformat()
                     self.db.finish_direction(
                         direction["id"], direction["claimed_by"],
                         outcome="cancelled" if status == "cancelled" else "released",
-                        reason=error[:1000],
+                        reason=(
+                            f"policy_blocked_until:{policy_cooldown}"
+                            if policy_restricted else visible_error[:1000]
+                        ),
                     )
-                outputs.append(f"[{job['member_name']}] 执行失败，状态={status}: {error}")
+                outputs.append(
+                    f"[{job['member_name']}] "
+                    f"{'模型策略受限' if policy_restricted else '执行失败'}，"
+                    f"状态={status}: {visible_error}"
+                )
             finally:
                 stop_heartbeat.set()
                 heartbeat.join(timeout=2)
@@ -850,7 +1025,7 @@ class AutomationEngine:
                     summaries.append("控制器 stop_loss 已终结当前 Run，后续候选写回已封锁")
                     break
             except Exception as exc:
-                error = str(exc)[:4000]
+                error = _compact_error(str(exc))
                 if self.store.load_state().gate_status == GateStatus.AWAITING_APPROVAL.value:
                     self.db.mark_job_committed(job["id"], error)
                     summaries.append(f"[{job['member_name']}] 候选结果延迟提交: {error}")

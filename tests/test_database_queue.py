@@ -62,6 +62,26 @@ def test_non_retryable_job_fails_on_first_attempt(tmp_path: Path) -> None:
     assert database.list_jobs(run_id)[0]["attempts"] == 1
 
 
+def test_policy_restricted_job_has_distinct_terminal_status(tmp_path: Path) -> None:
+    database = ControlDatabase(tmp_path / "control.db")
+    run_id = database.create_run("vendor", "default", 30, 1)
+    database.enqueue_job(run_id, "swarm", "metacog", "metacog", {})
+    claimed = database.claim_job(run_id, "swarm", "worker-a")
+    assert claimed
+
+    status = database.restrict_job(
+        claimed["id"],
+        "worker-a",
+        "上游模型内容策略限制",
+        control_version=claimed["control_version"],
+    )
+
+    job = database.list_jobs(run_id)[0]
+    assert status == "restricted"
+    assert job["status"] == "restricted"
+    assert database.event_count("job_policy_restricted") == 1
+
+
 def test_cancelled_run_stops_queued_jobs(tmp_path: Path) -> None:
     database = ControlDatabase(tmp_path / "control.db")
     run_id = database.create_run("vendor", "default", 30, 1)
@@ -107,6 +127,36 @@ def test_direction_is_deduplicated_and_leased(tmp_path: Path) -> None:
     assert database.heartbeat_direction(direction_id, "reason-worker", lease_seconds=30)
     database.finish_direction(direction_id, "reason-worker", success=True)
     assert database.list_directions()[0]["status"] == "completed"
+
+
+def test_policy_released_direction_respects_cooldown(tmp_path: Path) -> None:
+    database = ControlDatabase(tmp_path / "control.db")
+    direction_id, _ = database.register_direction({
+        "id": "I-policy-cooldown",
+        "verb": "inspect",
+        "target": "local-artifact",
+        "hypothesis": "安全检查",
+        "success_criteria": "形成证据",
+    })
+    claimed = database.claim_direction("executor")
+    assert claimed is not None
+    database.finish_direction(
+        direction_id,
+        "executor",
+        outcome="released",
+        reason="policy_blocked_until:2999-01-01T00:00:00+00:00",
+    )
+
+    assert database.open_direction_count() == 0
+    assert database.claim_direction("other-executor") is None
+
+    database.set_direction_status(
+        direction_id,
+        "released",
+        "policy_blocked_until:2000-01-01T00:00:00+00:00",
+    )
+    assert database.open_direction_count() == 1
+    assert database.claim_direction("other-executor") is not None
 
 
 def test_human_dismissal_cancels_direction_and_bound_running_job(tmp_path: Path) -> None:

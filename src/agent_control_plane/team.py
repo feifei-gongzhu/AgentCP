@@ -10,7 +10,7 @@ from collections.abc import Callable
 from .dashboard import render_dashboard
 from .directives import authoritative_directives, directive_ids, missing_directive_ids
 from .drivers import DriverConfig, run_driver
-from .lifecycle import project_execution_lock, require_initialized_project
+from .lifecycle import project_execution_lock, require_executable_target, require_initialized_project
 from .schemas import now_iso
 from .scheduler import Scheduler
 from .store import ROOT, ProjectStore
@@ -114,6 +114,9 @@ def _run_member(
             "\n\n运行目录约定：AgentCP 项目根目录挂载在 /workspace。"
             "所有 evidence_path/evidence_sink 必须写为相对 AgentCP 项目根目录的路径，"
             "并将实际文件写入 /workspace/evidence/。"
+            "工具输出必须有界：搜索前先缩小到具体包、文件或类名，禁止用 class C 这类"
+            "宽泛模式扫描整棵反编译树；rg/find/sed 的单次终端输出不得超过 200 行，"
+            "更多结果应直接写入 evidence_sink，再在会话中只读取精确命中和摘要。"
         )
         if target_path:
             prompt += "用户配置的本地目标源码以只读方式挂载在 /target。"
@@ -161,6 +164,8 @@ def run_team(
 ) -> str:
     with project_execution_lock(store):
         require_initialized_project(store)
+        if not dry_run:
+            require_executable_target(store)
         return _run_team_locked(store, team_name, timeout, dry_run, max_workers)
 
 

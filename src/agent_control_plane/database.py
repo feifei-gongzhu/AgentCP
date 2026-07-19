@@ -267,7 +267,15 @@ class ControlDatabase:
             row = db.execute(
                 """
                 SELECT * FROM directions
-                WHERE status IN ('open','released') OR (status='claimed' AND lease_expires_at < ?)
+                WHERE status='open'
+                    OR (
+                        status='released' AND (
+                            terminal_reason IS NULL
+                            OR terminal_reason NOT LIKE 'policy_blocked_until:%'
+                            OR substr(terminal_reason, length('policy_blocked_until:') + 1) <= ?
+                        )
+                    )
+                    OR (status='claimed' AND lease_expires_at < ?)
                 ORDER BY
                     CASE
                         WHEN json_extract(intent_json, '$.requires_human_confirmation') THEN 0
@@ -285,7 +293,7 @@ class ControlDatabase:
                     id
                 LIMIT 1
                 """,
-                (now,),
+                (now, now),
             ).fetchone()
             if row is None:
                 db.execute("COMMIT")
@@ -607,6 +615,60 @@ class ControlDatabase:
                 })
             return next_status
 
+    def restrict_job(
+        self,
+        job_id: str,
+        worker_id: str,
+        reason: str,
+        *,
+        control_version: int | None = None,
+    ) -> str:
+        """Finish a claimed job that the upstream model refused by policy.
+
+        This is a terminal provider limitation, not a runtime failure and not a
+        candidate result. Keeping it distinct prevents identical retries and
+        keeps run health/error metrics honest.
+        """
+        now = _now()
+        with self.connect() as db:
+            row = db.execute(
+                """
+                SELECT jobs.run_id,jobs.status AS job_status,jobs.control_version,
+                    automation_runs.status AS run_status,
+                    automation_runs.control_version AS run_control_version
+                FROM jobs JOIN automation_runs ON automation_runs.id=jobs.run_id WHERE jobs.id=?
+                """,
+                (job_id,),
+            ).fetchone()
+            if row is None:
+                raise RuntimeError(f"任务不存在: {job_id}")
+            expected_version = int(row["control_version"]) if control_version is None else control_version
+            stale = (
+                row["job_status"] != "running"
+                or row["run_status"] != "running"
+                or int(row["run_control_version"]) != expected_version
+                or int(row["control_version"]) != expected_version
+            )
+            next_status = "cancelled" if stale else "restricted"
+            updated = db.execute(
+                """
+                UPDATE jobs SET status=?, error=?, worker_id=NULL, lease_expires_at=NULL,
+                    updated_at=? WHERE id=? AND worker_id=? AND status IN ('running','cancelling')
+                """,
+                (next_status, reason, now, job_id, worker_id),
+            )
+            if updated.rowcount != 1:
+                raise RuntimeError(f"任务控制版本或租约已失效: {job_id}")
+            self._event(db, row["run_id"], job_id, "job_policy_restricted", {
+                "status": next_status,
+                "reason": reason,
+            })
+            if stale:
+                self._event(db, row["run_id"], job_id, "stale_write_rejected", {
+                    "worker_id": worker_id, "control_version": expected_version,
+                })
+            return next_status
+
     def add_event(
         self,
         run_id: str | None,
@@ -673,7 +735,18 @@ class ControlDatabase:
     def open_direction_count(self) -> int:
         with self.connect() as db:
             row = db.execute(
-                "SELECT COUNT(*) AS count FROM directions WHERE status IN ('open','released')"
+                """
+                SELECT COUNT(*) AS count FROM directions
+                WHERE status='open'
+                    OR (
+                        status='released' AND (
+                            terminal_reason IS NULL
+                            OR terminal_reason NOT LIKE 'policy_blocked_until:%'
+                            OR substr(terminal_reason, length('policy_blocked_until:') + 1) <= ?
+                        )
+                    )
+                """,
+                (_now(),),
             ).fetchone()
             return int(row["count"])
 
