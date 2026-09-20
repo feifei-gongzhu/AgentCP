@@ -46,6 +46,53 @@ class WAFManager:
         tested_mutation_family: str | None = None,
         differential_found: bool | None = None,
         semantic_preserved: bool | None = None,
+        idempotency_key: str | None = None,
+    ) -> dict[str, Any]:
+        from .commits import CommitCoordinator, CommitPlanner, new_source_id
+
+        source_id = idempotency_key or new_source_id("WAF")
+        payload = {
+            "assessment_id": assessment_id,
+            "status": status,
+            "used_delta": used_delta,
+            "tested_mutation_family": tested_mutation_family,
+            "differential_found": differential_found,
+            "semantic_preserved": semantic_preserved,
+        }
+        plan = CommitPlanner().freeze_action(
+            kind="waf_result",
+            payload=payload,
+            source_type="waf_result",
+            source_id=source_id,
+            idempotency_key=idempotency_key or f"waf_result:{source_id}",
+            aggregate_type="waf_assessment",
+            aggregate_id=assessment_id,
+        )
+        result = CommitCoordinator(store).submit(plan)
+        if not isinstance(result, dict):
+            result = next(
+                (
+                    item
+                    for item in reversed(store.read_jsonl("waf_events.jsonl"))
+                    if (item.get("_projection") or {}).get("event_id")
+                    == plan.event.event_id
+                ),
+                None,
+            )
+        if not isinstance(result, dict):
+            raise RuntimeError("WAF 投影已提交但无法读取对应事件")
+        return result
+
+    def _record_result_legacy(
+        self,
+        store: ProjectStore,
+        assessment_id: str,
+        *,
+        status: str,
+        used_delta: int = 1,
+        tested_mutation_family: str | None = None,
+        differential_found: bool | None = None,
+        semantic_preserved: bool | None = None,
     ) -> dict[str, Any]:
         current = next((item for item in self.current(store) if item.get("id") == assessment_id), None)
         if current is None:

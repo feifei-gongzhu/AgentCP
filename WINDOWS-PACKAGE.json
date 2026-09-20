@@ -1,0 +1,9 @@
+{
+  "product": "AgentCP",
+  "version": "3.3.0",
+  "platform": "Windows 10/11 x64",
+  "created_at": "2026-08-06T08:18:34.890716+00:00",
+  "file_count": 882,
+  "projects_included": false,
+  "note": "API keys and project data are intentionally excluded."
+}

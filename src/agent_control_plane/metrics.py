@@ -25,7 +25,7 @@ def _canonical_asset(value: object) -> str | None:
 
 
 def project_asset_inventory(store: ProjectStore, facts: list[dict] | None = None) -> list[str]:
-    """Return a deduplicated inventory from declared targets and asset Facts."""
+    """Return one inventory across declared, discovered, and legacy Fact assets."""
     target = store.read_json("target.json")
     assets = {
         canonical
@@ -47,6 +47,21 @@ def project_asset_inventory(store: ProjectStore, facts: list[dict] | None = None
                 canonical = _canonical_asset(value)
                 if canonical:
                     assets.add(canonical)
+    database_path = store.path / "control_plane.db"
+    if database_path.exists():
+        database = ControlDatabase(database_path)
+        with database.connect() as db:
+            rows = db.execute(
+                """
+                SELECT canonical_url,hostname,ip_address,port FROM enterprise_assets
+                WHERE status NOT IN ('out_of_scope','invalid','stale','duplicate')
+                """
+            ).fetchall()
+        for row in rows:
+            value = row["canonical_url"] or row["hostname"] or row["ip_address"]
+            canonical = _canonical_asset(value)
+            if canonical:
+                assets.add(canonical)
     return sorted(assets)
 
 

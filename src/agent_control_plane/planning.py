@@ -28,13 +28,44 @@ def normalize_plan_batch(
     for raw in candidates:
         if not isinstance(raw, dict):
             raise PlanningError("PlanBatch 假设必须是对象")
-        validation = raw.get("validation_plan") or {}
+        validation = raw.get("validation_plan")
+        if not isinstance(validation, dict):
+            validation = {}
+        # Older Metacog prompts emitted Intent-shaped hypothesis entries with
+        # the validation fields at the top level. Preserve those durable
+        # candidate results by normalizing them at the schema boundary instead
+        # of permanently blocking the commit outbox.
+        if not validation and any(
+            str(raw.get(key) or "").strip()
+            for key in ("verb", "evidence_sink", "success_criteria", "method")
+        ):
+            validation = {
+                key: raw.get(key)
+                for key in ("verb", "evidence_sink", "success_criteria", "method")
+            }
+        fact = raw.get("fact") if isinstance(raw.get("fact"), dict) else {}
+        target = str(raw.get("target") or "").strip()
+        statement = str(
+            raw.get("statement")
+            or raw.get("hypothesis")
+            or fact.get("statement")
+            or ""
+        ).strip()
+        if not statement and target and str(validation.get("success_criteria") or "").strip():
+            statement = f"{target} 可能存在尚未验证的安全边界"
+        title = str(raw.get("title") or statement[:120]).strip()
+        verb = str(validation.get("verb") or "").strip()
+        dimension = str(
+            raw.get("dimension")
+            or raw.get("dimension_id")
+            or (f"legacy_{verb}" if verb else "")
+        ).strip()
         required = (
-            str(raw.get("title") or "").strip(),
-            str(raw.get("statement") or "").strip(),
-            str(raw.get("target") or "").strip(),
-            str(raw.get("dimension") or "").strip(),
-            str(validation.get("verb") or "").strip(),
+            title,
+            statement,
+            target,
+            dimension,
+            verb,
             str(validation.get("evidence_sink") or "").strip(),
             str(validation.get("success_criteria") or "").strip(),
         )

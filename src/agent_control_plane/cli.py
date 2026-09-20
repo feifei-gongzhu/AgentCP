@@ -10,6 +10,10 @@ from .automation import AutomationEngine
 from .lifecycle import project_execution_lock, require_initialized_project
 from .protocol import AutomationHttpClient
 from .metrics import collect_metrics
+from .maintenance import (
+    ProjectLocator, archive_project, backup_project, rebuild_projections,
+    restore_backup, verify_backup,
+)
 from .dashboard import render_dashboard
 from .scheduler import Scheduler
 from .schemas import Fact, Hint, Lesson
@@ -20,9 +24,11 @@ from .worker import run_worker
 
 
 def cmd_init(args: argparse.Namespace) -> None:
-    store = ProjectStore(args.vendor)
+    vendor = ProjectLocator.validate_vendor(args.vendor)
+    ProjectLocator.project_path(vendor, must_exist=False)
+    store = ProjectStore(vendor)
     store.init()
-    print(f"已初始化项目: projects/{args.vendor}")
+    print(f"已初始化项目: projects/{vendor}")
 
 
 def cmd_add_fact(args: argparse.Namespace) -> None:
@@ -139,7 +145,7 @@ def cmd_config_gate(args: argparse.Namespace) -> None:
     state = store.load_state()
     if args.interval is not None:
         if args.interval <= 0:
-            raise ValueError("V3.2 强制门禁不可关闭，间隔必须大于 0。")
+            raise ValueError("V3.3 强制门禁不可关闭，间隔必须大于 0。")
         state.gate_interval_minutes = args.interval
     if args.reset:
         state.last_gate_elapsed_minutes = state.elapsed_minutes
@@ -225,8 +231,10 @@ def cmd_automation_daemon(args: argparse.Namespace) -> None:
                 time.sleep(args.poll_interval)
                 continue
             active = engine.db.latest_resumable_run()
-            if active:
+            if active and active["status"] == "paused":
                 run_id = engine.resume(active["id"])
+            elif active:
+                run_id = str(active["id"])
             else:
                 run_id = engine.start(args.team, timeout=args.timeout, max_workers=args.max_workers)
             print(engine.run(run_id))
@@ -253,8 +261,10 @@ def _remote_daemon(args: argparse.Namespace) -> None:
                 continue
             status = client.status(args.vendor)
             run = status.get("run")
-            if run and run.get("status") in {"running", "paused"}:
+            if run and run.get("status") == "paused":
                 run_id = client.resume(args.vendor, run["id"])
+            elif run and run.get("status") == "running":
+                run_id = str(run["id"])
             else:
                 run_id = client.start(args.vendor, args.team, args.timeout, args.max_workers)
             print(client.run(args.vendor, run_id))
@@ -262,6 +272,42 @@ def _remote_daemon(args: argparse.Namespace) -> None:
                 return
     except KeyboardInterrupt:
         print("远程自动化守护进程已停止。")
+
+
+def cmd_backup(args: argparse.Namespace) -> None:
+    manifest = backup_project(args.vendor, Path(args.output))
+    print(json.dumps(manifest, ensure_ascii=False, indent=2))
+
+
+def cmd_verify_backup(args: argparse.Namespace) -> None:
+    manifest = verify_backup(Path(args.archive))
+    print(json.dumps(manifest, ensure_ascii=False, indent=2))
+
+
+def cmd_restore(args: argparse.Namespace) -> None:
+    target = restore_backup(
+        Path(args.archive),
+        confirm_vendor=args.confirm,
+        replace=bool(args.replace),
+    )
+    print(f"已恢复项目: {target}")
+
+
+def cmd_rebuild_projections(args: argparse.Namespace) -> None:
+    vendor = ProjectLocator.validate_vendor(args.vendor)
+    if ProjectLocator.validate_vendor(args.confirm) != vendor:
+        raise ValueError("重建确认名称不匹配")
+    count = rebuild_projections(vendor)
+    print(f"投影恢复完成: {vendor} | 补投影事件 {count}，派生视图已刷新")
+
+
+def cmd_archive(args: argparse.Namespace) -> None:
+    manifest = archive_project(
+        args.vendor,
+        Path(args.output),
+        confirm_vendor=args.confirm,
+    )
+    print(json.dumps(manifest, ensure_ascii=False, indent=2))
 
 
 def cmd_serve(args: argparse.Namespace) -> None:
@@ -328,7 +374,7 @@ def build_parser() -> argparse.ArgumentParser:
     worker.add_argument("--api-key-env")
     worker.add_argument("--auth-mode", default="auto", choices=["auto", "bearer", "x-api-key"])
     worker.add_argument("--profile")
-    worker.add_argument("--timeout", type=int, default=300)
+    worker.add_argument("--timeout", type=int, default=3600)
     worker.add_argument("--codex-sandbox", default="read-only", choices=["read-only", "workspace-write", "danger-full-access"])
     worker.add_argument(
         "--codex-dangerously-bypass-sandbox",
@@ -342,8 +388,8 @@ def build_parser() -> argparse.ArgumentParser:
     team = sub.add_parser("run-team", help="并发运行多角色 Worker，批次结束后触发强制门禁")
     team.add_argument("vendor")
     team.add_argument("--team", default="default")
-    team.add_argument("--timeout", type=int, default=300)
-    team.add_argument("--max-workers", type=int, default=4)
+    team.add_argument("--timeout", type=int, default=3600)
+    team.add_argument("--max-workers", type=int, default=5)
     team.add_argument("--dry-run", action="store_true")
     team.set_defaults(func=cmd_run_team)
 
@@ -368,8 +414,8 @@ def build_parser() -> argparse.ArgumentParser:
     automate = sub.add_parser("automate", help="自动运行一次 Stigmergy 迭代")
     automate.add_argument("vendor")
     automate.add_argument("--team", default="default")
-    automate.add_argument("--timeout", type=int, default=300)
-    automate.add_argument("--max-workers", type=int, default=4)
+    automate.add_argument("--timeout", type=int, default=3600)
+    automate.add_argument("--max-workers", type=int, default=5)
     automate.add_argument("--server", help="通过 HTTP 协议调用控制平面，例如 http://127.0.0.1:8765")
     automate.set_defaults(func=cmd_automate)
 
@@ -395,12 +441,41 @@ def build_parser() -> argparse.ArgumentParser:
     daemon = sub.add_parser("automation-daemon", help="持续运行自动化循环，门禁解除后自动开始下一迭代")
     daemon.add_argument("vendor")
     daemon.add_argument("--team", default="default")
-    daemon.add_argument("--timeout", type=int, default=300)
-    daemon.add_argument("--max-workers", type=int, default=4)
+    daemon.add_argument("--timeout", type=int, default=3600)
+    daemon.add_argument("--max-workers", type=int, default=5)
     daemon.add_argument("--poll-interval", type=int, default=3)
     daemon.add_argument("--once", action="store_true")
     daemon.add_argument("--server", help="使调度器只通过 HTTP 协议工作")
     daemon.set_defaults(func=cmd_automation_daemon)
+
+    backup = sub.add_parser("backup", help="创建带 manifest 和摘要校验的项目备份")
+    backup.add_argument("vendor")
+    backup.add_argument("--output", required=True)
+    backup.set_defaults(func=cmd_backup)
+
+    verify = sub.add_parser("verify-backup", help="只读校验 AgentCP 备份")
+    verify.add_argument("archive")
+    verify.set_defaults(func=cmd_verify_backup)
+
+    restore = sub.add_parser("restore", help="从已验证备份恢复项目")
+    restore.add_argument("archive")
+    restore.add_argument("--confirm", required=True)
+    restore.add_argument("--replace", action="store_true")
+    restore.set_defaults(func=cmd_restore)
+
+    rebuild = sub.add_parser(
+        "rebuild-projections",
+        help="恢复未投影 Outbox 事件并刷新 Markdown/dashboard 派生视图",
+    )
+    rebuild.add_argument("vendor")
+    rebuild.add_argument("--confirm", required=True)
+    rebuild.set_defaults(func=cmd_rebuild_projections)
+
+    archive = sub.add_parser("archive", help="验证备份成功后归档并删除项目")
+    archive.add_argument("vendor")
+    archive.add_argument("--output", required=True)
+    archive.add_argument("--confirm", required=True)
+    archive.set_defaults(func=cmd_archive)
 
     web = sub.add_parser("serve", help="启动带 API 的本地 Web 控制台")
     web.add_argument("--host", default="127.0.0.1")
@@ -413,15 +488,18 @@ def build_parser() -> argparse.ArgumentParser:
 def main() -> None:
     parser = build_parser()
     args = parser.parse_args()
+    maintenance_commands = {cmd_backup, cmd_rebuild_projections, cmd_archive}
     is_local_project_command = (
         hasattr(args, "vendor")
         and args.func is not cmd_init
+        and args.func not in maintenance_commands
         and not getattr(args, "server", None)
     )
     if not is_local_project_command:
         args.func(args)
         return
-    store = ProjectStore(args.vendor)
+    vendor = ProjectLocator.validate_vendor(args.vendor)
+    store = ProjectStore(vendor)
     with project_execution_lock(store):
         require_initialized_project(store)
         args.func(args)

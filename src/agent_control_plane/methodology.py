@@ -3,7 +3,6 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import asdict, dataclass
-from pathlib import Path
 from typing import Any
 
 from .database import ControlDatabase
@@ -58,8 +57,8 @@ CLIENT_DIMENSIONS = (
 )
 
 
-WEB_PACK = MethodPack("agentcp-web-v3", "Web 渗透 Method Pack", "web", "3.2", WEB_DIMENSIONS)
-CLIENT_PACK = MethodPack("agentcp-client-v3", "客户端漏洞挖掘 Method Pack", "client", "3.2", CLIENT_DIMENSIONS)
+WEB_PACK = MethodPack("agentcp-web-v3", "Web 渗透 Method Pack", "web", "3.3", WEB_DIMENSIONS)
+CLIENT_PACK = MethodPack("agentcp-client-v3", "客户端漏洞挖掘 Method Pack", "client", "3.3", CLIENT_DIMENSIONS)
 
 
 FOLLOW_UPS = {
@@ -97,7 +96,7 @@ def dynamic_checklist(target: dict[str, Any], pack: MethodPack, previous: dict[s
         if str(item).strip() and str(item) not in out_of_scope
     ]
     return {
-        "version": "3.2",
+        "version": "3.3",
         "method_pack_id": pack.id,
         "project_family": pack.project_family,
         "generated_from": {
@@ -128,7 +127,12 @@ def dynamic_checklist(target: dict[str, Any], pack: MethodPack, previous: dict[s
     }
 
 
-def ensure_methodology(store: ProjectStore, database: ControlDatabase | None = None) -> dict[str, Any]:
+def ensure_methodology(
+    store: ProjectStore,
+    database: ControlDatabase | None = None,
+    *,
+    seed: bool = True,
+) -> dict[str, Any]:
     target = store.read_json("target.json")
     pack = method_pack_for_target(target)
     previous = store.read_json("checklist.json") if (store.path / "checklist.json").exists() else {}
@@ -142,10 +146,19 @@ def ensure_methodology(store: ProjectStore, database: ControlDatabase | None = N
     })
     store.write_json("checklist.json", checklist)
     store.write_text(CHECKLIST_FILE, json.dumps(checklist, ensure_ascii=False, indent=2) + "\n")
-    seeded = seed_portfolio(store, pack, database)
+    seeded = seed_portfolio(store, pack, database) if seed else 0
     from .phase import reconcile_phase
     reconcile_phase(store, "method_pack_ready")
     return {"method_pack": pack.id, "seeded": seeded, "checklist": checklist}
+
+
+def seed_methodology_portfolio(
+    store: ProjectStore,
+    database: ControlDatabase,
+) -> int:
+    """Seed executable directions after the target baseline profile is ready."""
+
+    return seed_portfolio(store, method_pack_for_target(store.read_json("target.json")), database)
 
 
 def seed_portfolio(store: ProjectStore, pack: MethodPack, database: ControlDatabase | None = None) -> int:
@@ -210,6 +223,7 @@ def intent_from_hypothesis(hypothesis: AttackHypothesis) -> Intent:
         scope_check="项目所有测试目标已统一授权",
         scope_refs=["*"],
         expected_business_impact=hypothesis.expected_business_impact,
+        source_fact_ids=list(hypothesis.parent_fact_ids),
         potential_impact=hypothesis.potential_impact,
         boundary_reachability=hypothesis.boundary_reachability,
         information_gain=hypothesis.information_gain,

@@ -15,7 +15,7 @@ from .guardian import Guardian
 from .metrics import project_asset_inventory
 from .planning import intents_for_selected, normalize_plan_batch
 from .methodology import derive_bounded_follow_up
-from .memory import record_negative_lesson, relevant_lessons
+from .memory import record_negative_lesson
 from .phase import reconcile_phase
 from .lifecycle import project_execution_lock, require_initialized_project
 from .schemas import (
@@ -30,7 +30,14 @@ from .schemas import (
     now_iso,
 )
 from .store import ProjectStore
-from .waf import WAFManager
+from .technologies import record_technology_observations
+from .target_profile import (
+    project_target_priority_blackboard,
+    record_routine_target_groups,
+    record_target_assessments,
+    record_target_profile,
+)
+from .context_compiler import compile_worker_context
 
 
 PROMPT_DIR = Path(__file__).resolve().parent / "prompts"
@@ -45,78 +52,63 @@ def build_worker_prompt(
     *,
     custom_prompt: str | None = None,
     member_name: str | None = None,
+    task_context: dict[str, Any] | None = None,
+    retry_delta: str = "",
 ) -> str:
+    prompt, _ = compile_worker_prompt(
+        store,
+        role,
+        owner_directives,
+        custom_prompt=custom_prompt,
+        member_name=member_name,
+        task_context=task_context,
+        retry_delta=retry_delta,
+    )
+    return prompt
+
+
+def compile_worker_prompt(
+    store: ProjectStore,
+    role: str,
+    owner_directives: list[dict[str, Any]] | None = None,
+    *,
+    custom_prompt: str | None = None,
+    member_name: str | None = None,
+    task_context: dict[str, Any] | None = None,
+    retry_delta: str = "",
+) -> tuple[str, dict[str, Any]]:
     prompt_file = PROMPT_DIR / f"{role}.md"
     if not prompt_file.exists():
         raise WorkerError(f"未知 Worker 角色: {role}")
-
-    state = asdict(store.load_state())
-    directions = (
-        ControlDatabase(store.path / "control_plane.db").list_directions()
-        if (store.path / "control_plane.db").exists() else []
-    )
-    human_dismissed = [
-        item for item in directions
-        if item.get("status") == "cancelled"
-        and str(item.get("terminal_reason") or "").startswith("human_dismissed:")
-    ]
-    dismissed_ids = {str(item.get("id")) for item in human_dismissed}
-    recent_intents = [
-        item for item in store.read_jsonl("intents.jsonl")
-        if str(item.get("id")) not in dismissed_ids
-    ][-8:]
     open_hints = (
         authoritative_directives(store)
         if owner_directives is None
         else owner_directives
     )
-    context = {
-        "state": state,
-        "target": store.read_json("target.json"),
-        "checklist": store.read_json("checklist.json"),
-        "recent_facts": store.read_jsonl("facts.jsonl")[-8:],
-        "recent_intents": recent_intents,
-        "human_dismissed_directions": human_dismissed[-8:],
-        "recent_decisions": store.read_jsonl("decision_log.jsonl")[-5:],
-        "recent_negative_evidence": store.read_jsonl("negative_evidence.jsonl")[-8:],
-        "human_refutation_memory": [
-            item for item in store.read_jsonl("refutation_memories.jsonl")
-            if item.get("active", True)
-        ][-8:],
-        "open_waf_branches": WAFManager().active(store)[-6:],
-        "project_owner_directives": open_hints,
-        "attack_surface_coverage": state.get("attack_surface_coverage", {}),
-        "method_pack": (
-            store.read_json("method_pack.json")
-            if (store.path / "method_pack.json").exists() else {}
-        ),
-        "active_hypotheses": [
-            item for item in store.read_jsonl("hypotheses.jsonl")
-            if item.get("status") in {"proposed", "selected", "testing", "supported", "blocked"}
-        ][-20:],
-        "recent_plan_batches": store.read_jsonl("plan_batches.jsonl")[-4:],
-        "active_counterfactuals": [
-            item for item in store.read_jsonl("counterfactuals.jsonl")
-            if item.get("status", "proposed") in {"proposed", "testing"}
-        ][-8:],
-        "retrieved_lessons": relevant_lessons(store, {
-            "target": " ".join(str(item) for item in store.read_json("target.json").get("targets", [])),
-            "hypothesis": " ".join(str(item.get("hypothesis", "")) for item in recent_intents),
-        }),
-    }
-    prompt = (
-        prompt_file.read_text(encoding="utf-8")
-        + "\n\n当前项目上下文如下：\n"
-        + json.dumps(context, ensure_ascii=False, indent=2)
+    compiled = compile_worker_context(
+        store,
+        role,
+        task_context=task_context,
+        retry_delta=retry_delta,
+        owner_directives=open_hints,
     )
+    prompt = ""
     if custom_prompt and custom_prompt.strip():
-        prompt += (
-            "\n\n# 项目所有者为当前 Agent 配置的专属提示词\n"
+        prompt = (
+            "# 项目所有者为当前 Agent 配置的专属提示词（每次调用必传）\n"
             f"适用执行单元：{member_name or role}\n"
-            "这是项目级持久指令，必须在当前角色职责内执行。"
+            "以下内容是本次模型调用最先接收的项目级持久指令，必须在当前角色职责内执行。"
+            "自动重试、恢复执行和后续波次不得删除、替换或省略本节。"
             "若它与项目所有者之后提交的实时指令冲突，以实时指令为准。\n"
             + custom_prompt.strip()
+            + "\n\n"
         )
+    prompt += (
+        "# AgentCP 内置角色规则与输出协议\n"
+        + prompt_file.read_text(encoding="utf-8")
+        + "\n\n# 当前任务所需的编译上下文\n"
+        + compiled.render()
+    )
     if open_hints:
         prompt += (
             "\n\n# 项目所有者指令（AgentCP 内部最高控制优先级）\n"
@@ -126,14 +118,69 @@ def build_worker_prompt(
             "若多条人工指令冲突，先比较 priority，再以 created_at 较新的为准。\n"
             + json.dumps(open_hints, ensure_ascii=False, indent=2)
         )
-    return prompt
+    manifest = dict(compiled.manifest)
+    manifest.update({
+        "custom_prompt_chars": len(custom_prompt.strip()) if custom_prompt and custom_prompt.strip() else 0,
+        "owner_directive_count": len(open_hints),
+        "role_prompt_chars": len(prompt_file.read_text(encoding="utf-8")),
+        "final_prompt_chars_before_runtime": len(prompt),
+    })
+    return prompt, manifest
 
 
-def apply_worker_output(store: ProjectStore, payload: dict[str, Any]) -> str:
+def apply_worker_output(
+    store: ProjectStore,
+    payload: dict[str, Any],
+    *,
+    source_type: str = "direct_worker",
+    source_id: str | None = None,
+    idempotency_key: str | None = None,
+    run_id: str | None = None,
+    job_id: str | None = None,
+    control_version: int | None = None,
+    fault_hook=None,
+) -> str:
+    from .commits import CommitCoordinator, CommitPlanner, new_source_id
+
+    stable_source = source_id or new_source_id()
+    stable_key = idempotency_key or f"{source_type}:{stable_source}:{payload.get('kind', 'unknown')}"
+    plan = CommitPlanner().freeze_worker_output(
+        payload,
+        source_type=source_type,
+        source_id=stable_source,
+        idempotency_key=stable_key,
+        run_id=run_id,
+        job_id=job_id,
+        control_version=control_version,
+    )
+    with store.locked():
+        state = store.load_state()
+        if state.gate_status == GateStatus.AWAITING_APPROVAL.value:
+            raise WorkerError("强制门禁正在等待用户批准，Worker 输出已拒绝写入。")
+        return CommitCoordinator(store, fault_hook=fault_hook).submit(plan)
+
+
+def _apply_worker_output_legacy(store: ProjectStore, payload: dict[str, Any]) -> str:
     state = store.load_state()
-    if state.gate_status == GateStatus.AWAITING_APPROVAL.value:
-        raise WorkerError("强制门禁正在等待用户批准，Worker 输出已拒绝写入。")
     kind = payload.get("kind")
+    technology_rows = payload.get("technology_observations") or []
+    if isinstance(technology_rows, list):
+        from .asset_inventory import AssetInventory
+
+        technology_rows, _discovered, _rejected = AssetInventory(store).filter_profile_records(
+            [], technology_rows,
+        )
+    technology_suffix = ""
+    if kind != "fact" and isinstance(technology_rows, list):
+        observations = record_technology_observations(
+            store,
+            technology_rows,
+            proposed_by=str(payload.get("proposed_by", "worker")).strip() or "worker",
+            hypothesis_id=str(payload.get("hypothesis_id") or "").strip() or None,
+            intent_id=str(payload.get("intent_id") or "").strip() or None,
+        )
+        if observations:
+            technology_suffix = f" | 技术观察: {len(observations)} 条"
     if kind == "fact":
         fact = Fact(
             title=str(payload.get("title", "")).strip(),
@@ -159,6 +206,14 @@ def apply_worker_output(store: ProjectStore, payload: dict[str, Any]) -> str:
         store.append_fact_to_blackboard(fact)
         for evidence_record in _evidence_records(store, fact):
             store.append_jsonl("evidence.jsonl", evidence_record)
+        observations = record_technology_observations(
+            store,
+            technology_rows if isinstance(technology_rows, list) else [],
+            proposed_by=fact.proposed_by,
+            source_fact_id=fact.id,
+            hypothesis_id=fact.hypothesis_id,
+            intent_id=fact.intent_id,
+        )
 
         state = store.load_state()
         state.fact_count += 1
@@ -180,7 +235,8 @@ def apply_worker_output(store: ProjectStore, payload: dict[str, Any]) -> str:
         reconcile_phase(store, f"fact_committed:{fact.classification}")
         render_dashboard(store)
         suffix = f" | 派生边界假设: {derived.id}" if derived else ""
-        return f"已写入 Fact: {fact.id} | 状态: {fact.status}{suffix}"
+        technology_suffix = f" | 技术观察: {len(observations)} 条" if observations else ""
+        return f"已写入 Fact: {fact.id} | 状态: {fact.status}{suffix}{technology_suffix}"
 
     if kind == "negative_evidence":
         valid_until = str(payload.get("valid_until", "")).strip()
@@ -224,7 +280,43 @@ def apply_worker_output(store: ProjectStore, payload: dict[str, Any]) -> str:
             store.append_jsonl("waf_assessments.jsonl", assessment)
         reconcile_phase(store, f"negative_evidence:{negative.evidence_type}")
         render_dashboard(store)
-        return f"已写入负向证据: {negative.id} | 类型: {negative.evidence_type}"
+        return f"已写入负向证据: {negative.id} | 类型: {negative.evidence_type}{technology_suffix}"
+
+    if kind == "target_profile_batch":
+        rows = payload.get("records") or []
+        if not isinstance(rows, list):
+            raise WorkerError("目标画像 records 必须是数组。")
+        from .asset_inventory import AssetInventory
+
+        rows, _discovered, _rejected = AssetInventory(store).filter_profile_records([], rows)
+        proposed_by = str(payload.get("proposed_by") or "profile_mapper").strip() or "profile_mapper"
+        recorded = record_target_profile(store, rows, proposed_by=proposed_by)
+        assessment_rows = payload.get("assessments") or []
+        if not isinstance(assessment_rows, list):
+            raise WorkerError("目标画像 assessments 必须是数组。")
+        assessments = record_target_assessments(
+            store, assessment_rows, proposed_by=proposed_by,
+        )
+        routine_rows = payload.get("routine_groups") or []
+        if not isinstance(routine_rows, list):
+            raise WorkerError("目标画像 routine_groups 必须是数组。")
+        routine_groups = record_routine_target_groups(
+            store, routine_rows, proposed_by=proposed_by,
+        )
+        project_target_priority_blackboard(store)
+        store.append_jsonl("target_profile_runs.jsonl", {
+            "proposed_by": proposed_by,
+            "record_count": len(recorded),
+            "exploration_complete": bool(payload.get("exploration_complete", False)),
+            "reason": str(payload.get("reason") or "").strip()[:1000],
+            "created_at": now_iso(),
+        })
+        render_dashboard(store)
+        status = "探索完成" if payload.get("exploration_complete") else "等待后续波次继续探索"
+        return (
+            f"已写入目标画像: {len(recorded)} 条，评估 {len(assessments)} 条，"
+            f"常规信息组 {len(routine_groups)} 条 | {status}{technology_suffix}"
+        )
 
     if kind == "plan_batch":
         proposed_by = str(payload.get("proposed_by") or "worker").strip() or "worker"
@@ -263,7 +355,7 @@ def apply_worker_output(store: ProjectStore, payload: dict[str, Any]) -> str:
             store.save_state(state)
         reconcile_phase(store, "plan_batch_committed")
         render_dashboard(store)
-        return f"已写入 PlanBatch: {batch.id} | 选中 {len(intents)}/{len(hypotheses)} 个假设"
+        return f"已写入 PlanBatch: {batch.id} | 选中 {len(intents)}/{len(hypotheses)} 个假设{technology_suffix}"
 
     if kind == "intent":
         intent = Intent(
@@ -276,6 +368,14 @@ def apply_worker_output(store: ProjectStore, payload: dict[str, Any]) -> str:
             scope_refs=[str(item) for item in payload.get("scope_refs", [])],
             expected_business_impact=str(payload.get("expected_business_impact", "")).strip(),
             hypothesis_id=str(payload.get("hypothesis_id") or "").strip() or None,
+            source_fact_ids=[str(item) for item in payload.get("source_fact_ids", []) if str(item).strip()],
+            target_profile_id=str(payload.get("target_profile_id") or "").strip() or None,
+            target_score=(
+                max(0, min(100, int(payload["target_score"])))
+                if payload.get("target_score") is not None else None
+            ),
+            risk_tags=[str(item)[:80] for item in payload.get("risk_tags", [])[:12]],
+            recommended_tests=[str(item)[:100] for item in payload.get("recommended_tests", [])[:8]],
             potential_impact=float(payload.get("potential_impact", 0.0)),
             boundary_reachability=float(payload.get("boundary_reachability", 0.0)),
             information_gain=float(payload.get("information_gain", 0.0)),
@@ -307,7 +407,7 @@ def apply_worker_output(store: ProjectStore, payload: dict[str, Any]) -> str:
             state.current_decision = "request_confirmation"
             store.save_state(state)
         render_dashboard(store)
-        return f"已写入 Intent: {intent.id}"
+        return f"已写入 Intent: {intent.id}{technology_suffix}"
 
     if kind == "decision":
         state = store.load_state()
@@ -331,10 +431,10 @@ def apply_worker_output(store: ProjectStore, payload: dict[str, Any]) -> str:
         state.serendipity_used_minutes += decision.serendipity_minutes
         store.save_state(state)
         render_dashboard(store)
-        return f"已写入 Decision: {decision.id} | 动作: {decision.action}"
+        return f"已写入 Decision: {decision.id} | 动作: {decision.action}{technology_suffix}"
 
     if kind == "none":
-        return f"Worker 无输出: {payload.get('reason', '未提供原因')}"
+        return f"Worker 无输出: {payload.get('reason', '未提供原因')}{technology_suffix}"
 
     raise WorkerError(f"未知 Worker 输出 kind: {kind}")
 
@@ -351,7 +451,15 @@ def _evidence_records(store: ProjectStore, fact: Fact) -> list[dict[str, Any]]:
         resolved.relative_to(allowed)
     except ValueError:
         return []
-    files = [resolved] if resolved.is_file() else sorted(item for item in resolved.rglob("*") if item.is_file())
+    files = (
+        [resolved]
+        if resolved.is_file()
+        else sorted(
+            item
+            for item in resolved.rglob("*")
+            if item.is_file() and not item.name.endswith(".sha256")
+        )
+    )
     records: list[dict[str, Any]] = []
     for file in files:
         if file.stat().st_size == 0:

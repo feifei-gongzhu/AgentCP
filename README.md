@@ -1,6 +1,8 @@
-# AgentCP 安全研究引擎 V3.2
+# AgentCP 安全研究引擎 V3.3
 
 > 完整安装、模型配置、自动化、远程协议、恢复与排错请阅读 [docs/USAGE.md](docs/USAGE.md)。
+>
+> Windows 10/11 用户可直接使用 `Install-AgentCP.cmd` 和 `Start-AgentCP.cmd`，详见 [docs/WINDOWS.md](docs/WINDOWS.md)。
 
 这是一个并发安全研究黑板控制平面。V3 将 Method Pack、PlanBatch 假设组合、同一 Run 多波执行、反事实、长期 Lesson 记忆、确定性 Guardian 与人工裁决组成一个可恢复的工程化系统。每个 Worker 可独立选择 AgentCP 本地 Docker、CT `agent-compose` 或本地 CLI；`agent-compose` 是可选运行时，不再是系统前置条件。
 
@@ -10,6 +12,8 @@
 - Executor 独占 Intent 认领权，实际执行后必须将原始结果写入 `evidence/`，证据文件通过路径、非空和 SHA-256 校验后才能关联 Fact。
 - 自动化使用 Stigmergy 循环：Worker 无状态，只通过 Fact / Intent / Hint 共享状态。
 - 任务队列持久化在 SQLite，支持租约、心跳、重试、崩溃恢复和取消。
+- Schema V6 以 SQLite CommitPlan/Outbox 作为 Worker、人工裁决、WAF 与控制器决定的 durable commit 权威源；JSONL、Markdown、state 和 dashboard 由带 receipt 的幂等投影器恢复，停止后的 fencing token 不能创建迟到提交。
+- Run 具有绝对执行截止时间；单次模型超时会被剩余墙钟预算进一步收紧，截止后不会继续发起模型调用。
 - 项目所有测试目标按所有者声明统一视为已授权，代码中固定为 `authorization=authorized` 和 `scope=["*"]`。
 - 每完成一个子任务，或同一节拍达到 15 分钟，立即进入 `awaiting_approval`。
 - 待批准时，继续计时和 Worker 写回都会被代码拒绝。
@@ -21,6 +25,11 @@
 - `stop_loss` 是 Run 级终结态。控制版本（fencing token）会拒绝停止前 Worker 的迟到写回，避免已止损运行被自动续期复活。
 - 超时、认证失败、WAF 阻断等结果作为有作用域、有时效的负向证据保存；有效期内自动剪枝，失效或环境变化后允许重新验证。
 - WAF 不等于放弃。系统会建立独立的受预算约束的 WAF 刻画分支；每轮只改变一个抽象变量族，耗尽预算仍无稳定差分时自动止损。
+- 技术资产画像按 URL 汇总框架、服务、CDN/WAF、接口协议、认证组件和第三方依赖；控制台和 CSV/JSON/XLSX 会明确区分模型报告、疑似、已确认与版本冲突，只有绑定真实证据文件的观察才标记为已确认，技术指纹不会直接计为漏洞。
+- `profile_mapper` 由模型主导遍历目标的安全可点击入口，持续汇总“URL、功能、技术栈”；任务通过 SQLite assignment ID 回写，裸 IP 的 HTTPS 访问表示不会产生第二个任务，空 Web 前沿也不会阻断客户端或源码 Method Pack。
+- 企业提供的 CSV、TSV、TXT、JSON、XLSX 资产清单可直接导入暴露面底座。系统保留来源、文件/行摘要、工作表和行号，不持久化原始秘密字段；资产按端点去重、按来源代际标记失效，并记录范围判定和发现关系。画像失败只在下一次人工启动的新 Run 重试，避免同一 Run 无限烧 Token。
+- 黑板全量保存，但不会再整库灌入模型。容器 Worker 也不再挂载项目控制目录，只能看到任务上下文、必要的 `evidence/`、`.agentcp-work/` 和明确授权的目标文件。上下文编译器按角色和当前 Intent 选择直接关联记录；Executor 上下文预算为 12,000 字符，规划角色为 18,000 字符，Reviewer 为 20,000 字符。
+- 每次真实调用都会在本地保存脱敏 Prompt 快照、SHA-256、选中记录 ID 和裁剪数量；可在“执行与结果 → 模型上下文审计”中查看。重试复用同一任务胶囊，只追加不超过 2,000 字符的失败增量。
 
 ## 双层黑板
 
@@ -40,6 +49,7 @@ projects/{厂商名}/项目黑板_知识库.md
 facts.jsonl
 intents.jsonl
 evidence.jsonl
+technology_observations.jsonl
 negative_evidence.jsonl
 human_verdicts.jsonl
 refutation_memories.jsonl
@@ -50,6 +60,7 @@ plan_batches.jsonl
 counterfactuals.jsonl
 lessons.jsonl
 phase_events.jsonl
+prompt_snapshots.jsonl
 decision_log.jsonl
 state.json
 ```
@@ -84,6 +95,10 @@ python3 agentcp serve --host 127.0.0.1 --port 8765
 2. 进入“项目配置”，填写目标、模型角色、运行模式和会话 API Key。新角色默认使用“本地 Docker”；完全不需要 Docker 时选择“本地 CLI”，需要 CT 编排能力时再选择“CT agent-compose”。
    每个 Agent 还可配置独立的项目级专属提示词；它随团队配置持久保存并在该 Agent 每次执行时注入。运行中提交的项目所有者实时指令优先级更高。
 3. 点击“开始审计”，系统保存未提交配置、启动真实模型团队，然后进入“执行与结果”查看队列、事件、证据和发现。
+
+服务存活与就绪检查分别为 `/healthz` 和 `/readyz`。前者只表示 HTTP
+进程存活；后者还会检查 Schema V6、首次投影恢复、Outbox blocked 状态和
+项目维护屏障。
 
 授权字段会自动固定为 `authorized / *`。
 
@@ -174,7 +189,9 @@ python3 agentcp serve --host 127.0.0.1 --port 8765
 
 打开 `http://127.0.0.1:8765/frontend/`。控制台使用“任务中心 → 项目配置 → 执行与结果”的渐进流程，支持实时项目状态、并发 Job、事件流、证据内容、Fact / Intent、十维覆盖、Hint、门禁审批、真实模型团队启动和安全项目删除。
 
-角色配置可直接在前端增删和修改。保存后生成 `projects/{项目名}/team_config.json`，下一次以 `default` 团队启动时自动使用项目配置。真实 API Key 可在“会话 API Key”中注入，不写入配置文件、数据库、日志或页面响应；macOS 会保存到系统钥匙串并在服务重启后自动恢复，其他系统仅保存在当前服务进程内存。
+角色配置可直接在前端增删和修改。保存后生成 `projects/{项目名}/team_config.json`，下一次以 `default` 团队启动时自动使用项目配置。还可将当前团队另存为个人预设，在新建项目时选用或设为默认；应用时会复制一份项目快照，后续修改预设不会改变旧项目。个人预设保存在 `user_presets/teams/`，使用不可变 ID 和版本化 Schema。
+
+真实 API Key 可在“会话 API Key”中注入，不写入配置文件、预设、数据库、日志或页面响应；预设文件只记录稳定的钥匙串别名。macOS 会把密钥保存到系统钥匙串并在服务重启后自动恢复，其他系统仅保存在当前服务进程内存。
 
 AgentCP 的 Claude 子进程始终隔离用户级/本地级路由配置；角色配置中转站时，以前端项目配置为准。这个过程不会读取或改动 CCSwitch。
 

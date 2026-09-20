@@ -47,7 +47,27 @@ Worker 不直接修改黑板，Worker 之间不直接通信。所有协作都通
 - **CT agent-compose（可选）**：使用仓库内 vendored agent-compose 的 daemon、session 与 sandbox。只有选择该模式时才需要构建其 Go 二进制。
 - **本地 CLI**：直接调用本机 Claude Code、Codex CLI、Ollama 或兼容 HTTP API，不要求 Docker。该模式没有容器级隔离，应继续使用 `read-only` 或 `workspace-write` 权限，并仅向可信目标开放。
 
-每个角色下方还提供独立的“Agent 专属提示词”编辑器。内容保存在当前项目的 `team_config.json`，不会影响其他项目或其他 Agent；运行时会在基础角色方法论和项目上下文之后注入。项目所有者在运行界面提交的实时指令仍具有更高优先级。不要在提示词中填写 API Key。
+每个角色下方还提供独立的“Agent 专属提示词”编辑器。内容保存在当前项目的 `team_config.json`，不会影响其他项目或其他 Agent；运行时会作为每次调用的第一段持久指令注入，自动重试也不会删除。项目所有者在运行界面提交的实时指令仍具有更高优先级。不要在提示词中填写 API Key。
+
+### 角色化上下文编译
+
+黑板继续保存完整项目记忆，但 Worker 不再读取整块黑板。调用模型前，系统按角色生成任务胶囊：
+
+- Executor / Pentester：当前唯一 Intent，以及与其 ID、URL、域名或文件直接关联的 Fact、负向证据、人工结论和技术观察；上下文预算 12,000 字符。
+- Reason / Metacog：近期攻击面摘要、有效负向证据、方向、假设、经验和覆盖缺口；上下文预算 18,000 字符。
+- Reviewer：本轮候选及其关联漏洞、人工结论和反例记忆；上下文预算 20,000 字符。
+- WAF Analyst：当前唯一 WAF 分支及直接相关的阻断证据；上下文预算 12,000 字符。
+
+Agent 专属提示词、实时项目所有者指令和当前 Executor Intent 不参与可选记忆裁剪。重试不会重新灌入增长后的全局黑板，只追加最多 2,000 字符的错误和工具动作增量。
+
+每次真实调用前都会生成本地脱敏快照：
+
+```text
+projects/{项目名}/prompt_snapshots.jsonl
+projects/{项目名}/prompt_snapshots/P-xxxxxxxxxxxx.txt
+```
+
+快照记录 Prompt SHA-256、字符数、角色预算、实际选中的黑板记录 ID 和未注入数量。打开“执行与结果 → 模型上下文审计”即可查看；API Key、Authorization 和常见密钥字段不会原样进入可视快照。
 
 如果本地 Docker 未启动、`docker` 命令不存在或本地镜像构建失败，运行事件流会直接显示具体准备阶段错误，不再表现为无原因等待。
 
@@ -186,10 +206,14 @@ projects/vendor-name/
 - 选择 Codex、Claude CLI、OpenAI-compatible、Ollama 或 Container。
 - 设置模型、服务地址、API Key 环境变量名、沙箱、并发数和优先级。
 - 保存为项目级 `team_config.json`，下一次运行自动生效。
+- 将当前团队另存为个人预设，更新、复制、重命名或删除预设。
+- 设置新项目默认预设，或在新建项目时显式选择个人预设/系统模板。
 
 前端支持两种密钥来源：填写环境变量名，或在“会话 API Key”中直接注入。会话 Key 不写入 `team_config.json`、SQLite、审计日志或 API 响应；macOS 会保存到系统钥匙串并在服务重启后自动恢复，其他系统仅保存在当前服务进程内存。Web 配置不能启用 `dangerously_bypass_sandbox`。
 
-团队配置位于：
+个人预设保存在 `user_presets/teams/{preset-id}.json`。预设 ID 不随重命名改变，文件包含 `schema_version`；真实 API Key 不写入预设，只记录与 macOS 钥匙串关联的稳定别名。应用预设前，界面会显示角色差异；应用后复制为项目级快照，因此后续更新预设不会悄悄修改已存在项目。
+
+系统团队模板位于：
 
 ```text
 teams/*.json
@@ -686,7 +710,7 @@ python3 agentcp serve \
 打开控制台：
 
 ```text
-http://127.0.0.1:8765/projects/vendor-name/dashboard.html
+http://127.0.0.1:8765/frontend/?vendor=vendor-name
 ```
 
 ### 远程调度器
@@ -740,8 +764,13 @@ python3 agentcp approve-gate vendor-name \
 | 方法 | 路径 | 用途 |
 |---|---|---|
 | GET | `/api/project/state?vendor=...` | 项目、黑板和门禁状态 |
+| GET | `/api/assets?vendor=...&limit=100&offset=0` | 分页读取企业资产、来源、画像任务和汇总；返回 `total/count/has_more/next_offset` |
+| POST | `/api/assets/import?vendor=...&filename=...&logical_source=...&source_type=official` | 以原始请求体导入 CSV、TSV、TXT、JSON 或 XLSX |
+| GET | `/api/target-profile/export?vendor=...` | 下载按主机名分工作表的画像 Excel |
 | GET | `/api/automation/status?vendor=...` | Run / Job / Direction / Event |
 | GET | `/api/metrics?vendor=...` | 工程指标 |
+| GET | `/api/prompts?vendor=...` | 最近 100 次脱敏 Prompt 快照清单 |
+| GET | `/api/prompts/content?vendor=...&path=prompt_snapshots/...` | 读取单次脱敏 Prompt |
 | POST | `/api/automation/start` | 创建运行 |
 | POST | `/api/automation/run` | 执行或恢复运行 |
 | POST | `/api/automation/resume` | 将暂停运行恢复为 running |
@@ -754,6 +783,32 @@ Token Header：
 ```text
 Authorization: Bearer <AGENTCP_SERVER_TOKEN>
 ```
+
+### 暴露面资产底座
+
+“项目配置 → 暴露面资产底座”接受企业提供的 CSV、TSV、TXT、JSON 和
+XLSX。导入不是把文件内容直接拼进 Prompt，而是先写入项目 SQLite：
+
+1. 保存文件 SHA-256、逻辑来源和代际；
+2. 保留工作表、行号、原始行 SHA-256 和已脱敏的最小资产投影，不持久化密码、Authorization、Cookie、API Key 或 URL 中的秘密参数原值；
+3. 抽取并规范化 HTTP(S) URL、主机名和 IP，以协议、主机和端口形成稳定端点身份，合并多来源但保留完整 provenance；
+4. 对新一代来源中消失且没有其他有效来源支持的资产标记 `stale`；
+5. 对模型发现的关联域执行范围判定，范围外资产只入库、不进入画像 JSONL、主动画像、导出或后续模型上下文；
+6. 将范围内待处理端点以 SQLite task assignment 交给前置 `profile_mapper`，把结果回写为 URL、功能、验证状态和技术栈。裸 IP 的 HTTPS seed 仅是访问表示，不改变原任务身份。
+
+资产列表使用 `limit`/`offset` 稳定分页，默认每页 100、最大 500；前端明确显示当前区间和总数，不会再静默截断。没有可画像 Web endpoint 的客户端或源码项目会直接释放适用 Method Pack，不创建空画像分片。
+
+项目 `target.json` 中的明确目标和界面手工/企业清单导入视为所有者提供的
+范围；Worker 自主发现的资产只有与明确目标同域且未命中 `out_of_scope`
+时才自动进入画像。失败任务在当前 Run 内不会无限重试；下一次由用户启动
+新 Run 时才会重新释放。
+
+SQLite 的内部 schema version 6 指的是提交 Outbox 数据模型版本，不是 AgentCP 产品版本，也不是模型输出 JSON 的版本。V5 负责资产结构与敏感来源最小化；V6 在此基础上增加 CommitPlan、commit event、投影 receipt、lease 与恢复游标。旧项目启动后会先验证实际表、列、索引、唯一约束和外键：缺表或普通索引可幂等补齐，无法无损修复的结构异常会 fail closed，绝不会只因版本号正确就盖章。V5 清理过的 `raw_json`、`raw_target` 和 `observed_value` 不会恢复秘密原值；已有目标画像也不要求重新花费一次基础画像。
+
+Worker 结果先在一个 SQLite 事务中校验 fencing token、写入冻结的
+CommitPlan，并把 Job 标记为 `enqueued`；事务提交后投影器才写 JSONL、
+Markdown 和派生状态。投影动作带稳定幂等键和 receipt，即使进程在文件
+fsync 后、receipt 前崩溃，重启恢复也不会生成第二份领域记录。
 
 ## 24. 双层黑板
 
@@ -824,23 +879,53 @@ Fact 进入黑板时会更新对应维度的 `observed` 或 `verified` 状态。
 
 ## 27. 备份与恢复
 
-一个项目的完整备份对象是：
+使用维护命令创建版本化、带 SHA-256 manifest 的备份，不要直接复制正在
+使用 WAL 的数据库：
 
-```text
-projects/vendor-name/
+```bash
+python3 agentcp backup vendor-name --output exports/vendor-name.agentcp-backup
+python3 agentcp verify-backup exports/vendor-name.agentcp-backup
 ```
 
-停止守护进程后，备份整个目录即可。
+备份通过 SQLite online backup 获取一致快照，并排除 PID、日志、锁、
+WAL/SHM、模型临时工作目录与运行时密钥缓存。项目存在活动 Run 时会
+fail closed。
 
-SQLite 使用 WAL，运行中备份时需要同时保留：
+恢复默认禁止覆盖；替换恢复必须输入完整项目名，并且目标项目没有活动
+Run：
 
-```text
-control_plane.db
-control_plane.db-wal
-control_plane.db-shm
+```bash
+python3 agentcp restore exports/vendor-name.agentcp-backup --confirm vendor-name
+python3 agentcp restore exports/vendor-name.agentcp-backup --confirm vendor-name --replace
 ```
 
-更简单的方式是先停止守护进程，再复制项目目录。
+恢复会先在同文件系统隐藏 staging 中流式校验路径、类型、大小、压缩比、
+文件摘要、JSON/JSONL、SQLite quick/FK 和 CommitPlan 摘要，再原子切换。
+
+恢复未投影 Outbox 并刷新 Markdown/dashboard 派生视图：
+
+```bash
+python3 agentcp rebuild-projections vendor-name --confirm vendor-name
+```
+
+先完成并复验备份、再删除源项目：
+
+```bash
+python3 agentcp archive vendor-name \
+  --output exports/vendor-name.agentcp-backup \
+  --confirm vendor-name
+```
+
+本地服务提供：
+
+```text
+GET /healthz
+GET /readyz
+```
+
+`/readyz` 在首次 projector recovery 未完成、Schema/Outbox 异常或项目处于
+维护切换时返回 503。外部模型、Docker 或 CLI 不可用只出现在依赖诊断中，
+不会让控制台本身失去就绪状态。
 
 ## 28. 常见问题
 

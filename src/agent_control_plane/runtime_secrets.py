@@ -77,11 +77,80 @@ def _keychain_delete(vendor: str) -> None:
         raise SecretStoreError(f"删除项目 API Key 失败: {(result.stderr or '').strip()[:300]}")
 
 
+def _credential_read(vendor: str) -> dict[str, str]:
+    try:
+        import keyring
+
+        raw = keyring.get_password(KEYCHAIN_SERVICE, vendor)
+    except Exception as exc:
+        raise SecretStoreError("Windows 凭据管理器读取失败") from exc
+    if not raw:
+        return {}
+    try:
+        payload: Any = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise SecretStoreError("Windows 凭据管理器中的 AgentCP 密钥数据已损坏") from exc
+    if not isinstance(payload, dict):
+        raise SecretStoreError("Windows 凭据管理器中的 AgentCP 密钥格式无效")
+    return {
+        str(member): str(secret)
+        for member, secret in payload.items()
+        if isinstance(member, str) and isinstance(secret, str) and secret
+    }
+
+
+def _credential_write(vendor: str, values: dict[str, str]) -> None:
+    try:
+        import keyring
+
+        keyring.set_password(
+            KEYCHAIN_SERVICE,
+            vendor,
+            json.dumps(values, ensure_ascii=False, separators=(",", ":")),
+        )
+    except Exception as exc:
+        raise SecretStoreError("Windows 凭据管理器保存失败") from exc
+
+
+def _credential_delete(vendor: str) -> None:
+    try:
+        import keyring
+
+        try:
+            keyring.delete_password(KEYCHAIN_SERVICE, vendor)
+        except keyring.errors.PasswordDeleteError:
+            return
+    except Exception as exc:
+        raise SecretStoreError("Windows 凭据管理器删除失败") from exc
+
+
+def _persistent_read(vendor: str) -> dict[str, str]:
+    if sys.platform == "darwin":
+        return _keychain_read(vendor)
+    if sys.platform == "win32":
+        return _credential_read(vendor)
+    return {}
+
+
+def _persistent_write(vendor: str, values: dict[str, str]) -> None:
+    if sys.platform == "darwin":
+        _keychain_write(vendor, values)
+    elif sys.platform == "win32":
+        _credential_write(vendor, values)
+
+
+def _persistent_delete(vendor: str) -> None:
+    if sys.platform == "darwin":
+        _keychain_delete(vendor)
+    elif sys.platform == "win32":
+        _credential_delete(vendor)
+
+
 class RuntimeSecretStore:
     """项目级密钥仓库。
 
     运行期间使用进程内缓存；由 Web 配置保存的密钥同时进入 macOS
-    Keychain，服务重启后自动恢复。项目文件、数据库、审计事件和 API
+    Keychain 或 Windows Credential Manager，服务重启后自动恢复。项目文件、数据库、审计事件和 API
     响应中都不会出现密钥明文。
     """
 
@@ -97,7 +166,7 @@ class RuntimeSecretStore:
         # hosts keep the same API but intentionally fall back to process
         # memory, so saving an otherwise valid team configuration never
         # depends on a platform-specific credential helper.
-        values = _keychain_read(vendor) if sys.platform == "darwin" else {}
+        values = _persistent_read(vendor)
         for member, secret in values.items():
             cls._values[(vendor, member)] = secret
         cls._loaded_projects.add(vendor)
@@ -134,7 +203,7 @@ class RuntimeSecretStore:
                 if secret:
                     cls._values[(vendor, member)] = secret
             cls._loaded_projects.add(vendor)
-            if persist and sys.platform == "darwin":
+            if persist and sys.platform in {"darwin", "win32"}:
                 project_values = {
                     member: secret
                     for (project, member), secret in cls._values.items()
@@ -142,9 +211,9 @@ class RuntimeSecretStore:
                 }
                 try:
                     if project_values:
-                        _keychain_write(vendor, project_values)
+                        _persistent_write(vendor, project_values)
                     else:
-                        _keychain_delete(vendor)
+                        _persistent_delete(vendor)
                 except Exception:
                     for key in [key for key in cls._values if key[0] == vendor]:
                         cls._values.pop(key, None)
@@ -168,5 +237,5 @@ class RuntimeSecretStore:
             for key in [key for key in cls._values if key[0] == vendor]:
                 cls._values.pop(key, None)
             cls._loaded_projects.discard(vendor)
-            if persistent and sys.platform == "darwin":
-                _keychain_delete(vendor)
+            if persistent and sys.platform in {"darwin", "win32"}:
+                _persistent_delete(vendor)

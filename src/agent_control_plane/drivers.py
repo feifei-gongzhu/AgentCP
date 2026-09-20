@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import os
 import re
-import signal
+import shutil
 import subprocess
 import tempfile
 import threading
@@ -14,6 +14,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
+from . import store as store_module
 from .agent_compose import (
     AgentComposeError,
     AgentComposeRuntime,
@@ -21,18 +22,66 @@ from .agent_compose import (
     profile_from_driver_config,
 )
 from .local_docker import LocalDockerError, LocalDockerRuntime
+from .schemas import VALID_WORKER_KINDS
 from .store import ROOT
+from .platform_process import process_group_options, terminate_process_tree
 
 
 OUTPUT_SCHEMA = Path(__file__).resolve().parent / "worker_output_schema.json"
 ProgressCallback = Callable[[dict[str, Any]], None]
-VALID_WORKER_KINDS = frozenset({
-    "fact", "intent", "plan_batch", "decision", "negative_evidence", "none",
-})
-
-
 class DriverError(RuntimeError):
     pass
+
+
+# GUI/launchd services inherit a minimal PATH that usually excludes Homebrew and
+# other user-local bin directories, so a CLI that a terminal can find is invisible
+# to the daemon-launched service. Mirror find_docker_binary(): honor an explicit
+# override, fall back to PATH, then probe the well-known install locations.
+_CLI_FALLBACK_DIRS = (
+    "/opt/homebrew/bin",
+    "/usr/local/bin",
+    "/usr/bin",
+    "/bin",
+)
+_CLI_BIN_ENV_OVERRIDE = {
+    "codex": "AGENTCP_CODEX_BIN",
+    "claude": "AGENTCP_CLAUDE_BIN",
+}
+
+
+def resolve_cli_binary(command: str | None, default: str) -> str:
+    """Resolve a model CLI independently from a daemon's limited PATH.
+
+    ``command`` is the role's explicit override (absolute path or bare name);
+    ``default`` is the canonical binary name (``codex``/``claude``). An explicit
+    override or a name that already resolves through PATH is returned as-is; only
+    a bare default name that PATH cannot find is probed against the well-known
+    install directories. Returns the original name on miss so the caller still
+    raises its actionable FileNotFoundError message.
+    """
+    configured = str(command or "").strip()
+    if configured:
+        # An absolute/relative path is used verbatim; a bare override name still
+        # benefits from PATH + fallback resolution below.
+        if os.sep in configured or (os.altsep and os.altsep in configured):
+            return configured
+        name = configured
+    else:
+        name = default
+    discovered = shutil.which(name)
+    if discovered:
+        return discovered
+    env_override = os.environ.get(_CLI_BIN_ENV_OVERRIDE.get(name, ""), "").strip()
+    if env_override:
+        candidate = Path(env_override).expanduser()
+        if candidate.is_file() and os.access(candidate, os.X_OK):
+            return str(candidate.resolve())
+        raise DriverError(f"{_CLI_BIN_ENV_OVERRIDE[name]} 指向的文件不可执行: {candidate}")
+    for directory in _CLI_FALLBACK_DIRS:
+        candidate = Path(directory) / name
+        if candidate.is_file() and os.access(candidate, os.X_OK):
+            return str(candidate.resolve())
+    return name
 
 
 @dataclass
@@ -63,11 +112,20 @@ def _project_working_directory(config: DriverConfig) -> Path:
     path = Path(value).resolve()
     if not path.is_dir():
         raise DriverError(f"项目工作目录不存在: {path}")
-    try:
-        path.relative_to(ROOT.resolve())
-    except ValueError as exc:
-        raise DriverError("宿主机 Worker 的项目目录必须位于 AgentCP 工作区内") from exc
+    if not any(
+        _is_relative_to(path, root)
+        for root in (ROOT.resolve(), store_module.PROJECTS.resolve())
+    ):
+        raise DriverError("宿主机 Worker 的项目目录必须位于 AgentCP 工作区或项目根目录内")
     return path
+
+
+def _is_relative_to(path: Path, root: Path) -> bool:
+    try:
+        path.relative_to(root)
+    except ValueError:
+        return False
+    return True
 
 
 def _extract_json(text: str) -> dict[str, Any]:
@@ -100,20 +158,7 @@ def _redact_secret(text: str, secret: str | None, limit: int | None = None) -> s
 
 def _terminate_process_tree(process: subprocess.Popen[str]) -> None:
     """Terminate only the process group created for this AgentCP model call."""
-    try:
-        if os.name == "nt":
-            process.terminate()
-        else:
-            os.killpg(process.pid, signal.SIGTERM)
-        process.wait(timeout=3)
-    except subprocess.TimeoutExpired:
-        if os.name == "nt":
-            process.kill()
-        else:
-            os.killpg(process.pid, signal.SIGKILL)
-        process.wait(timeout=3)
-    except ProcessLookupError:
-        return
+    terminate_process_tree(process)
 
 
 def _safe_stream_value(value: Any, secret: str | None, limit: int = 1200) -> str:
@@ -214,57 +259,56 @@ class CodexCliDriver(BaseDriver):
     def run(self, prompt: str) -> dict[str, Any]:
         with tempfile.NamedTemporaryFile("w+", encoding="utf-8", suffix=".json", delete=False) as out:
             output_path = Path(out.name)
+        try:
+            cmd = [
+                resolve_cli_binary(self.config.command, "codex"),
+                "exec",
+                "--skip-git-repo-check",
+                "--cd",
+                str(_project_working_directory(self.config)),
+                "--output-schema",
+                str(OUTPUT_SCHEMA),
+                "--output-last-message",
+                str(output_path),
+            ]
+            if self.config.dangerously_bypass_sandbox:
+                cmd.append("--dangerously-bypass-approvals-and-sandbox")
+            else:
+                cmd.extend(["--sandbox", self.config.sandbox])
+            if self.config.model:
+                cmd.extend(["--model", self.config.model])
+            if self.config.profile:
+                cmd.extend(["--profile", self.config.profile])
+            if self.config.base_url:
+                provider = "agentcp"
+                env_key = self.config.api_key_env or "OPENAI_API_KEY"
+                cmd.extend(
+                    [
+                        "-c",
+                        f'model_provider="{provider}"',
+                        "-c",
+                        f'model_providers.{provider}.name="{provider}"',
+                        "-c",
+                        f'model_providers.{provider}.wire_api="responses"',
+                        "-c",
+                        f'model_providers.{provider}.base_url="{self.config.base_url}"',
+                        "-c",
+                        f'model_providers.{provider}.env_key="{env_key}"',
+                    ]
+                )
+            cmd.append("-")
 
-        cmd = [
-            self.config.command or "codex",
-            "exec",
-            "--skip-git-repo-check",
-            "--cd",
-            str(_project_working_directory(self.config)),
-            "--output-schema",
-            str(OUTPUT_SCHEMA),
-            "--output-last-message",
-            str(output_path),
-        ]
-        if self.config.dangerously_bypass_sandbox:
-            cmd.append("--dangerously-bypass-approvals-and-sandbox")
-        else:
-            cmd.extend(["--sandbox", self.config.sandbox])
-        if self.config.model:
-            cmd.extend(["--model", self.config.model])
-        if self.config.profile:
-            cmd.extend(["--profile", self.config.profile])
-        if self.config.base_url:
-            provider = "agentcp"
-            env_key = self.config.api_key_env or "OPENAI_API_KEY"
-            cmd.extend(
-                [
-                    "-c",
-                    f'model_provider="{provider}"',
-                    "-c",
-                    f'model_providers.{provider}.name="{provider}"',
-                    "-c",
-                    f'model_providers.{provider}.wire_api="responses"',
-                    "-c",
-                    f'model_providers.{provider}.base_url="{self.config.base_url}"',
-                    "-c",
-                    f'model_providers.{provider}.env_key="{env_key}"',
-                ]
-            )
-        cmd.append("-")
-
-        result = self._run_cancellable(
-            cmd,
-            input_text=prompt,
-        )
-        if result.returncode != 0:
-            raise DriverError(
-                "Codex Driver 执行失败\n"
-                f"returncode={result.returncode}\n"
-                f"stderr={result.stderr.strip()}\n"
-                f"stdout={result.stdout.strip()}"
-            )
-        return _extract_json(output_path.read_text(encoding="utf-8"))
+            result = self._run_cancellable(cmd, input_text=prompt)
+            if result.returncode != 0:
+                raise DriverError(
+                    "Codex Driver 执行失败\n"
+                    f"returncode={result.returncode}\n"
+                    f"stderr={result.stderr.strip()}\n"
+                    f"stdout={result.stdout.strip()}"
+                )
+            return _extract_json(output_path.read_text(encoding="utf-8"))
+        finally:
+            output_path.unlink(missing_ok=True)
 
     def _run_cancellable(
         self,
@@ -274,22 +318,32 @@ class CodexCliDriver(BaseDriver):
         cwd_override: Path | None = None,
         line_callback: Callable[[str], None] | None = None,
     ) -> subprocess.CompletedProcess[str]:
-        process_options: dict[str, Any] = {}
-        if os.name == "nt":
-            process_options["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
-        else:
-            process_options["start_new_session"] = True
-        process = subprocess.Popen(
-            cmd,
-            stdin=subprocess.PIPE if input_text is not None else None,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            bufsize=1,
-            env=env_override or _merged_env(self.config),
-            cwd=str(cwd_override) if cwd_override else None,
-            **process_options,
-        )
+        process_options = process_group_options()
+        try:
+            process = subprocess.Popen(
+                cmd,
+                stdin=subprocess.PIPE if input_text is not None else None,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                bufsize=1,
+                env=env_override or _merged_env(self.config),
+                cwd=str(cwd_override) if cwd_override else None,
+                **process_options,
+            )
+        except FileNotFoundError as exc:
+            # The CLI binary is not on the launching service's PATH. This is an
+            # environment/config problem, not a model failure, so retrying is
+            # pointless — surface an actionable message instead of a bare Errno.
+            executable = cmd[0] if cmd else "?"
+            raise DriverError(
+                f"未找到本地可执行文件 '{executable}'：请确认已安装该 CLI 且它在启动 "
+                "AgentCP 服务的进程 PATH 中（GUI/后台方式启动时常缺少 /opt/homebrew/bin "
+                "等路径），或改用“本地 Docker”运行模式。"
+            ) from exc
+        except OSError as exc:
+            executable = cmd[0] if cmd else "?"
+            raise DriverError(f"无法启动本地可执行文件 '{executable}': {exc}") from exc
         stdout_lines: list[str] = []
         stderr_lines: list[str] = []
         def read_stdout() -> None:
@@ -412,7 +466,7 @@ class ClaudeCliDriver(BaseDriver):
         # Frontend/project settings are authoritative. In particular, never load
         # Claude user or local settings into an AgentCP-owned subprocess.
         cmd = [
-            self.config.command or "claude",
+            resolve_cli_binary(self.config.command, "claude"),
             "-p",
             "--no-session-persistence",
             "--setting-sources",
@@ -586,14 +640,24 @@ class ContainerWorkerDriver(CodexCliDriver):
             raise DriverError("非法容器网络模式")
         mount_mode = "rw" if bool(self.config.extra.get("workspace_write", False)) else "ro"
         project_path = Path(str(self.config.extra.get("project_path", ROOT))).resolve()
-        try:
-            project_path.relative_to(ROOT.resolve())
-        except ValueError as exc:
-            raise DriverError("container project_path 必须位于控制平面工作区内") from exc
+        if not any(
+            _is_relative_to(project_path, root)
+            for root in (ROOT.resolve(), store_module.PROJECTS.resolve())
+        ):
+            raise DriverError("container project_path 必须位于控制平面工作区或项目根目录内")
         target_path_value = str(self.config.extra.get("target_path", "")).strip()
         target_path = Path(target_path_value).resolve() if target_path_value else None
         if target_path is not None and not target_path.exists():
             raise DriverError(f"container target_path 不存在: {target_path}")
+        if target_path == project_path:
+            raise DriverError("container target_path 不能指向 AgentCP 项目控制目录")
+        workspace_path = project_path / ".agentcp-work"
+        evidence_path = project_path / "evidence"
+        workspace_path.mkdir(parents=True, exist_ok=True)
+        # /workspace may be mounted read-only. Pre-create the target required
+        # by the nested evidence bind so Docker never has to mutate that mount.
+        (workspace_path / "evidence").mkdir(exist_ok=True)
+        evidence_path.mkdir(parents=True, exist_ok=True)
         cmd = [
             self.config.command or find_docker_binary(),
             "run",
@@ -612,7 +676,9 @@ class ContainerWorkerDriver(CodexCliDriver):
             "--cap-drop",
             "ALL",
             "-v",
-            f"{project_path}:/workspace:{mount_mode}",
+            f"{workspace_path}:/workspace:{mount_mode}",
+            "-v",
+            f"{evidence_path}:/workspace/evidence:{mount_mode}",
             "-w",
             "/workspace",
         ]

@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from typing import Any
-
 from .schemas import Phase, now_iso
 from .store import ProjectStore
 
@@ -23,10 +21,8 @@ def reconcile_phase(store: ProjectStore, reason: str = "state_reconciled") -> st
     has_target = bool(target.get("targets") or str(target.get("target_path") or "").strip())
     if not has_target:
         desired = Phase.INTAKE.value
-    elif state.human_confirmed_count > 0 and state.pending_human_review_count == 0:
+    elif state.vulnerability_count > 0:
         desired = Phase.REPORT.value
-    elif state.vulnerability_count > 0 or state.pending_human_review_count > 0:
-        desired = Phase.VERIFY.value
     elif store.read_jsonl("plan_batches.jsonl"):
         desired = Phase.HUNT.value
     elif state.fact_count > 0 or state.asset_count > 0:

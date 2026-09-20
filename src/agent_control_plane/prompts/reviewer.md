@@ -13,6 +13,9 @@
 - 只处理已授权目标与本项目黑板中的信息。
 - 不要直接修改文件。
 - 不要提出泛泛建议，必须输出结构化 JSON。
+- 你只能提出止损建议，无权终止整个 Run；`stop_loss` 会被控制平面降级为建议。真正终止只接受项目所有者或确定性控制器指令。
+- 判断 report 是否成立时必须逐条读取 `related_system_vulnerabilities` 及其 `related_human_verdicts`，不得用“最近 8 条普通事实均为 factor_a=false”否定已经由 Guardian 认证或人工认可的漏洞。
+- 新候选为 non_exploitable 只代表对应路径被证伪，不代表已有漏洞失效，也不构成停止整个项目的理由。
 - 最终只能输出一个 JSON 对象，不要输出 Markdown、解释或代码块。
 
 优先输出控制决策：

@@ -12,7 +12,9 @@ from typing import Iterable, TypeVar
 from .schemas import Fact, ProjectState, now_iso
 
 ROOT = Path(__file__).resolve().parents[2]
-PROJECTS = ROOT / "projects"
+PROJECTS = Path(
+    os.environ.get("AGENTCP_PROJECTS_DIR", str(ROOT / "projects"))
+).expanduser().resolve()
 BLACKBOARD_FILE = "项目黑板_知识库.md"
 TARGET_FILE = "目标信息.md"
 CHECKLIST_FILE = "检查清单.yaml"
@@ -22,6 +24,7 @@ T = TypeVar("T")
 _PROCESS_LOCKS: dict[str, threading.RLock] = {}
 _PROCESS_LOCKS_GUARD = threading.Lock()
 _LOCK_DEPTH = threading.local()
+_PROJECTION_CONTEXT = threading.local()
 
 
 def _process_lock(path: Path) -> threading.RLock:
@@ -34,6 +37,34 @@ class ProjectStore:
     def __init__(self, vendor: str):
         self.vendor = vendor
         self.path = PROJECTS / vendor
+
+    @contextmanager
+    def projection_context(self, event_id: str, fault_hook=None):
+        previous = getattr(_PROJECTION_CONTEXT, "value", None)
+        _PROJECTION_CONTEXT.value = {
+            "event_id": str(event_id), "counters": {}, "fault_hook": fault_hook,
+        }
+        try:
+            yield
+        finally:
+            _PROJECTION_CONTEXT.value = previous
+
+    @staticmethod
+    def _projection_fault(point: str) -> None:
+        context = getattr(_PROJECTION_CONTEXT, "value", None)
+        hook = context.get("fault_hook") if context else None
+        if hook:
+            hook(point)
+
+    @staticmethod
+    def _next_projection_action(sink: str) -> tuple[str, str] | None:
+        context = getattr(_PROJECTION_CONTEXT, "value", None)
+        if not context:
+            return None
+        counters = context["counters"]
+        ordinal = int(counters.get(sink, 0))
+        counters[sink] = ordinal + 1
+        return str(context["event_id"]), f"{sink}:{ordinal}"
 
     @contextmanager
     def locked(self):
@@ -137,6 +168,7 @@ class ProjectStore:
             "hint_events.jsonl",
             "evidence.jsonl",
             "negative_evidence.jsonl",
+            "technology_observations.jsonl",
             "human_verdicts.jsonl",
             "refutation_memories.jsonl",
             "waf_assessments.jsonl",
@@ -148,6 +180,7 @@ class ProjectStore:
             "plan_batches.jsonl",
             "counterfactuals.jsonl",
             "phase_events.jsonl",
+            "prompt_snapshots.jsonl",
         ):
             (self.path / name).touch(exist_ok=True)
 
@@ -190,25 +223,75 @@ class ProjectStore:
 
     def save_state(self, state: ProjectState) -> None:
         with self.locked():
+            projection = self._next_projection_action("json:state.json")
+            existing = self.read_json("state.json") if (self.path / "state.json").exists() else {}
+            projection_actions = list(existing.get("_projection_actions") or [])
+            if projection:
+                marker = f"{projection[0]}:{projection[1]}"
+                if marker in projection_actions:
+                    return
+                projection_actions.append(marker)
             state.updated_at = now_iso()
-            self.write_json("state.json", asdict(state))
+            payload = asdict(state)
+            if projection_actions:
+                payload["_projection_actions"] = projection_actions[-2000:]
+            self.write_json("state.json", payload)
             self._rewrite_blackboard_header(state)
 
     def append_jsonl(self, name: str, item: object) -> None:
-        data = asdict(item) if is_dataclass(item) else item
+        raw = asdict(item) if is_dataclass(item) else item
+        data = dict(raw) if isinstance(raw, dict) else raw
+        projection = self._next_projection_action(f"jsonl:{name}")
+        marker: str | None = None
+        if projection and isinstance(data, dict):
+            marker = f"{projection[0]}:{projection[1]}"
+            metadata = dict(data.get("_projection") or {})
+            metadata.update({
+                "event_id": projection[0],
+                "action_key": projection[1],
+                "idempotency_key": marker,
+            })
+            data["_projection"] = metadata
         with self.locked():
-            with (self.path / name).open("a", encoding="utf-8") as f:
-                f.write(json.dumps(data, ensure_ascii=False) + "\n")
-                f.flush()
-                os.fsync(f.fileno())
+            destination = self.path / name
+            already_written = False
+            if marker and destination.exists():
+                for line in destination.read_text(encoding="utf-8").splitlines():
+                    if marker in line and line.strip():
+                        try:
+                            current = json.loads(line)
+                        except json.JSONDecodeError:
+                            continue
+                        if (current.get("_projection") or {}).get("idempotency_key") == marker:
+                            already_written = True
+                            break
+            if not already_written:
+                with destination.open("a", encoding="utf-8") as f:
+                    f.write(json.dumps(data, ensure_ascii=False) + "\n")
+                    f.flush()
+                    os.fsync(f.fileno())
+                self._projection_fault("after_jsonl_append")
             if name == "decision_log.jsonl":
-                with (self.path / DECISION_FILE).open("a", encoding="utf-8") as f:
-                    f.write(
-                        f"\n## {data.get('created_at', now_iso())}\n\n"
-                        f"- action: {data.get('action', '')}\n"
-                        f"- reason: {data.get('reason', '')}\n"
-                        f"- phase: {data.get('phase', '')}\n"
-                    )
+                markdown_projection = self._next_projection_action("markdown:decision_log")
+                markdown_marker = (
+                    f"<!-- projection:{markdown_projection[0]}:{markdown_projection[1]} -->"
+                    if markdown_projection else None
+                )
+                decision_path = self.path / DECISION_FILE
+                current_text = decision_path.read_text(encoding="utf-8") if decision_path.exists() else ""
+                if not markdown_marker or markdown_marker not in current_text:
+                    with decision_path.open("a", encoding="utf-8") as f:
+                        if markdown_marker:
+                            f.write("\n" + markdown_marker)
+                        f.write(
+                            f"\n## {data.get('created_at', now_iso())}\n\n"
+                            f"- action: {data.get('action', '')}\n"
+                            f"- reason: {data.get('reason', '')}\n"
+                            f"- phase: {data.get('phase', '')}\n"
+                        )
+                        f.flush()
+                        os.fsync(f.fileno())
+
 
     def read_jsonl(self, name: str) -> list[dict]:
         file = self.path / name
@@ -216,10 +299,17 @@ class ProjectStore:
             return []
         rows = []
         with self.locked():
-            lines = file.read_text(encoding="utf-8").splitlines()
-        for line in lines:
-            if line.strip():
+            text = file.read_text(encoding="utf-8")
+            lines = text.splitlines()
+        for index, line in enumerate(lines):
+            if not line.strip():
+                continue
+            try:
                 rows.append(json.loads(line))
+            except json.JSONDecodeError:
+                if index == len(lines) - 1 and not text.endswith("\n"):
+                    break
+                raise
         return rows
 
     def append_fact_to_blackboard(self, fact: Fact) -> None:
@@ -231,10 +321,17 @@ class ProjectStore:
             "suspicion": "## 线索与现象",
             "blocker": "## 阻碍与止损",
         }.get(fact.status, "## 线索与现象")
+        projection = self._next_projection_action("markdown:blackboard_fact")
+        projection_marker = (
+            f"<!-- projection:{projection[0]}:{projection[1]} -->" if projection else ""
+        )
         with self.locked():
             body = self.read_text(BLACKBOARD_FILE)
+            if projection_marker and projection_marker in body:
+                return
             entry = (
-                f"\n- `{fact.id}` **{fact.title}**\n"
+                (f"\n{projection_marker}" if projection_marker else "")
+                + f"\n- `{fact.id}` **{fact.title}**\n"
                 f"  - 类别: {fact.category}\n"
                 f"  - 状态: {fact.status}\n"
                 f"  - 证据: {fact.evidence}\n"

@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import BinaryIO, Iterator
 
 from .store import ProjectStore
+from .platform_paths import valid_project_name
 
 
 _WINDOWS_EXECUTION_SLOTS = 256
@@ -24,14 +25,7 @@ class ProjectLifecycleMissing(RuntimeError):
 def require_initialized_project(store: ProjectStore) -> None:
     vendor = str(store.vendor or "")
     path = store.path
-    invalid_vendor = (
-        not vendor
-        or len(vendor) > 80
-        or vendor in {".", ".."}
-        or vendor.startswith(".")
-        or any(char in vendor for char in ("/", "\\", "\0"))
-        or not all(char.isalnum() or char in {"-", "_", "."} for char in vendor)
-    )
+    invalid_vendor = not valid_project_name(vendor)
     target = path / "target.json"
     if (
         invalid_vendor
@@ -150,15 +144,20 @@ def project_execution_lock(store: ProjectStore) -> Iterator[None]:
 
 
 @contextmanager
-def project_deletion_lock(store: ProjectStore) -> Iterator[None]:
-    """Acquire exclusive ownership without waiting for external workers."""
+def project_deletion_lock(store: ProjectStore, *, wait_seconds: float = 0.0) -> Iterator[None]:
+    """Acquire exclusive ownership, allowing a short projector-drain window."""
 
     path = _lock_path(store)
     with path.open("a+b") as file:
-        try:
-            token = _acquire(file, exclusive=True, blocking=False)
-        except (BlockingIOError, OSError) as exc:
-            raise ProjectLifecycleBusy("项目仍被另一个 Agent/CLI 进程使用") from exc
+        deadline = time.monotonic() + max(0.0, wait_seconds)
+        while True:
+            try:
+                token = _acquire(file, exclusive=True, blocking=False)
+                break
+            except (BlockingIOError, OSError) as exc:
+                if time.monotonic() >= deadline:
+                    raise ProjectLifecycleBusy("项目仍被另一个 Agent/CLI 进程使用") from exc
+                time.sleep(0.05)
         try:
             yield
         finally:

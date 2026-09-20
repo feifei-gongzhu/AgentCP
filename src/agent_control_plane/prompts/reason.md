@@ -17,6 +17,7 @@
 - 只有证据证明未授权读写、越权、凭证/token/密钥泄露、账号接管、RCE、业务绕过或数据篡改等明确损害闭环时，才允许归为 `vulnerability`。
 - 必须读取负向证据和人工驳斥记忆；如果新 Intent 与有效反例相同，必须说明发生了什么实质变化，否则不要重复生成。
 - Reason 不负责最终漏洞认证；缺少确定性验证器结果时，只能输出 `attack_surface`、`risk_lead` 或 Intent。
+- `technology_asset_profile` 是已经按 URL 汇总的技术画像；规划时优先复用，不要反复安排相同指纹识别。技术识别本身只能作为攻击面，不得直接升格为漏洞。
 - 最终只能输出一个 JSON 对象，不要输出 Markdown、解释或代码块。
 
 允许的输出类型：
@@ -84,6 +85,7 @@
   ,"scope_check": "项目所有测试目标已统一授权"
   ,"scope_refs": ["*"]
   ,"expected_business_impact": "预期验证的业务损失"
+  ,"source_fact_ids": ["触发本方向的风险线索 Fact 编号；没有则为空数组"]
   ,"potential_impact": 0.8
   ,"boundary_reachability": 0.6
   ,"information_gain": 0.8

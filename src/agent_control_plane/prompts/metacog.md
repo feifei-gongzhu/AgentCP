@@ -12,6 +12,7 @@
 边界：
 - 只处理已授权目标与本项目黑板中的信息。
 - 不要直接修改文件，不要声称已经执行未实际执行的动作。
+- 对 `localhost`、IP 字面量、RFC1918 私网地址或仅支持 HTTP 的目标，不要使用远程 `WebFetch`。在本地 Docker 提供 Bash 时，只使用有界的只读 `curl` 请求（限制连接/总超时、响应大小和重定向次数），让请求继承容器的本机 VPN 路由；`WebFetch` 失败不能作为目标不可达的证据。
 - 未经验证的内容只能输出为 fact.status = "phenomenon"。
 - 你的输出必须是可执行 Action，不能是“再看看”这类空泛建议。
 - 最终只能输出一个 JSON 对象，但该对象应优先为包含 3—6 个候选假设的 `plan_batch`。
@@ -27,7 +28,29 @@
     "target": "具体目标",
     "source": "metacog"
   },
-  "hypotheses": []
+  "hypotheses": [
+    {
+      "title": "简短、具体的假设标题",
+      "statement": "要证明或证伪的单一安全边界命题",
+      "target": "具体 URL、接口、参数、文件或组件",
+      "dimension": "Method Pack 中的攻击面维度",
+      "validation_plan": {
+        "verb": "inspect | verify | mutate | fuzz | replay",
+        "evidence_sink": "evidence/xxx.txt",
+        "success_criteria": "可判定且可复核的成功标准",
+        "method": "有界验证方法"
+      },
+      "expected_business_impact": "若命题成立的业务影响",
+      "potential_impact": 0.7,
+      "boundary_reachability": 0.5,
+      "information_gain": 0.9,
+      "novelty": 0.9,
+      "prerequisite_readiness": 0.5,
+      "estimated_cost": 0.4,
+      "action_safety_risk": "low | medium | high | critical",
+      "evidence_maturity": "hypothesis"
+    }
+  ]
 }
 
 当确实只有一条可执行路径时才输出：

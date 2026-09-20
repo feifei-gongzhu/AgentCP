@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Any
 from collections.abc import Callable
 
@@ -14,8 +13,9 @@ from .lifecycle import project_execution_lock, require_executable_target, requir
 from .schemas import now_iso
 from .scheduler import Scheduler
 from .store import ROOT, ProjectStore
-from .worker import WorkerError, apply_worker_output, build_worker_prompt
+from .worker import WorkerError, apply_worker_output, compile_worker_prompt
 from .runtime_secrets import RuntimeSecretStore
+from .context_compiler import parse_task_context, persist_prompt_snapshot
 
 
 TEAMS_DIR = ROOT / "teams"
@@ -55,6 +55,7 @@ def load_team(name: str, store: ProjectStore | None = None) -> list[TeamMember]:
     data = json.loads(path.read_text(encoding="utf-8"))
     members = []
     for item in data.get("members", []):
+        item = dict(item)
         if "type" in item and "backend" not in item:
             item["backend"] = item["type"]
         item["runtime_mode"] = {
@@ -76,26 +77,19 @@ def _run_member(
 ) -> dict[str, Any]:
     owner_directives = authoritative_directives(store)
     observed_directive_ids = directive_ids(owner_directives)
-    prompt = build_worker_prompt(
+    task_context, retry_delta = parse_task_context(context_suffix)
+    prompt, context_manifest = compile_worker_prompt(
         store,
         member.role,
         owner_directives,
         custom_prompt=member.custom_prompt,
         member_name=member.name,
+        task_context=task_context,
+        retry_delta=retry_delta,
     )
-    if context_suffix:
-        prompt += "\n\n当前调度器候选状态（只读）：\n" + context_suffix
-    if dry_run:
-        return {
-            "member": member.name,
-            "role": member.role,
-            "status": "dry_run",
-            "prompt": prompt,
-            "control_context": {"human_directive_ids": observed_directive_ids},
-            "created_at": now_iso(),
-        }
     extra = dict(member.extra or {})
     extra["runtime_mode"] = member.runtime_mode or "local-docker"
+    extra.setdefault("role", member.role)
     member_env = dict(member.env or {})
     api_key_env = member.api_key_env
     runtime_secret = RuntimeSecretStore.get(store.vendor, member.name)
@@ -132,6 +126,38 @@ def _run_member(
     if (member.type or member.backend) == "container":
         if target_path:
             prompt += "\n\n容器内目标源码以只读方式挂载在 /target；项目证据目录位于 /workspace/evidence。"
+    context_manifest["final_prompt_chars"] = len(prompt)
+    context_manifest["runtime_mode"] = extra["runtime_mode"]
+    if dry_run:
+        return {
+            "member": member.name,
+            "role": member.role,
+            "status": "dry_run",
+            "prompt": prompt,
+            "context_manifest": context_manifest,
+            "control_context": {"human_directive_ids": observed_directive_ids},
+            "created_at": now_iso(),
+        }
+    prompt_snapshot = persist_prompt_snapshot(
+        store,
+        prompt,
+        context_manifest,
+        member_name=member.name,
+        role=member.role,
+        runtime_mode=extra["runtime_mode"],
+    )
+    if progress_callback is not None:
+        progress_callback({
+            "event": "context_compiled",
+            "snapshot_id": prompt_snapshot["id"],
+            "prompt_chars": prompt_snapshot["prompt_chars"],
+            "prompt_sha256": prompt_snapshot["prompt_sha256"],
+            "prompt_path": prompt_snapshot["prompt_path"],
+            "context_budget_chars": context_manifest["budget_chars"],
+            "context_chars": context_manifest["rendered_context_chars"],
+            "selected_ids": context_manifest["selected_ids"],
+            "omitted_counts": context_manifest["omitted_counts"],
+        })
     payload = run_driver(DriverConfig(
         type=member.type or member.backend,
         model=member.model,
@@ -150,6 +176,7 @@ def _run_member(
         "role": member.role,
         "status": "ok",
         "payload": payload,
+        "prompt_context": prompt_snapshot,
         "control_context": {"human_directive_ids": observed_directive_ids},
         "created_at": now_iso(),
     }
@@ -237,7 +264,8 @@ def _run_team_locked(
         except Exception as exc:
             applied.append(f"[{item['member']}] 写回失败: {exc}")
     gate = Scheduler(store).complete_subtask(
-        f"并发批次 {team_name} 完成，{len(results)} 个 Worker 已收敛"
+        f"并发批次 {team_name} 完成，{len(results)} 个 Worker 已收敛",
+        require_approval=False,
     )
     render_dashboard(store)
     return "\n".join(applied) + "\n\n" + gate

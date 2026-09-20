@@ -13,7 +13,7 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, quote, urlparse
 from uuid import uuid4
 
 from .dashboard import render_dashboard
@@ -28,10 +28,22 @@ from .metrics import collect_metrics, refresh_asset_count
 from .quality import QualityLedger
 from .waf import WAFManager
 from .store import PROJECTS, ROOT, ProjectStore
+from .technologies import enriched_target_profile, technology_profile
+from .target_profile import routine_target_groups, target_assessments, target_profile
+from .profile_workbook import build_profile_workbook
+from .platform_paths import valid_project_name
+from .projector import PROJECTOR_MANAGER
 from .team import run_team
 from .runtime_secrets import RuntimeSecretStore
-
-
+from .asset_inventory import (
+    AssetInventory,
+    MAX_ASSET_IMPORT_BYTES,
+)
+from .team_presets import (
+    TeamPresetError,
+    TeamPresetStore,
+    preset_secret_scope,
+)
 class WebAppError(RuntimeError):
     pass
 
@@ -110,6 +122,14 @@ def _project_deletion(vendor: str):
 def _run_reserved_activity(vendor: str, engine: AutomationEngine, run_id: str) -> None:
     try:
         engine.run(run_id)
+    except Exception as exc:
+        try:
+            engine.db.set_run_status(run_id, "paused", f"background_error:{str(exc)[:2000]}")
+            engine.db.add_event(run_id, None, "background_run_failed", {
+                "error": str(exc)[:4000],
+            })
+        except Exception:
+            pass
     finally:
         _release_project_activity(vendor)
 
@@ -228,14 +248,7 @@ def _has_active_job_lease(engine: AutomationEngine) -> bool:
 
 def _validate_vendor(value: object) -> str:
     vendor = str(value or "").strip()
-    if (
-        not vendor
-        or len(vendor) > 80
-        or vendor in {".", ".."}
-        or vendor.startswith(".")
-        or any(char in vendor for char in ("/", "\\", "\0"))
-        or not all(char.isalnum() or char in {"-", "_", "."} for char in vendor)
-    ):
+    if not valid_project_name(vendor):
         raise WebAppError("项目名只能包含中文、字母、数字、点、短横线和下划线")
     return vendor
 
@@ -292,7 +305,7 @@ def _delete_project(vendor_value: object, confirmation: object) -> list[str]:
 
         store = _safe_project(vendor)
         try:
-            with project_deletion_lock(store):
+            with project_deletion_lock(store, wait_seconds=2.0):
                 engine = AutomationEngine(store)
                 active_runs = [
                     run for run in engine.db.list_runs()
@@ -305,7 +318,6 @@ def _delete_project(vendor_value: object, confirmation: object) -> list[str]:
                     raise WebAppError("项目仍有尚未退出的 Worker，请等待任务租约结束后再删除")
 
                 shutdown_project_runtimes(project_path)
-                RuntimeSecretStore.clear(vendor, persistent=True)
                 quarantine = PROJECTS / f".deleting-{vendor}-{uuid4().hex}"
                 project_path.rename(quarantine)
                 try:
@@ -314,6 +326,7 @@ def _delete_project(vendor_value: object, confirmation: object) -> list[str]:
                     if quarantine.exists() and not project_path.exists():
                         quarantine.rename(project_path)
                     raise WebAppError("项目文件清理失败，目录已恢复") from exc
+                RuntimeSecretStore.clear(vendor, persistent=True)
         except ProjectLifecycleBusy as exc:
             raise WebAppError(str(exc)) from exc
     return _project_names()
@@ -359,6 +372,24 @@ def _normalize_target(vendor: str, payload: dict, current: dict | None = None) -
     if len(project_type) > 10000:
         raise WebAppError("project_type 内容过长")
     base["project_type"] = project_type
+    mrecon_raw = payload.get("mrecon", base.get("mrecon", {}))
+    mrecon = dict(mrecon_raw) if isinstance(mrecon_raw, dict) else {}
+    try:
+        mrecon_max_pages = max(1, min(3000, int(mrecon.get("max_pages", 300))))
+        mrecon_timeout = max(3, min(60, int(mrecon.get("timeout_seconds", 20))))
+        mrecon_delay = max(0.0, min(5.0, float(mrecon.get("delay_seconds", 0.1))))
+        mrecon_browser_pages = max(0, min(30, int(mrecon.get("browser_pages", 8))))
+        mrecon_browser_clicks = max(0, min(30, int(mrecon.get("browser_clicks", 10))))
+    except (TypeError, ValueError) as exc:
+        raise WebAppError("mrecon 参数非法") from exc
+    base["mrecon"] = {
+        "enabled": bool(mrecon.get("enabled", not _is_client_project_type(project_type))),
+        "max_pages": mrecon_max_pages,
+        "timeout_seconds": mrecon_timeout,
+        "delay_seconds": mrecon_delay,
+        "browser_pages": mrecon_browser_pages,
+        "browser_clicks": mrecon_browser_clicks,
+    }
     base.update({
         "vendor": vendor,
         "targets": targets,
@@ -419,7 +450,14 @@ def _save_target(store: ProjectStore, payload: dict) -> dict:
     if selected_type != previous_type or set(state.attack_surface_coverage) != set(desired_coverage):
         state.attack_surface_coverage = desired_coverage
         store.save_state(state)
-    ensure_methodology(store, ControlDatabase(store.path / "control_plane.db"))
+    # Saving a target prepares the checklist only. Executable baseline
+    # directions are seeded after the required profile preflight completes.
+    ensure_methodology(
+        store,
+        ControlDatabase(store.path / "control_plane.db"),
+        seed=False,
+    )
+    AssetInventory(store).sync_declared_targets()
     refresh_asset_count(store)
     return target
 
@@ -551,6 +589,10 @@ def _load_config(store: ProjectStore) -> dict:
         fallback = ROOT / "teams" / "default.json"
         config = json.loads(fallback.read_text(encoding="utf-8"))
     for member in config.get("members", []):
+        # Older project files used ``backend``. Always expose an explicit
+        # ``type`` so a frontend round-trip cannot silently fall back to codex.
+        member["type"] = member.get("type") or member.get("backend") or "codex"
+        member.pop("backend", None)
         runtime_mode = str(member.get("runtime_mode") or "local-docker")
         member["runtime_mode"] = {
             "host-native": "local-cli",
@@ -588,24 +630,35 @@ def _normalize_runtime_secrets(value: object) -> dict[str, str]:
     return normalized
 
 
-def _save_config(store: ProjectStore, config: dict) -> None:
+def _normalize_team_config(config: dict) -> dict:
+    config = json.loads(json.dumps(config, ensure_ascii=False))
     if not isinstance(config.get("members"), list):
         raise WebAppError("配置必须包含 members 数组")
     if not config["members"]:
         raise WebAppError("至少需要一个角色")
     allowed_types = {"codex", "claude-cli", "openai-compatible", "ollama", "container"}
-    allowed_roles = {"reason", "metacog", "executor", "pentester", "reviewer", "waf_analyst"}
+    allowed_roles = {
+        "reason", "metacog", "executor", "pentester", "reviewer",
+        "waf_analyst", "profile_mapper",
+    }
     allowed_sandboxes = {"read-only", "workspace-write", "danger-full-access"}
     allowed_auth_modes = {"auto", "bearer", "x-api-key"}
     allowed_runtime_modes = {"local-docker", "agent-compose", "local-cli"}
     names: set[str] = set()
     for member in config["members"]:
+        if not isinstance(member, dict):
+            raise WebAppError("成员配置必须是对象")
+        # Preserve the effective backend of legacy backend-only configurations.
+        # Removing ``backend`` is safe only after its value has been migrated.
+        member_type = str(member.get("type") or member.get("backend") or "codex")
+        member["type"] = member_type
+        member.pop("backend", None)
         name = str(member.get("name", "")).strip()
         if not name or name in names:
             raise WebAppError("角色名称不能为空且不能重复")
         names.add(name)
-        if member.get("type", "codex") not in allowed_types:
-            raise WebAppError(f"不支持的模型后端: {member.get('type')}")
+        if member_type not in allowed_types:
+            raise WebAppError(f"不支持的模型后端: {member_type}")
         if member.get("role") not in allowed_roles:
             raise WebAppError(f"不支持的角色: {member.get('role')}")
         if member.get("sandbox", "read-only") not in allowed_sandboxes:
@@ -614,7 +667,7 @@ def _save_config(store: ProjectStore, config: dict) -> None:
         runtime_mode = {"host-native": "local-cli", "ct-agent-compose": "agent-compose"}.get(runtime_mode, runtime_mode)
         if runtime_mode not in allowed_runtime_modes:
             raise WebAppError(f"不支持的运行模式: {runtime_mode}")
-        if runtime_mode == "local-cli" and member.get("type", "codex") == "container":
+        if runtime_mode == "local-cli" and member_type == "container":
             raise WebAppError("本地 CLI 模式不能选择 Container Worker")
         member["runtime_mode"] = runtime_mode
         custom_prompt = str(member.get("custom_prompt", "") or "").strip()
@@ -629,7 +682,14 @@ def _save_config(store: ProjectStore, config: dict) -> None:
         if api_key_env and not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", api_key_env):
             raise WebAppError("密钥变量必须填写环境变量名，不能填写真实 API Key")
         member["api_key_env"] = api_key_env or None
-        member_type = member.get("type", "codex")
+        base_url = str(member.get("base_url", "") or "").strip()
+        if member_type == "codex" and "anthropic" in {
+            segment.casefold() for segment in urlparse(base_url).path.split("/") if segment
+        }:
+            raise WebAppError(
+                f"{name} 的 Codex 后端不能使用 Anthropic 协议地址；"
+                "请选择 claude-cli 或更换为 Responses API 服务地址"
+            )
         if member_type == "ollama" and runtime_mode != "local-cli":
             raise WebAppError("Ollama 目前仅支持本地 CLI 模式")
         if member_type == "container":
@@ -649,15 +709,148 @@ def _save_config(store: ProjectStore, config: dict) -> None:
         if bool(member.get("dangerously_bypass_sandbox", False)):
             raise WebAppError("Web 配置禁止绕过沙箱")
         max_running = int(member.get("max_running", 1))
-        if max_running < 1 or max_running > 16:
-            raise WebAppError("max_running 必须在 1 到 16 之间")
+        if max_running < 1:
+            raise WebAppError("max_running 必须大于 0")
         member["name"] = name
         member["max_running"] = max_running
         member["priority"] = int(member.get("priority", 0))
         for key, value in (member.get("env") or {}).items():
             if any(marker in key.upper() for marker in ("KEY", "TOKEN", "SECRET")) and value not in {"", "******"}:
                 raise WebAppError(f"禁止将真实密钥写入项目文件: {key}；请使用服务端环境变量")
-    _config_path(store).write_text(json.dumps(config, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    config["name"] = str(config.get("name") or "project")
+    return config
+
+
+def _save_config(store: ProjectStore, config: dict) -> None:
+    normalized = _normalize_team_config(config)
+    config.clear()
+    config.update(json.loads(json.dumps(normalized, ensure_ascii=False)))
+    _config_path(store).write_text(
+        json.dumps(normalized, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+
+
+def _preset_public(value: dict) -> dict:
+    clean = json.loads(json.dumps(value, ensure_ascii=False))
+    config = clean.get("config") or {}
+    aliases = {
+        str(member.get("name") or ""): str(member.get("secret_alias") or "")
+        for member in config.get("members", [])
+    }
+    status = RuntimeSecretStore.status(
+        preset_secret_scope(str(clean["id"])),
+        [alias for alias in aliases.values() if alias],
+    )
+    clean["config"] = _redact_config(config)
+    clean["secret_status"] = {
+        name: bool(alias and status.get(alias))
+        for name, alias in aliases.items()
+        if name
+    }
+    return clean
+
+
+def _list_team_presets() -> dict[str, object]:
+    store = TeamPresetStore()
+    return {
+        "presets": [_preset_public(item) for item in store.list()],
+        "default_preset_id": store.default_id(),
+    }
+
+
+def _save_team_preset(payload: dict) -> dict:
+    vendor = _validate_vendor(payload.get("vendor"))
+    project = _safe_project(vendor)
+    config = _normalize_team_config(payload.get("config") or {})
+    runtime_secrets = _normalize_runtime_secrets(payload.get("secrets") or {})
+    preset_store = TeamPresetStore()
+    preset_id = str(payload.get("preset_id") or "").strip() or f"TP-{uuid4().hex[:12]}"
+    existing = None
+    try:
+        existing = preset_store.get(preset_id)
+    except TeamPresetError:
+        if payload.get("preset_id"):
+            raise
+    existing_by_name = {
+        str(item.get("name") or ""): item
+        for item in ((existing or {}).get("config") or {}).get("members", [])
+    }
+    secret_values: dict[str, str] = {}
+    aliases: set[str] = set()
+    for member in config["members"]:
+        name = str(member["name"])
+        alias = str((existing_by_name.get(name) or {}).get("secret_alias") or f"key-{uuid4().hex}")
+        member["secret_alias"] = alias
+        aliases.add(alias)
+        secret = runtime_secrets.get(name) or RuntimeSecretStore.get(vendor, name)
+        if secret:
+            secret_values[alias] = secret
+    saved = preset_store.save(str(payload.get("name") or ""), config, preset_id=preset_id)
+    RuntimeSecretStore.set_many(
+        preset_secret_scope(preset_id),
+        secret_values,
+        aliases,
+        persist=True,
+    )
+    if bool(payload.get("set_default")):
+        preset_store.set_default(preset_id)
+        saved["is_default"] = True
+    _audit(project, "team_preset_saved", {
+        "preset_id": preset_id,
+        "name": saved["name"],
+        "members": len(config["members"]),
+    })
+    return _preset_public(saved)
+
+
+def _apply_team_preset(vendor_value: object, preset_id: str) -> tuple[dict, dict[str, bool]]:
+    project = _safe_project(_validate_vendor(vendor_value))
+    preset = TeamPresetStore().get(preset_id)
+    config = json.loads(json.dumps(preset["config"], ensure_ascii=False))
+    preset_scope = preset_secret_scope(preset_id)
+    project_secrets: dict[str, str] = {}
+    names: set[str] = set()
+    for member in config.get("members", []):
+        name = str(member.get("name") or "")
+        alias = str(member.pop("secret_alias", "") or "")
+        names.add(name)
+        secret = RuntimeSecretStore.get(preset_scope, alias) if alias else None
+        if secret:
+            project_secrets[name] = secret
+    _save_config(project, config)
+    RuntimeSecretStore.set_many(project.vendor, project_secrets, names, persist=True)
+    _audit(project, "team_preset_applied", {
+        "preset_id": preset_id,
+        "name": preset["name"],
+        "members": len(names),
+    })
+    render_dashboard(project)
+    return _redact_config(_load_config(project)), RuntimeSecretStore.status(
+        project.vendor, sorted(names),
+    )
+
+
+def _duplicate_team_preset(preset_id: str, name: str) -> dict:
+    preset_store = TeamPresetStore()
+    source = preset_store.get(preset_id)
+    config = json.loads(json.dumps(source["config"], ensure_ascii=False))
+    new_id = f"TP-{uuid4().hex[:12]}"
+    source_scope = preset_secret_scope(preset_id)
+    new_scope = preset_secret_scope(new_id)
+    copied: dict[str, str] = {}
+    aliases: set[str] = set()
+    for member in config.get("members", []):
+        old_alias = str(member.get("secret_alias") or "")
+        new_alias = f"key-{uuid4().hex}"
+        member["secret_alias"] = new_alias
+        aliases.add(new_alias)
+        secret = RuntimeSecretStore.get(source_scope, old_alias) if old_alias else None
+        if secret:
+            copied[new_alias] = secret
+    saved = preset_store.save(name, config, preset_id=new_id)
+    RuntimeSecretStore.set_many(new_scope, copied, aliases, persist=True)
+    return _preset_public(saved)
 
 
 def _safe_evidence_file(store: ProjectStore, value: str) -> Path:
@@ -675,6 +868,21 @@ def _safe_evidence_file(store: ProjectStore, value: str) -> Path:
     return resolved
 
 
+def _safe_prompt_snapshot_file(store: ProjectStore, value: str) -> Path:
+    relative = Path(value)
+    if relative.is_absolute():
+        raise WebAppError("上下文快照路径必须是相对路径")
+    resolved = (store.path / relative).resolve()
+    allowed = (store.path / "prompt_snapshots").resolve()
+    try:
+        resolved.relative_to(allowed)
+    except ValueError as exc:
+        raise WebAppError("上下文快照路径越界") from exc
+    if not resolved.is_file():
+        raise WebAppError("上下文快照不存在")
+    return resolved
+
+
 def _audit(store: ProjectStore, action: str, details: dict) -> None:
     store.append_jsonl("api_audit.jsonl", {
         "action": action,
@@ -685,7 +893,7 @@ def _audit(store: ProjectStore, action: str, details: dict) -> None:
 
 
 class AgentControlHandler(SimpleHTTPRequestHandler):
-    server_version = "AgentControlPlane/3.2"
+    server_version = "AgentControlPlane/3.3"
 
     def end_headers(self) -> None:
         # The console is a live local control plane. Serving stale JavaScript can
@@ -723,6 +931,23 @@ class AgentControlHandler(SimpleHTTPRequestHandler):
         except OSError:
             return
 
+    def _download(self, body: bytes, content_type: str, filename: str) -> None:
+        if getattr(self, "_response_started", False):
+            return
+        self._response_started = True
+        try:
+            self.send_response(200)
+            self.send_header("Content-Type", content_type)
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header(
+                "Content-Disposition",
+                f"attachment; filename=target-profile.xlsx; filename*=UTF-8''{quote(filename)}",
+            )
+            self.end_headers()
+            self.wfile.write(body)
+        except OSError:
+            return
+
     def _read_json(self) -> dict:
         cached = getattr(self, "_cached_json_payload", None)
         if cached is not None:
@@ -749,10 +974,19 @@ class AgentControlHandler(SimpleHTTPRequestHandler):
     def do_GET(self) -> None:
         self._response_started = False
         parsed = urlparse(self.path)
+        if parsed.path == "/healthz":
+            self._json({"ok": True, "status": "alive"})
+            return
+        if parsed.path == "/readyz":
+            ready, payload = PROJECTOR_MANAGER.readiness()
+            self._json(payload, status=200 if ready else 503)
+            return
         if parsed.path.startswith("/api/") and not self._api_authorized():
             self._json({"ok": False, "error": "unauthorized"}, status=401)
             return
-        if parsed.path.startswith("/api/") and parsed.path != "/api/projects":
+        if parsed.path.startswith("/api/") and parsed.path not in {
+            "/api/projects", "/api/team-presets",
+        }:
             vendor = parse_qs(parsed.query).get("vendor", [DEFAULT_VENDOR])[0]
             try:
                 with _project_activity(vendor):
@@ -818,6 +1052,12 @@ class AgentControlHandler(SimpleHTTPRequestHandler):
                 },
             })
             return
+        if parsed.path == "/api/team-presets":
+            try:
+                self._json({"ok": True, **_list_team_presets()})
+            except Exception as exc:
+                self._json({"ok": False, "error": str(exc)}, status=_error_status(exc))
+            return
         if parsed.path == "/api/project/state":
             try:
                 vendor = parse_qs(parsed.query).get("vendor", [DEFAULT_VENDOR])[0]
@@ -828,6 +1068,12 @@ class AgentControlHandler(SimpleHTTPRequestHandler):
                     "state": store.load_state().__dict__,
                     "target": store.read_json("target.json"),
                     "facts": store.read_jsonl("facts.jsonl"),
+                    "technology_profile": technology_profile(store),
+                    "target_profile": target_profile(store),
+                    "target_assessments": target_assessments(store),
+                    "routine_target_groups": routine_target_groups(store),
+                    "enriched_target_profile": enriched_target_profile(store),
+                    "asset_inventory": AssetInventory(store).summary(),
                     "negative_evidence": store.read_jsonl("negative_evidence.jsonl"),
                     "human_verdicts": store.read_jsonl("human_verdicts.jsonl"),
                     "refutation_memories": store.read_jsonl("refutation_memories.jsonl"),
@@ -852,12 +1098,65 @@ class AgentControlHandler(SimpleHTTPRequestHandler):
             except Exception as exc:
                 self._json({"ok": False, "error": str(exc)}, status=_error_status(exc))
             return
+        if parsed.path == "/api/assets":
+            try:
+                query = parse_qs(parsed.query)
+                vendor = query.get("vendor", [DEFAULT_VENDOR])[0]
+                limit = int(query.get("limit", ["100"])[0])
+                offset = int(query.get("offset", ["0"])[0])
+                if not 1 <= limit <= 500:
+                    raise ValueError("assets limit 必须在 1 到 500 之间")
+                if offset < 0:
+                    raise ValueError("assets offset 不能小于 0")
+                inventory = AssetInventory(_safe_project(vendor))
+                summary = inventory.summary()
+                assets = inventory.list_assets(limit=limit, offset=offset)
+                count = len(assets)
+                total = int(summary.get("total", 0))
+                has_more = offset + count < total
+                self._json({
+                    "ok": True,
+                    "summary": summary,
+                    "assets": assets,
+                    "imports": inventory.imports(),
+                    "pagination": {
+                        "limit": limit,
+                        "offset": offset,
+                        "count": count,
+                        "total": total,
+                        "has_more": has_more,
+                        "next_offset": offset + count if has_more else None,
+                    },
+                })
+            except Exception as exc:
+                self._json({"ok": False, "error": str(exc)}, status=_error_status(exc))
+            return
+        if parsed.path == "/api/target-profile/export":
+            try:
+                vendor = parse_qs(parsed.query).get("vendor", [DEFAULT_VENDOR])[0]
+                store = _safe_project(vendor)
+                rows = enriched_target_profile(store)
+                workbook = build_profile_workbook(rows)
+                self._download(
+                    workbook,
+                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    f"{vendor}-目标画像.xlsx",
+                )
+            except Exception as exc:
+                self._json({"ok": False, "error": str(exc)}, status=_error_status(exc))
+            return
         if parsed.path == "/api/automation/status":
             try:
                 query = parse_qs(parsed.query)
                 store = _safe_project(query.get("vendor", [DEFAULT_VENDOR])[0])
                 run_id = query.get("run_id", [None])[0]
-                self._json({"ok": True, **AutomationEngine(store).status(run_id)})
+                compact = query.get("compact", ["0"])[0].casefold() in {
+                    "1", "true", "yes",
+                }
+                self._json({
+                    "ok": True,
+                    **AutomationEngine(store).status(run_id, compact=compact),
+                })
             except Exception as exc:
                 self._json({"ok": False, "error": str(exc)}, status=_error_status(exc))
             return
@@ -902,6 +1201,33 @@ class AgentControlHandler(SimpleHTTPRequestHandler):
             except Exception as exc:
                 self._json({"ok": False, "error": str(exc)}, status=_error_status(exc))
             return
+        if parsed.path == "/api/prompts":
+            try:
+                vendor = parse_qs(parsed.query).get("vendor", [DEFAULT_VENDOR])[0]
+                store = _safe_project(vendor)
+                self._json({
+                    "ok": True,
+                    "snapshots": store.read_jsonl("prompt_snapshots.jsonl")[-100:],
+                })
+            except Exception as exc:
+                self._json({"ok": False, "error": str(exc)}, status=_error_status(exc))
+            return
+        if parsed.path == "/api/prompts/content":
+            try:
+                query = parse_qs(parsed.query)
+                store = _safe_project(query.get("vendor", [DEFAULT_VENDOR])[0])
+                path = query.get("path", [""])[0]
+                snapshot = _safe_prompt_snapshot_file(store, path)
+                raw = snapshot.read_bytes()
+                self._json({
+                    "ok": True,
+                    "path": path,
+                    "content": raw[:262144].decode("utf-8", errors="replace"),
+                    "truncated": len(raw) > 262144,
+                })
+            except Exception as exc:
+                self._json({"ok": False, "error": str(exc)}, status=_error_status(exc))
+            return
         if parsed.path == "/api/audit":
             try:
                 vendor = parse_qs(parsed.query).get("vendor", [DEFAULT_VENDOR])[0]
@@ -926,6 +1252,45 @@ class AgentControlHandler(SimpleHTTPRequestHandler):
             self._json({"ok": False, "error": "unauthorized"}, status=401)
             return
         try:
+            if parsed.path == "/api/assets/import":
+                query = parse_qs(parsed.query)
+                vendor = query.get("vendor", [DEFAULT_VENDOR])[0]
+                filename = query.get("filename", [""])[0]
+                logical_source = query.get("logical_source", [filename or "official-assets"])[0]
+                source_type = query.get("source_type", ["official"])[0]
+                try:
+                    content_length = int(self.headers.get("Content-Length", "0"))
+                except ValueError as exc:
+                    raise WebAppError("Content-Length 不合法") from exc
+                if content_length <= 0:
+                    raise WebAppError("资产文件为空或缺少 Content-Length")
+                if content_length > MAX_ASSET_IMPORT_BYTES:
+                    raise WebAppError(
+                        f"资产文件超过 {MAX_ASSET_IMPORT_BYTES} bytes 限制"
+                    )
+                data = self.rfile.read(content_length)
+                if len(data) != content_length:
+                    raise WebAppError("资产文件上传不完整")
+                with _project_activity(vendor):
+                    store = _safe_project(vendor)
+                    result = AssetInventory(store).import_file(
+                        filename=filename,
+                        data=data,
+                        logical_source=logical_source,
+                        source_type=source_type,
+                    )
+                    _audit(store, "asset_file_imported", {
+                        "file_name": filename,
+                        "logical_source": logical_source,
+                        "source_type": source_type,
+                        "rows": result.get("row_count", 0),
+                        "candidates": result.get("candidate_count", 0),
+                        "assets": result.get("asset_count", 0),
+                        "duplicate": result.get("duplicate", False),
+                    })
+                    refresh_asset_count(store)
+                    self._json({"ok": True, "import": result}, status=201)
+                return
             if parsed.path == "/api/target/upload":
                 query = parse_qs(parsed.query)
                 vendor = query.get("vendor", [DEFAULT_VENDOR])[0]
@@ -952,6 +1317,7 @@ class AgentControlHandler(SimpleHTTPRequestHandler):
                 return
             guarded_paths = {
                 "/api/projects", "/api/target", "/api/config", "/api/gate/approve",
+                "/api/team-presets/save", "/api/team-presets/apply",
                 "/api/directions/dismiss",
                 "/api/automation/start", "/api/automation/launch", "/api/automation/run",
                 "/api/automation/resume", "/api/automation/cancel", "/api/subtask/complete",
@@ -984,9 +1350,23 @@ class AgentControlHandler(SimpleHTTPRequestHandler):
                     raise WebAppError("项目已存在，请选择该项目后修改目标")
                 store.init()
                 target = _save_target(store, target)
+                requested_preset = str(payload.get("preset_id") or "").strip()
+                selected_preset = (
+                    None if requested_preset == "__system__"
+                    else requested_preset or TeamPresetStore().default_id()
+                )
+                applied_preset = None
+                if selected_preset:
+                    _apply_team_preset(vendor, selected_preset)
+                    applied_preset = selected_preset
                 _audit(store, "project_initialized", {"targets": len(target["targets"]), "has_target_path": bool(target["target_path"])})
                 render_dashboard(store)
-                self._json({"ok": True, "vendor": vendor, "target": target}, status=201)
+                self._json({
+                    "ok": True,
+                    "vendor": vendor,
+                    "target": target,
+                    "applied_preset_id": applied_preset,
+                }, status=201)
                 return
 
             if parsed.path == "/api/target":
@@ -1008,6 +1388,11 @@ class AgentControlHandler(SimpleHTTPRequestHandler):
                     final_classification=str(payload.get("final_classification", "")).strip(),
                     final_severity=str(payload.get("final_severity", "")).strip(),
                     reason=str(payload.get("reason", "")).strip(),
+                    duplicate_of_finding_id=(
+                        str(payload["duplicate_of_finding_id"]).strip() or None
+                        if payload.get("duplicate_of_finding_id") is not None
+                        else None
+                    ),
                     reason_codes=[str(item) for item in payload.get("reason_codes", [])],
                     applicable_scope=str(payload.get("applicable_scope", "current_finding")),
                     reviewed_by=str(payload.get("reviewed_by", "project_owner")),
@@ -1015,6 +1400,7 @@ class AgentControlHandler(SimpleHTTPRequestHandler):
                 _audit(store, "finding_human_reviewed", {
                     "finding_id": verdict.finding_id,
                     "action": verdict.action,
+                    "duplicate_of_finding_id": verdict.duplicate_of_finding_id,
                     "reason_codes": verdict.reason_codes,
                 })
                 render_dashboard(store)
@@ -1067,6 +1453,61 @@ class AgentControlHandler(SimpleHTTPRequestHandler):
                 self._json({"ok": True, "config": _redact_config(merged), "secret_status": RuntimeSecretStore.status(store.vendor, sorted(names))})
                 return
 
+            if parsed.path == "/api/team-presets/save":
+                payload = self._read_json()
+                preset = _save_team_preset(payload)
+                self._json({
+                    "ok": True,
+                    "preset": preset,
+                    **_list_team_presets(),
+                }, status=201 if not payload.get("preset_id") else 200)
+                return
+
+            if parsed.path == "/api/team-presets/apply":
+                payload = self._read_json()
+                preset_id = str(payload.get("preset_id") or "").strip()
+                config, secret_status = _apply_team_preset(payload.get("vendor"), preset_id)
+                self._json({
+                    "ok": True,
+                    "preset_id": preset_id,
+                    "config": config,
+                    "secret_status": secret_status,
+                })
+                return
+
+            if parsed.path == "/api/team-presets/rename":
+                payload = self._read_json()
+                preset = TeamPresetStore().rename(
+                    str(payload.get("preset_id") or ""),
+                    str(payload.get("name") or ""),
+                )
+                self._json({"ok": True, "preset": _preset_public(preset), **_list_team_presets()})
+                return
+
+            if parsed.path == "/api/team-presets/duplicate":
+                payload = self._read_json()
+                preset = _duplicate_team_preset(
+                    str(payload.get("preset_id") or ""),
+                    str(payload.get("name") or ""),
+                )
+                self._json({"ok": True, "preset": preset, **_list_team_presets()}, status=201)
+                return
+
+            if parsed.path == "/api/team-presets/default":
+                payload = self._read_json()
+                preset_id = str(payload.get("preset_id") or "").strip() or None
+                TeamPresetStore().set_default(preset_id)
+                self._json({"ok": True, **_list_team_presets()})
+                return
+
+            if parsed.path == "/api/team-presets/delete":
+                payload = self._read_json()
+                preset_id = str(payload.get("preset_id") or "").strip()
+                TeamPresetStore().delete(preset_id)
+                RuntimeSecretStore.clear(preset_secret_scope(preset_id), persistent=True)
+                self._json({"ok": True, **_list_team_presets()})
+                return
+
             if parsed.path == "/api/gate/approve":
                 payload = self._read_json()
                 store = _safe_project(payload.get("vendor", DEFAULT_VENDOR))
@@ -1099,7 +1540,7 @@ class AgentControlHandler(SimpleHTTPRequestHandler):
                 run_id = engine.start(
                     str(payload.get("team", "default")),
                     timeout=int(payload.get("timeout", 300)),
-                    max_workers=int(payload.get("max_workers", 4)),
+                    max_workers=int(payload.get("max_workers", 5)),
                 )
                 self._json({"ok": True, "run_id": run_id})
                 return
@@ -1111,7 +1552,7 @@ class AgentControlHandler(SimpleHTTPRequestHandler):
                 run_id = engine.start(
                     str(payload.get("team", "default")),
                     timeout=int(payload.get("timeout", 600)),
-                    max_workers=int(payload.get("max_workers", 3)),
+                    max_workers=int(payload.get("max_workers", 5)),
                 )
                 _start_background_run(store, engine, run_id)
                 _audit(store, "automation_launched", {"run_id": run_id, "team": payload.get("team", "default")})
@@ -1202,7 +1643,7 @@ class AgentControlHandler(SimpleHTTPRequestHandler):
                     team_name=str(payload.get("team", "default")),
                     timeout=int(payload.get("timeout", 300)),
                     dry_run=bool(payload.get("dry_run", False)),
-                    max_workers=int(payload.get("max_workers", 4)),
+                    max_workers=int(payload.get("max_workers", 5)),
                 )
                 render_dashboard(store)
                 self._json({"ok": True, "output": output})
@@ -1235,6 +1676,7 @@ def serve(host: str = "127.0.0.1", port: int = 8765) -> None:
         raise WebAppError(
             "非本机回环地址启动服务时必须设置 AGENTCP_SERVER_TOKEN"
         )
+    PROJECTOR_MANAGER.start()
     for vendor in _project_names():
         try:
             refresh_asset_count(_safe_project(vendor))
@@ -1242,4 +1684,8 @@ def serve(host: str = "127.0.0.1", port: int = 8765) -> None:
             continue
     httpd = ThreadingHTTPServer((host, port), AgentControlHandler)
     print(f"Agent Control Plane running at http://{host}:{port}/")
-    httpd.serve_forever()
+    try:
+        httpd.serve_forever()
+    finally:
+        httpd.server_close()
+        PROJECTOR_MANAGER.stop()

@@ -4,7 +4,79 @@
   "properties": {
     "kind": {
       "type": "string",
-      "enum": ["fact", "intent", "plan_batch", "decision", "negative_evidence", "none"]
+      "enum": ["fact", "intent", "plan_batch", "decision", "negative_evidence", "target_profile_batch", "none"]
+    },
+    "records": {
+      "type": "array",
+      "maxItems": 200,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "url": { "type": "string" },
+          "function": { "type": "string" },
+          "technology_stack": {
+            "type": "array",
+            "maxItems": 30,
+            "items": { "type": "string" }
+          }
+        },
+        "required": ["url", "function", "technology_stack"]
+      }
+    },
+    "assessments": {
+      "type": "array",
+      "maxItems": 200,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "url": { "type": "string" },
+          "profile_class": { "type": "string", "enum": ["priority_target", "routine_network_info", "needs_review"] },
+          "target_score": { "type": ["integer", "null"], "minimum": 0, "maximum": 100 },
+          "risk_tags": { "type": "array", "maxItems": 12, "items": { "type": "string" } },
+          "score_reason": { "type": "string" },
+          "recommended_tests": { "type": "array", "maxItems": 8, "items": { "type": "string" } }
+        },
+        "required": ["url", "profile_class", "target_score", "risk_tags", "score_reason", "recommended_tests"]
+      }
+    },
+    "routine_groups": {
+      "type": "array",
+      "maxItems": 100,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "group_key": { "type": "string" },
+          "label": { "type": "string" },
+          "hostname": { "type": "string" },
+          "url_pattern": { "type": "string" },
+          "member_count": { "type": "integer", "minimum": 1 },
+          "representative_urls": { "type": "array", "maxItems": 5, "items": { "type": "string" } },
+          "classification_reason": { "type": "string" }
+        },
+        "required": ["label", "hostname", "url_pattern", "member_count", "representative_urls", "classification_reason"]
+      }
+    },
+    "exploration_complete": { "type": "boolean" },
+    "technology_observations": {
+      "type": "array",
+      "maxItems": 50,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "url": { "type": "string" },
+          "technology": { "type": "string" },
+          "category": { "type": "string", "enum": ["frontend", "frontend_architecture", "frontend_framework", "ui_library", "build_tool", "backend", "backend_framework", "web_server", "gateway", "cdn_waf", "api", "api_protocol", "authentication", "data_store", "analytics", "third_party", "tls", "other"] },
+          "version": { "type": "string" },
+          "confidence": { "type": "number", "minimum": 0, "maximum": 1 },
+          "evidence_type": { "type": "string", "enum": ["response_header", "cookie", "html", "javascript_bundle", "tls_certificate", "favicon_hash", "public_endpoint", "tool_output", "other"] },
+          "evidence_path": { "type": "string" }
+        },
+        "required": ["url", "technology", "category", "confidence", "evidence_type", "evidence_path"]
+      }
     },
     "title": { "type": "string" },
     "category": { "type": "string" },
@@ -61,6 +133,7 @@
     "scope_check": { "type": "string" },
     "scope_refs": { "type": "array", "items": { "type": "string" } },
     "expected_business_impact": { "type": "string" },
+    "source_fact_ids": { "type": "array", "items": { "type": "string" } },
     "potential_impact": { "type": "number", "minimum": 0, "maximum": 1 },
     "boundary_reachability": { "type": "number", "minimum": 0, "maximum": 1 },
     "information_gain": { "type": "number", "minimum": 0, "maximum": 1 },
@@ -72,6 +145,10 @@
     "priority_score": { "type": "number", "minimum": 0, "maximum": 1 },
     "risk_level": { "type": "string", "enum": ["low", "medium", "high", "critical"] },
     "requires_human_confirmation": { "type": "boolean" },
+    "target_profile_id": { "type": ["string", "null"] },
+    "target_score": { "type": ["integer", "null"], "minimum": 0, "maximum": 100 },
+    "risk_tags": { "type": "array", "maxItems": 12, "items": { "type": "string" } },
+    "recommended_tests": { "type": "array", "maxItems": 8, "items": { "type": "string" } },
     "parent_id": { "type": ["string", "null"] },
     "chain_id": { "type": ["string", "null"] },
     "sequence": { "type": "integer", "minimum": 0 },

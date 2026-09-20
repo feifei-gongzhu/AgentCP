@@ -9,18 +9,23 @@ import shutil
 import signal
 import socket
 import subprocess
+import tempfile
 import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
+from .schemas import VALID_WORKER_KINDS
+from .platform_process import (
+    process_group_options,
+    process_matches_executable,
+    terminate_pid_tree,
+    terminate_process_tree,
+)
 
 ProgressCallback = Callable[[dict[str, Any]], None]
 DEFAULT_LOCAL_GUEST_IMAGE = "agent-compose-guest:latest"
-VALID_WORKER_KINDS = frozenset({
-    "fact", "intent", "plan_batch", "decision", "negative_evidence", "none",
-})
 
 
 class AgentComposeError(RuntimeError):
@@ -106,6 +111,29 @@ def find_docker_binary() -> str:
     )
 
 
+def _guest_build_command(docker_binary: str, source_root: Path, image: str) -> list[str]:
+    dockerfile = source_root / "guest-images" / "Dockerfile.agent-compose-guest"
+    if not dockerfile.is_file():
+        raise AgentComposeError(f"本地 guest image Dockerfile 不存在: {dockerfile}")
+    defaults = {
+        "REGISTRY_MIRROR": "docker.io",
+        "DEBIAN_MIRROR_HOST": "mirrors.aliyun.com",
+        "DEBIAN_MIRROR_SCHEME": "http",
+        "PYPI_INDEX_URL": "https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple",
+        "PYPI_TRUSTED_HOST": "mirrors.tuna.tsinghua.edu.cn",
+        "GOPROXY": "https://goproxy.cn,direct",
+        "GO_VERSION": "1.26.4",
+        "GRPCURL_VERSION": "v1.9.3",
+        "PROTOC_GEN_GO_VERSION": "v1.36.11",
+        "PROTOC_GEN_GO_GRPC_VERSION": "v1.6.2",
+    }
+    command = [docker_binary, "build"]
+    for name, fallback in defaults.items():
+        command.extend(["--build-arg", f"{name}={os.environ.get(name, fallback)}"])
+    command.extend(["-f", str(dockerfile), "-t", image, str(source_root)])
+    return command
+
+
 def docker_image_exists(image: str) -> bool:
     try:
         docker_binary = find_docker_binary()
@@ -141,9 +169,6 @@ def ensure_local_guest_image(
         if docker_image_exists(image):
             return
         source_root = Path(__file__).resolve().parents[2] / "third_party" / "agent-compose"
-        builder = source_root / "scripts" / "build-agent-compose-guest.sh"
-        if not builder.is_file():
-            raise AgentComposeError(f"本地 guest image 构建脚本不存在: {builder}")
         docker_binary = find_docker_binary()
         try:
             docker = subprocess.run(
@@ -173,7 +198,7 @@ def ensure_local_guest_image(
         env["IMAGE_TAG"] = image
         env["PATH"] = str(Path(docker_binary).parent) + os.pathsep + env.get("PATH", "")
         process = subprocess.Popen(
-            [str(builder)],
+            _guest_build_command(docker_binary, source_root, image),
             cwd=str(source_root),
             env=env,
             stdin=subprocess.DEVNULL,
@@ -181,7 +206,7 @@ def ensure_local_guest_image(
             stderr=subprocess.STDOUT,
             text=True,
             bufsize=1,
-            start_new_session=True,
+            **process_group_options(),
         )
         recent: list[str] = []
         deadline = time.monotonic() + 1800
@@ -239,28 +264,27 @@ def _reserve_port() -> int:
 
 
 def _pid_is_ours(pid: int, binary: Path) -> bool:
-    if pid <= 0:
-        return False
-    try:
-        os.kill(pid, 0)
-    except OSError:
+    if os.name == "nt":
+        # Exact executable path + private metadata fingerprint + live status
+        # replaces the Unix command-line inspection unavailable on Windows.
+        return process_matches_executable(pid, binary)
+    if not process_matches_executable(pid, binary):
         return False
     try:
         result = subprocess.run(
             ["ps", "-p", str(pid), "-o", "command="],
-            text=True,
-            capture_output=True,
-            timeout=2,
-            check=False,
+            text=True, capture_output=True, timeout=2, check=False,
         )
     except (OSError, subprocess.SubprocessError):
         return False
-    command = result.stdout.strip()
-    return str(binary) in command and "daemon" in command
+    return "daemon" in result.stdout.strip()
 
 
 def _terminate_owned_daemon(pid: int, binary: Path) -> None:
     if not _pid_is_ours(pid, binary):
+        return
+    if os.name == "nt":
+        terminate_pid_tree(pid, binary)
         return
     try:
         os.killpg(pid, signal.SIGTERM)
@@ -445,7 +469,7 @@ class AgentComposeRuntime:
             stderr=subprocess.DEVNULL,
             text=True,
             bufsize=1,
-            start_new_session=True,
+            **process_group_options(),
         )
 
         def read_lines() -> None:
@@ -508,14 +532,24 @@ class AgentComposeRuntime:
 
     def _write_compose_file(self) -> None:
         writable = self.profile.sandbox in {"workspace-write", "danger-full-access"}
-        volumes: list[dict[str, Any]] = [{
-            "type": "bind",
-            "source": str(self.profile.project_path.resolve()),
-            # /workspace is owned by agent-compose itself. AgentCP state and
-            # evidence use a separate mount to avoid duplicate Docker targets.
-            "target": "/agentcp-project",
-            "read_only": not writable,
-        }]
+        evidence_root = self.profile.project_path / "evidence"
+        work_root = self.profile.project_path / ".agentcp-work"
+        evidence_root.mkdir(parents=True, exist_ok=True)
+        work_root.mkdir(parents=True, exist_ok=True)
+        volumes: list[dict[str, Any]] = [
+            {
+                "type": "bind",
+                "source": str(evidence_root.resolve()),
+                "target": "/agentcp-project/evidence",
+                "read_only": not writable,
+            },
+            {
+                "type": "bind",
+                "source": str(work_root.resolve()),
+                "target": "/agentcp-project/.agentcp-work",
+                "read_only": not writable,
+            },
+        ]
         if self.profile.target_path is not None:
             volumes.append({
                 "type": "bind",
@@ -584,7 +618,7 @@ class AgentComposeRuntime:
         port = _reserve_port()
         host = f"http://127.0.0.1:{port}"
         socket_digest = hashlib.sha256(str(self.runtime_dir.resolve()).encode("utf-8")).hexdigest()[:16]
-        socket_path = f"/private/tmp/agentcp-ac-{socket_digest}.sock"
+        socket_path = str(Path(tempfile.gettempdir()) / f"agentcp-ac-{socket_digest}.sock")
         env = self._daemon_environment(port, socket_path, fingerprint)
         log_file = (self.runtime_dir / "daemon.log").open("a", encoding="utf-8")
         try:
@@ -594,7 +628,7 @@ class AgentComposeRuntime:
                 stdout=log_file,
                 stderr=subprocess.STDOUT,
                 env=env,
-                start_new_session=True,
+                **process_group_options(),
                 text=True,
             )
         finally:
@@ -717,7 +751,7 @@ class AgentComposeRuntime:
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
-            start_new_session=True,
+            **process_group_options(),
         )
         deadline = time.monotonic() + max(1, timeout)
         stdout = ""
@@ -786,17 +820,7 @@ def _terminate_process(process: subprocess.Popen[str]) -> None:
     # Never let best-effort cleanup overwrite an otherwise successful result.
     if process.poll() is not None:
         return
-    try:
-        os.killpg(process.pid, signal.SIGTERM)
-        process.wait(timeout=3)
-    except subprocess.TimeoutExpired:
-        try:
-            os.killpg(process.pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
-        process.wait(timeout=3)
-    except (ProcessLookupError, PermissionError):
-        pass
+    terminate_process_tree(process)
 
 
 def _extract_json(text: str) -> dict[str, Any]:

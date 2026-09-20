@@ -33,6 +33,13 @@ VERIFICATION_PREDICATES = (
     "复现",
     "截图",
     "日志",
+    "ran",
+    "triggered",
+    "observed",
+    "returned",
+    "wrote",
+    "executed",
+    "reproduced",
 )
 
 SPECULATIVE_WORDS = ("可能", "疑似", "might", "maybe", "理论上")
@@ -92,6 +99,10 @@ class Guardian:
             fact.classification == FactClassification.VULNERABILITY.value
             or fact.status == FactStatus.VULNERABILITY.value
         )
+        folded_evidence = fact.evidence.casefold()
+        has_verification_predicate = any(
+            word.casefold() in folded_evidence for word in VERIFICATION_PREDICATES
+        )
 
         if any(word in text for word in GARBAGE_KEYWORDS):
             notes.append("命中低价值或垃圾洞关键词，降级为现象。")
@@ -108,9 +119,6 @@ class Guardian:
         if len(fact.evidence.strip()) < 30:
             notes.append("证据描述过短，缺少可审计动作。")
 
-        if not any(word in fact.evidence for word in VERIFICATION_PREDICATES):
-            notes.append("缺少“我做了 X，观察到 Y”的验证谓词。")
-
         if len(fact.business_impact.strip()) < 12:
             notes.append("未说明攻击者可造成的具体业务损失，不能升级为漏洞。")
 
@@ -122,6 +130,8 @@ class Guardian:
         validator_result = BoundaryValidator().validate(fact, metrics)
         fact.validator_result = validator_result
         notes.extend(validator_result["reasons"])
+        if not has_verification_predicate and not validator_result["certified"]:
+            notes.append("缺少“我做了 X，观察到 Y”的验证谓词。")
 
         has_direct_harm = any(marker.casefold() in impact_text for marker in HARM_MARKERS)
         is_attack_surface_only = fact.category in ATTACK_SURFACE_CATEGORIES and not has_direct_harm

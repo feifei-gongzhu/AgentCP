@@ -10,7 +10,421 @@ from typing import Any, Iterator
 from uuid import uuid4
 
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 6
+
+
+_ASSET_TERMINAL_STATUSES = (
+    "profiled",
+    "pending_profile",
+    "unreachable",
+    "blocked",
+    "non_web",
+    "duplicate",
+    "invalid",
+    "out_of_scope",
+    "stale",
+    "needs_review",
+)
+
+
+_ASSET_SCHEMA_V4 = (
+    """
+    CREATE TABLE IF NOT EXISTS asset_import_files (
+        id TEXT PRIMARY KEY,
+        logical_source TEXT NOT NULL,
+        source_type TEXT NOT NULL,
+        file_name TEXT NOT NULL,
+        file_sha256 TEXT NOT NULL,
+        file_size INTEGER NOT NULL,
+        generation INTEGER NOT NULL,
+        status TEXT NOT NULL CHECK(status IN ('importing','completed','failed')),
+        row_count INTEGER NOT NULL DEFAULT 0,
+        candidate_count INTEGER NOT NULL DEFAULT 0,
+        imported_at TEXT NOT NULL,
+        completed_at TEXT,
+        metadata_json TEXT NOT NULL DEFAULT '{}',
+        UNIQUE(logical_source, generation),
+        UNIQUE(logical_source, file_sha256)
+    )
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_asset_import_files_source
+        ON asset_import_files(logical_source, generation DESC)
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS source_rows (
+        id TEXT PRIMARY KEY,
+        import_file_id TEXT NOT NULL REFERENCES asset_import_files(id) ON DELETE CASCADE,
+        sheet_name TEXT NOT NULL,
+        row_number INTEGER NOT NULL CHECK(row_number > 0),
+        raw_json TEXT NOT NULL,
+        raw_sha256 TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        UNIQUE(import_file_id, sheet_name, row_number)
+    )
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_source_rows_import
+        ON source_rows(import_file_id, sheet_name, row_number)
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS candidates (
+        id TEXT PRIMARY KEY,
+        source_row_id TEXT NOT NULL REFERENCES source_rows(id) ON DELETE CASCADE,
+        import_file_id TEXT NOT NULL REFERENCES asset_import_files(id) ON DELETE CASCADE,
+        logical_source TEXT NOT NULL,
+        source_type TEXT NOT NULL,
+        generation INTEGER NOT NULL,
+        candidate_kind TEXT NOT NULL,
+        ordinal INTEGER NOT NULL DEFAULT 0,
+        raw_target TEXT,
+        canonical_url TEXT,
+        hostname TEXT,
+        ip_address TEXT,
+        scheme TEXT,
+        port INTEGER CHECK(port IS NULL OR (port BETWEEN 1 AND 65535)),
+        endpoint_key TEXT,
+        terminal_status TEXT NOT NULL CHECK(terminal_status IN (
+            'profiled','pending_profile','unreachable','blocked','non_web',
+            'duplicate','invalid','out_of_scope','stale','needs_review'
+        )),
+        terminal_reason TEXT,
+        is_active INTEGER NOT NULL DEFAULT 1 CHECK(is_active IN (0,1)),
+        metadata_json TEXT NOT NULL DEFAULT '{}',
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        UNIQUE(source_row_id, ordinal)
+    )
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_candidates_endpoint
+        ON candidates(endpoint_key, is_active, terminal_status)
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_candidates_source
+        ON candidates(logical_source, generation, is_active)
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS enterprise_assets (
+        id TEXT PRIMARY KEY,
+        asset_type TEXT NOT NULL,
+        endpoint_key TEXT NOT NULL UNIQUE,
+        canonical_url TEXT,
+        hostname TEXT,
+        ip_address TEXT,
+        scheme TEXT,
+        port INTEGER CHECK(port IS NULL OR (port BETWEEN 1 AND 65535)),
+        status TEXT NOT NULL,
+        source_count INTEGER NOT NULL DEFAULT 0,
+        official_source INTEGER NOT NULL DEFAULT 0 CHECK(official_source IN (0,1)),
+        authoritative_candidate_id TEXT REFERENCES candidates(id),
+        first_seen_at TEXT NOT NULL,
+        last_seen_at TEXT NOT NULL,
+        metadata_json TEXT NOT NULL DEFAULT '{}'
+    )
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_enterprise_assets_status
+        ON enterprise_assets(status, endpoint_key)
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS provenance (
+        id TEXT PRIMARY KEY,
+        asset_id TEXT NOT NULL REFERENCES enterprise_assets(id) ON DELETE CASCADE,
+        candidate_id TEXT NOT NULL REFERENCES candidates(id) ON DELETE CASCADE,
+        source_row_id TEXT NOT NULL REFERENCES source_rows(id) ON DELETE CASCADE,
+        import_file_id TEXT NOT NULL REFERENCES asset_import_files(id) ON DELETE CASCADE,
+        logical_source TEXT NOT NULL,
+        source_type TEXT NOT NULL,
+        generation INTEGER NOT NULL,
+        sheet_name TEXT NOT NULL,
+        row_number INTEGER NOT NULL,
+        observed_value TEXT,
+        created_at TEXT NOT NULL,
+        UNIQUE(asset_id, candidate_id)
+    )
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_provenance_asset
+        ON provenance(asset_id, source_type, logical_source)
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS asset_edges (
+        id TEXT PRIMARY KEY,
+        parent_asset_id TEXT REFERENCES enterprise_assets(id) ON DELETE CASCADE,
+        child_asset_id TEXT NOT NULL REFERENCES enterprise_assets(id) ON DELETE CASCADE,
+        relation_type TEXT NOT NULL,
+        discovery_method TEXT NOT NULL,
+        evidence_path TEXT,
+        confidence REAL NOT NULL DEFAULT 0.5 CHECK(confidence BETWEEN 0 AND 1),
+        metadata_json TEXT NOT NULL DEFAULT '{}',
+        created_at TEXT NOT NULL,
+        UNIQUE(parent_asset_id, child_asset_id, relation_type, discovery_method)
+    )
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_asset_edges_parent
+        ON asset_edges(parent_asset_id, relation_type, child_asset_id)
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS scope_decisions (
+        id TEXT PRIMARY KEY,
+        candidate_id TEXT NOT NULL UNIQUE REFERENCES candidates(id) ON DELETE CASCADE,
+        scope_root TEXT,
+        in_scope INTEGER NOT NULL CHECK(in_scope IN (0,1)),
+        reason TEXT NOT NULL,
+        decided_at TEXT NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS validation_attempts (
+        id TEXT PRIMARY KEY,
+        asset_id TEXT NOT NULL REFERENCES enterprise_assets(id) ON DELETE CASCADE,
+        outcome TEXT NOT NULL,
+        detail TEXT,
+        attempted_at TEXT NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS profile_tasks (
+        id TEXT PRIMARY KEY,
+        asset_id TEXT NOT NULL REFERENCES enterprise_assets(id) ON DELETE CASCADE,
+        status TEXT NOT NULL,
+        attempts INTEGER NOT NULL DEFAULT 0,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        UNIQUE(asset_id)
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS profile_urls (
+        id TEXT PRIMARY KEY,
+        profile_task_id TEXT NOT NULL REFERENCES profile_tasks(id) ON DELETE CASCADE,
+        url TEXT NOT NULL,
+        function TEXT,
+        technology_json TEXT NOT NULL DEFAULT '[]',
+        created_at TEXT NOT NULL,
+        UNIQUE(profile_task_id, url)
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS commit_outbox (
+        id TEXT PRIMARY KEY,
+        aggregate_type TEXT NOT NULL,
+        aggregate_id TEXT NOT NULL,
+        event_type TEXT NOT NULL,
+        payload_json TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','committed','failed')),
+        attempts INTEGER NOT NULL DEFAULT 0,
+        created_at TEXT NOT NULL,
+        committed_at TEXT,
+        error TEXT
+    )
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_commit_outbox_pending
+        ON commit_outbox(status, created_at)
+    """,
+)
+
+_COMMIT_SCHEMA_V6 = (
+    """
+    CREATE TABLE IF NOT EXISTS commit_events (
+        sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+        event_id TEXT NOT NULL UNIQUE,
+        idempotency_key TEXT NOT NULL UNIQUE,
+        event_type TEXT NOT NULL,
+        aggregate_type TEXT NOT NULL,
+        aggregate_id TEXT NOT NULL,
+        source_type TEXT NOT NULL,
+        source_id TEXT NOT NULL,
+        run_id TEXT,
+        job_id TEXT,
+        control_version INTEGER,
+        payload_json TEXT NOT NULL,
+        payload_sha256 TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN (
+            'pending','projecting','retry_wait','committed','blocked','discarded'
+        )),
+        attempts INTEGER NOT NULL DEFAULT 0,
+        available_at TEXT NOT NULL,
+        lease_owner TEXT,
+        lease_expires_at TEXT,
+        last_error TEXT,
+        occurred_at TEXT NOT NULL,
+        enqueued_at TEXT NOT NULL,
+        projected_at TEXT
+    )
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_commit_events_head
+        ON commit_events(status, sequence, available_at, lease_expires_at)
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_commit_events_source
+        ON commit_events(source_type, source_id)
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS commit_plans (
+        plan_id TEXT PRIMARY KEY,
+        event_id TEXT NOT NULL UNIQUE REFERENCES commit_events(event_id) ON DELETE CASCADE,
+        plan_version INTEGER NOT NULL,
+        plan_json TEXT NOT NULL,
+        plan_sha256 TEXT NOT NULL,
+        action_count INTEGER NOT NULL,
+        created_at TEXT NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS projection_receipts (
+        event_id TEXT NOT NULL REFERENCES commit_events(event_id) ON DELETE CASCADE,
+        action_key TEXT NOT NULL,
+        idempotency_key TEXT NOT NULL UNIQUE,
+        sink_type TEXT NOT NULL,
+        sink_path TEXT NOT NULL,
+        content_sha256 TEXT NOT NULL,
+        byte_count INTEGER NOT NULL DEFAULT 0,
+        completed_at TEXT NOT NULL,
+        PRIMARY KEY(event_id, action_key)
+    )
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_projection_receipts_sink
+        ON projection_receipts(sink_path, completed_at)
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS projection_baselines (
+        path TEXT PRIMARY KEY,
+        media_type TEXT NOT NULL,
+        content_blob BLOB NOT NULL,
+        sha256 TEXT NOT NULL,
+        through_sequence INTEGER NOT NULL DEFAULT 0,
+        captured_at TEXT NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS projector_meta (
+        id INTEGER PRIMARY KEY CHECK(id=1),
+        baseline_sequence INTEGER NOT NULL DEFAULT 0,
+        last_projected_sequence INTEGER NOT NULL DEFAULT 0,
+        recovery_completed_at TEXT,
+        last_success_at TEXT,
+        last_error TEXT,
+        fatal_error TEXT,
+        updated_at TEXT NOT NULL
+    )
+    """,
+    """
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_jobs_commit_event
+        ON jobs(commit_event_id) WHERE commit_event_id IS NOT NULL
+    """,
+)
+
+_COMMIT_SCHEMA_V6_TABLES = {
+    "commit_events", "commit_plans", "projection_receipts",
+    "projection_baselines", "projector_meta",
+}
+
+_ASSET_SCHEMA_V4_TABLES = {
+    "asset_import_files",
+    "source_rows",
+    "candidates",
+    "enterprise_assets",
+    "provenance",
+    "asset_edges",
+    "scope_decisions",
+    "validation_attempts",
+    "profile_tasks",
+    "profile_urls",
+    "commit_outbox",
+}
+
+_ASSET_SCHEMA_REQUIRED_COLUMNS = {
+    "asset_import_files": {
+        "id", "logical_source", "source_type", "file_name", "file_sha256",
+        "file_size", "generation", "status", "row_count", "candidate_count",
+        "imported_at", "completed_at", "metadata_json",
+    },
+    "source_rows": {
+        "id", "import_file_id", "sheet_name", "row_number", "raw_json",
+        "raw_sha256", "created_at",
+    },
+    "candidates": {
+        "id", "source_row_id", "import_file_id", "logical_source", "source_type",
+        "generation", "candidate_kind", "ordinal", "raw_target", "canonical_url",
+        "hostname", "ip_address", "scheme", "port", "endpoint_key",
+        "terminal_status", "terminal_reason", "is_active", "metadata_json",
+        "created_at", "updated_at",
+    },
+    "enterprise_assets": {
+        "id", "asset_type", "endpoint_key", "canonical_url", "hostname",
+        "ip_address", "scheme", "port", "status", "source_count",
+        "official_source", "authoritative_candidate_id", "first_seen_at",
+        "last_seen_at", "metadata_json",
+    },
+    "provenance": {
+        "id", "asset_id", "candidate_id", "source_row_id", "import_file_id",
+        "logical_source", "source_type", "generation", "sheet_name", "row_number",
+        "observed_value", "created_at",
+    },
+    "asset_edges": {
+        "id", "parent_asset_id", "child_asset_id", "relation_type",
+        "discovery_method", "evidence_path", "confidence", "metadata_json", "created_at",
+    },
+    "scope_decisions": {
+        "id", "candidate_id", "scope_root", "in_scope", "reason", "decided_at",
+    },
+    "validation_attempts": {"id", "asset_id", "outcome", "detail", "attempted_at"},
+    "profile_tasks": {"id", "asset_id", "status", "attempts", "created_at", "updated_at"},
+    "profile_urls": {
+        "id", "profile_task_id", "url", "function", "technology_json", "created_at",
+    },
+    "commit_outbox": {
+        "id", "aggregate_type", "aggregate_id", "event_type", "payload_json",
+        "status", "attempts", "created_at", "committed_at", "error",
+    },
+}
+
+_ASSET_SCHEMA_REQUIRED_INDEXES = {
+    "idx_asset_import_files_source": ("logical_source", "generation"),
+    "idx_source_rows_import": ("import_file_id", "sheet_name", "row_number"),
+    "idx_candidates_endpoint": ("endpoint_key", "is_active", "terminal_status"),
+    "idx_candidates_source": ("logical_source", "generation", "is_active"),
+    "idx_enterprise_assets_status": ("status", "endpoint_key"),
+    "idx_provenance_asset": ("asset_id", "source_type", "logical_source"),
+    "idx_asset_edges_parent": ("parent_asset_id", "relation_type", "child_asset_id"),
+    "idx_commit_outbox_pending": ("status", "created_at"),
+}
+
+_ASSET_SCHEMA_REQUIRED_FOREIGN_KEYS = {
+    "source_rows": {("import_file_id", "asset_import_files", "id", "CASCADE")},
+    "candidates": {
+        ("source_row_id", "source_rows", "id", "CASCADE"),
+        ("import_file_id", "asset_import_files", "id", "CASCADE"),
+    },
+    "provenance": {
+        ("asset_id", "enterprise_assets", "id", "CASCADE"),
+        ("candidate_id", "candidates", "id", "CASCADE"),
+        ("source_row_id", "source_rows", "id", "CASCADE"),
+        ("import_file_id", "asset_import_files", "id", "CASCADE"),
+    },
+    "profile_tasks": {("asset_id", "enterprise_assets", "id", "CASCADE")},
+    "profile_urls": {("profile_task_id", "profile_tasks", "id", "CASCADE")},
+}
+
+_ASSET_SCHEMA_REQUIRED_UNIQUE_KEYS = {
+    "asset_import_files": {
+        ("logical_source", "generation"),
+        ("logical_source", "file_sha256"),
+    },
+    "source_rows": {("import_file_id", "sheet_name", "row_number")},
+    "candidates": {("source_row_id", "ordinal")},
+    "enterprise_assets": {("endpoint_key",)},
+    "provenance": {("asset_id", "candidate_id")},
+    "scope_decisions": {("candidate_id",)},
+    "profile_tasks": {("asset_id",)},
+    "profile_urls": {("profile_task_id", "url")},
+}
 
 
 def _now() -> str:
@@ -38,6 +452,7 @@ class ControlDatabase:
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA journal_mode=WAL")
         connection.execute("PRAGMA foreign_keys=ON")
+        connection.execute("PRAGMA secure_delete=ON")
         connection.execute("PRAGMA busy_timeout=30000")
         try:
             yield connection
@@ -117,19 +532,73 @@ class ControlDatabase:
                     ON directions(status, lease_expires_at, created_at);
                 """
             )
-            row = db.execute("SELECT version FROM schema_meta LIMIT 1").fetchone()
-            if row is None:
-                db.execute("INSERT INTO schema_meta(version) VALUES (?)", (SCHEMA_VERSION,))
-            elif int(row["version"]) > SCHEMA_VERSION:
-                raise RuntimeError(f"不支持的数据库版本: {row['version']}")
-            self._ensure_column(db, "automation_runs", "control_version", "INTEGER NOT NULL DEFAULT 1")
-            self._ensure_column(db, "automation_runs", "wave", "INTEGER NOT NULL DEFAULT 1")
-            self._ensure_column(db, "automation_runs", "max_waves", "INTEGER NOT NULL DEFAULT 4")
-            self._ensure_column(db, "automation_runs", "execution_deadline", "TEXT")
-            self._ensure_column(db, "jobs", "control_version", "INTEGER NOT NULL DEFAULT 1")
-            self._ensure_column(db, "jobs", "wave", "INTEGER NOT NULL DEFAULT 1")
-            self._ensure_column(db, "directions", "terminal_reason", "TEXT")
-            db.execute("UPDATE schema_meta SET version=?", (SCHEMA_VERSION,))
+            meta_rows = db.execute("SELECT version FROM schema_meta").fetchall()
+            if not meta_rows:
+                db.execute("INSERT INTO schema_meta(version) VALUES (3)")
+                current_version = 3
+            elif len(meta_rows) != 1:
+                raise RuntimeError("schema_meta 必须且只能包含一条版本记录")
+            else:
+                current_version = int(meta_rows[0]["version"])
+            if current_version > SCHEMA_VERSION:
+                raise RuntimeError(f"不支持的数据库版本: {current_version}")
+
+            scrubbed_sensitive_data = False
+            db.execute("BEGIN IMMEDIATE")
+            try:
+                self._ensure_column(db, "automation_runs", "control_version", "INTEGER NOT NULL DEFAULT 1")
+                self._ensure_column(db, "automation_runs", "wave", "INTEGER NOT NULL DEFAULT 1")
+                self._ensure_column(db, "automation_runs", "max_waves", "INTEGER NOT NULL DEFAULT 4")
+                self._ensure_column(db, "automation_runs", "execution_deadline", "TEXT")
+                self._ensure_column(db, "jobs", "control_version", "INTEGER NOT NULL DEFAULT 1")
+                self._ensure_column(db, "jobs", "wave", "INTEGER NOT NULL DEFAULT 1")
+                self._ensure_column(db, "jobs", "commit_state", "TEXT NOT NULL DEFAULT 'none'")
+                self._ensure_column(db, "jobs", "commit_event_id", "TEXT")
+                self._ensure_column(db, "jobs", "commit_enqueued_at", "TEXT")
+                self._ensure_column(db, "jobs", "commit_projected_at", "TEXT")
+                self._ensure_column(db, "directions", "terminal_reason", "TEXT")
+                # Always replay idempotent DDL. This safely repairs missing tables and
+                # ordinary indexes even when an earlier local draft already stamped
+                # the database as V4.
+                for statement in _ASSET_SCHEMA_V4:
+                    try:
+                        db.execute(statement)
+                    except sqlite3.OperationalError as exc:
+                        if (
+                            statement.lstrip().upper().startswith("CREATE INDEX")
+                            and "no such column" in str(exc).casefold()
+                        ):
+                            continue
+                        raise
+                self._repair_safe_asset_columns(db)
+                for statement in _ASSET_SCHEMA_V4:
+                    db.execute(statement)
+                self._validate_asset_schema(db)
+                if current_version < 5:
+                    self._scrub_asset_source_values(db)
+                    scrubbed_sensitive_data = True
+                for statement in _COMMIT_SCHEMA_V6:
+                    db.execute(statement)
+                self._migrate_commit_schema_v6(db, current_version)
+                self._validate_commit_schema_v6(db)
+                foreign_key_errors = db.execute("PRAGMA foreign_key_check").fetchall()
+                if foreign_key_errors:
+                    raise RuntimeError(
+                        f"资产数据库外键检查失败: {len(foreign_key_errors)} 条异常"
+                    )
+                quick_check = db.execute("PRAGMA quick_check").fetchone()
+                if quick_check is None or str(quick_check[0]).casefold() != "ok":
+                    raise RuntimeError(f"资产数据库完整性检查失败: {quick_check[0] if quick_check else 'unknown'}")
+                db.execute("UPDATE schema_meta SET version=?", (SCHEMA_VERSION,))
+                db.execute("COMMIT")
+            except Exception:
+                db.execute("ROLLBACK")
+                raise
+            if scrubbed_sensitive_data:
+                # Secure-delete removes overwritten cells; checkpoint + VACUUM also
+                # prevents old source values from surviving in WAL or free pages.
+                db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+                db.execute("VACUUM")
 
     @staticmethod
     def _ensure_column(
@@ -142,6 +611,335 @@ class ControlDatabase:
         if column not in names:
             db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {declaration}")
 
+    @classmethod
+    def _repair_safe_asset_columns(cls, db: sqlite3.Connection) -> None:
+        safe_columns = {
+            "asset_import_files": {
+                "row_count": "INTEGER NOT NULL DEFAULT 0",
+                "candidate_count": "INTEGER NOT NULL DEFAULT 0",
+                "completed_at": "TEXT",
+                "metadata_json": "TEXT NOT NULL DEFAULT '{}'",
+            },
+            "candidates": {
+                "terminal_reason": "TEXT",
+                "is_active": "INTEGER NOT NULL DEFAULT 1",
+                "metadata_json": "TEXT NOT NULL DEFAULT '{}'",
+            },
+            "enterprise_assets": {
+                "source_count": "INTEGER NOT NULL DEFAULT 0",
+                "official_source": "INTEGER NOT NULL DEFAULT 0",
+                "authoritative_candidate_id": "TEXT",
+                "metadata_json": "TEXT NOT NULL DEFAULT '{}'",
+            },
+            "asset_edges": {
+                "evidence_path": "TEXT",
+                "confidence": "REAL NOT NULL DEFAULT 0.5",
+                "metadata_json": "TEXT NOT NULL DEFAULT '{}'",
+            },
+            "profile_tasks": {"attempts": "INTEGER NOT NULL DEFAULT 0"},
+            "profile_urls": {"technology_json": "TEXT NOT NULL DEFAULT '[]'"},
+            "commit_outbox": {
+                "attempts": "INTEGER NOT NULL DEFAULT 0",
+                "committed_at": "TEXT",
+                "error": "TEXT",
+            },
+        }
+        present = {
+            str(row["name"])
+            for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
+        }
+        for table, columns in safe_columns.items():
+            if table not in present:
+                continue
+            for name, declaration in columns.items():
+                cls._ensure_column(db, table, name, declaration)
+
+    @staticmethod
+    def _index_columns(db: sqlite3.Connection, table: str) -> tuple[set[tuple[str, ...]], dict[str, tuple[str, ...]]]:
+        unique: set[tuple[str, ...]] = set()
+        named: dict[str, tuple[str, ...]] = {}
+        for row in db.execute(f"PRAGMA index_list({table})").fetchall():
+            name = str(row["name"])
+            columns = tuple(
+                str(item["name"])
+                for item in db.execute(f'PRAGMA index_info("{name}")').fetchall()
+            )
+            named[name] = columns
+            if int(row["unique"]):
+                unique.add(columns)
+        return unique, named
+
+    @classmethod
+    def _validate_asset_schema(cls, db: sqlite3.Connection) -> None:
+        present = {
+            str(row["name"])
+            for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
+        }
+        missing_tables = sorted(_ASSET_SCHEMA_V4_TABLES - present)
+        if missing_tables:
+            raise RuntimeError(f"资产数据库缺少表: {', '.join(missing_tables)}")
+        indexes_by_table: dict[str, dict[str, tuple[str, ...]]] = {}
+        for table, required in _ASSET_SCHEMA_REQUIRED_COLUMNS.items():
+            actual = {
+                str(row["name"])
+                for row in db.execute(f"PRAGMA table_info({table})").fetchall()
+            }
+            missing = sorted(required - actual)
+            if missing:
+                raise RuntimeError(f"资产数据库表 {table} 缺少列: {', '.join(missing)}")
+            unique, named = cls._index_columns(db, table)
+            indexes_by_table[table] = named
+            required_unique = _ASSET_SCHEMA_REQUIRED_UNIQUE_KEYS.get(table, set())
+            missing_unique = sorted(required_unique - unique)
+            if missing_unique:
+                raise RuntimeError(f"资产数据库表 {table} 缺少唯一约束: {missing_unique}")
+        all_named = {
+            name: columns
+            for table_indexes in indexes_by_table.values()
+            for name, columns in table_indexes.items()
+        }
+        for name, columns in _ASSET_SCHEMA_REQUIRED_INDEXES.items():
+            if all_named.get(name) != columns:
+                raise RuntimeError(
+                    f"资产数据库索引 {name} 结构异常: expected={columns}, actual={all_named.get(name)}"
+                )
+        for table, required in _ASSET_SCHEMA_REQUIRED_FOREIGN_KEYS.items():
+            actual = {
+                (
+                    str(row["from"]), str(row["table"]), str(row["to"]),
+                    str(row["on_delete"]).upper(),
+                )
+                for row in db.execute(f"PRAGMA foreign_key_list({table})").fetchall()
+            }
+            missing = required - actual
+            if missing:
+                raise RuntimeError(f"资产数据库表 {table} 缺少外键: {sorted(missing)}")
+
+    @staticmethod
+    def _scrub_asset_source_values(db: sqlite3.Connection) -> None:
+        def safe_candidate(row: sqlite3.Row) -> str:
+            if row["canonical_url"]:
+                return str(row["canonical_url"])
+            host = str(row["hostname"] or row["ip_address"] or "")
+            port = int(row["port"] or 0)
+            return f"{host}:{port}" if host and port else host
+
+        candidates = db.execute(
+            "SELECT id,source_row_id,canonical_url,hostname,ip_address,port FROM candidates"
+        ).fetchall()
+        safe_by_id: dict[str, str] = {}
+        by_source_row: dict[str, list[str]] = {}
+        for row in candidates:
+            value = safe_candidate(row)
+            safe_by_id[str(row["id"])] = value
+            by_source_row.setdefault(str(row["source_row_id"]), []).append(value)
+            db.execute("UPDATE candidates SET raw_target=? WHERE id=?", (value, row["id"]))
+        for row in db.execute("SELECT id FROM source_rows").fetchall():
+            values = sorted(dict.fromkeys(
+                value for value in by_source_row.get(str(row["id"]), []) if value
+            ))
+            minimal = json.dumps(
+                {"redacted": True, "asset_values": values},
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            db.execute("UPDATE source_rows SET raw_json=? WHERE id=?", (minimal, row["id"]))
+        for row in db.execute("SELECT id,candidate_id FROM provenance").fetchall():
+            db.execute(
+                "UPDATE provenance SET observed_value=? WHERE id=?",
+                (safe_by_id.get(str(row["candidate_id"]), ""), row["id"]),
+            )
+
+    @staticmethod
+    def _canonical_json(value: object) -> str:
+        return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+    @classmethod
+    def _migrate_commit_schema_v6(
+        cls,
+        db: sqlite3.Connection,
+        current_version: int,
+    ) -> None:
+        now = _now()
+        db.execute(
+            """
+            INSERT INTO projector_meta(
+                id,baseline_sequence,last_projected_sequence,updated_at
+            ) VALUES (1,0,0,?) ON CONFLICT(id) DO NOTHING
+            """,
+            (now,),
+        )
+        if current_version < 6:
+            for row in db.execute("SELECT * FROM commit_outbox ORDER BY created_at,id").fetchall():
+                legacy_id = str(row["id"])
+                event_id = f"EV-V5-{legacy_id}"
+                payload = {
+                    "legacy_outbox_id": legacy_id,
+                    "event_type": str(row["event_type"]),
+                    "payload": json.loads(str(row["payload_json"] or "{}")),
+                }
+                payload_json = cls._canonical_json(payload)
+                plan = {
+                    "version": 1,
+                    "event_id": event_id,
+                    "actions": [],
+                    "legacy": True,
+                }
+                plan_json = cls._canonical_json(plan)
+                db.execute(
+                    """
+                    INSERT INTO commit_events(
+                        event_id,idempotency_key,event_type,aggregate_type,aggregate_id,
+                        source_type,source_id,payload_json,payload_sha256,status,attempts,
+                        available_at,occurred_at,enqueued_at,projected_at
+                    ) VALUES (?,?,?,?,?,?,?,?,?,'committed',0,?,?,?,?)
+                    ON CONFLICT(idempotency_key) DO NOTHING
+                    """,
+                    (
+                        event_id, f"v5:commit_outbox:{legacy_id}", str(row["event_type"]),
+                        str(row["aggregate_type"]), str(row["aggregate_id"]),
+                        "legacy_outbox", legacy_id, payload_json,
+                        hashlib.sha256(payload_json.encode("utf-8")).hexdigest(),
+                        str(row["created_at"]), str(row["created_at"]),
+                        str(row["created_at"]), str(row["committed_at"] or row["created_at"]),
+                    ),
+                )
+                db.execute(
+                    """
+                    INSERT INTO commit_plans(
+                        plan_id,event_id,plan_version,plan_json,plan_sha256,
+                        action_count,created_at
+                    ) VALUES (?,?,?,?,?,0,?) ON CONFLICT(event_id) DO NOTHING
+                    """,
+                    (
+                        f"CP-V5-{legacy_id}", event_id, 1, plan_json,
+                        hashlib.sha256(plan_json.encode("utf-8")).hexdigest(),
+                        str(row["created_at"]),
+                    ),
+                )
+            db.execute(
+                """
+                UPDATE jobs SET commit_state=CASE
+                    WHEN committed_at IS NOT NULL AND commit_error IS NULL THEN 'projected'
+                    WHEN committed_at IS NOT NULL AND commit_error IS NOT NULL THEN 'rejected'
+                    ELSE 'none'
+                END,
+                commit_enqueued_at=CASE WHEN committed_at IS NOT NULL THEN committed_at ELSE commit_enqueued_at END,
+                commit_projected_at=CASE
+                    WHEN committed_at IS NOT NULL AND commit_error IS NULL THEN committed_at
+                    ELSE commit_projected_at
+                END
+                WHERE commit_state='none'
+                """
+            )
+
+    @classmethod
+    def _validate_commit_schema_v6(cls, db: sqlite3.Connection) -> None:
+        present = {
+            str(row["name"])
+            for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
+        }
+        missing = sorted(_COMMIT_SCHEMA_V6_TABLES - present)
+        if missing:
+            raise RuntimeError(f"提交数据库缺少 V6 表: {', '.join(missing)}")
+        required_columns = {
+            "commit_events": {
+                "sequence", "event_id", "idempotency_key", "event_type",
+                "aggregate_type", "aggregate_id", "source_type", "source_id",
+                "run_id", "job_id", "control_version", "payload_json",
+                "payload_sha256", "status", "attempts", "available_at",
+                "lease_owner", "lease_expires_at", "last_error", "occurred_at",
+                "enqueued_at", "projected_at",
+            },
+            "commit_plans": {
+                "plan_id", "event_id", "plan_version", "plan_json",
+                "plan_sha256", "action_count", "created_at",
+            },
+            "projection_receipts": {
+                "event_id", "action_key", "idempotency_key", "sink_type",
+                "sink_path", "content_sha256", "byte_count", "completed_at",
+            },
+            "projection_baselines": {
+                "path", "media_type", "content_blob", "sha256",
+                "through_sequence", "captured_at",
+            },
+            "projector_meta": {
+                "id", "baseline_sequence", "last_projected_sequence",
+                "recovery_completed_at", "last_success_at", "last_error",
+                "fatal_error", "updated_at",
+            },
+        }
+        required_columns["jobs"] = {
+            "commit_state", "commit_event_id", "commit_enqueued_at", "commit_projected_at",
+        }
+        indexes_by_table: dict[str, dict[str, tuple[str, ...]]] = {}
+        unique_by_table: dict[str, set[tuple[str, ...]]] = {}
+        for table, required in required_columns.items():
+            actual = {
+                str(row["name"])
+                for row in db.execute(f"PRAGMA table_info({table})").fetchall()
+            }
+            missing_columns = sorted(required - actual)
+            if missing_columns:
+                raise RuntimeError(f"提交数据库表 {table} 缺少列: {missing_columns}")
+            unique, named = cls._index_columns(db, table)
+            unique_by_table[table] = unique
+            indexes_by_table[table] = named
+        required_unique = {
+            "commit_events": {("event_id",), ("idempotency_key",)},
+            "commit_plans": {("plan_id",), ("event_id",)},
+            "projection_receipts": {
+                ("event_id", "action_key"),
+                ("idempotency_key",),
+            },
+        }
+        for table, expected in required_unique.items():
+            missing_unique = sorted(expected - unique_by_table[table])
+            if missing_unique:
+                raise RuntimeError(
+                    f"提交数据库表 {table} 缺少唯一约束: {missing_unique}"
+                )
+        named_indexes = {
+            name: columns
+            for table_indexes in indexes_by_table.values()
+            for name, columns in table_indexes.items()
+        }
+        expected_indexes = {
+            "idx_commit_events_head": (
+                "status", "sequence", "available_at", "lease_expires_at",
+            ),
+            "idx_commit_events_source": ("source_type", "source_id"),
+            "idx_projection_receipts_sink": ("sink_path", "completed_at"),
+            "idx_jobs_commit_event": ("commit_event_id",),
+        }
+        for name, expected in expected_indexes.items():
+            if named_indexes.get(name) != expected:
+                raise RuntimeError(
+                    f"提交数据库索引 {name} 结构异常: "
+                    f"expected={expected}, actual={named_indexes.get(name)}"
+                )
+        expected_foreign_keys = {
+            "commit_plans": {("event_id", "commit_events", "event_id", "CASCADE")},
+            "projection_receipts": {
+                ("event_id", "commit_events", "event_id", "CASCADE"),
+            },
+        }
+        for table, expected in expected_foreign_keys.items():
+            actual = {
+                (
+                    str(row["from"]), str(row["table"]), str(row["to"]),
+                    str(row["on_delete"]).upper(),
+                )
+                for row in db.execute(f"PRAGMA foreign_key_list({table})").fetchall()
+            }
+            missing_foreign_keys = expected - actual
+            if missing_foreign_keys:
+                raise RuntimeError(
+                    f"提交数据库表 {table} 缺少外键: "
+                    f"{sorted(missing_foreign_keys)}"
+                )
+
     def create_run(
         self,
         project: str,
@@ -151,6 +949,7 @@ class ControlDatabase:
         *,
         execution_lease_seconds: int = 900,
         max_waves: int = 4,
+        initial_stage: str = "swarm",
     ) -> str:
         run_id = f"R-{uuid4().hex[:12]}"
         now = _now()
@@ -190,10 +989,10 @@ class ControlDatabase:
                     completed_task_count,low_value_streak,no_direction_streak,control_version,
                     wave,max_waves,execution_deadline,
                     created_at,updated_at,error
-                ) VALUES (?, ?, ?, 'running', 'swarm', ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, NULL)
+                ) VALUES (?, ?, ?, 'running', ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, NULL)
                 """,
                 (
-                    run_id, project, team, timeout_seconds, max_workers,
+                    run_id, project, team, initial_stage, timeout_seconds, max_workers,
                     *counters, control_version, max(1, max_waves),
                     _lease_deadline(max(60, execution_lease_seconds)), now, now,
                 ),
@@ -215,11 +1014,13 @@ class ControlDatabase:
         job_id = f"J-{uuid4().hex[:12]}"
         now = _now()
         with self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
             run = db.execute(
                 "SELECT status,control_version,wave FROM automation_runs WHERE id=?",
                 (run_id,),
             ).fetchone()
             if run is None or run["status"] != "running":
+                db.execute("ROLLBACK")
                 raise RuntimeError(f"运行 {run_id} 不接受新任务。")
             db.execute(
                 """
@@ -235,6 +1036,7 @@ class ControlDatabase:
                 ),
             )
             self._event(db, run_id, job_id, "job_queued", {"stage": stage, "member": member_name})
+            db.execute("COMMIT")
         return job_id
 
     def register_direction(self, intent: dict[str, Any]) -> tuple[str, bool]:
@@ -246,9 +1048,11 @@ class ControlDatabase:
         direction_id = str(intent.get("id") or f"I-{uuid4().hex[:12]}")
         now = _now()
         with self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
             existing = db.execute("SELECT id FROM directions WHERE fingerprint=?", (fingerprint,)).fetchone()
             if existing:
                 self._event(db, None, None, "direction_duplicate", {"direction_id": existing["id"]})
+                db.execute("COMMIT")
                 return str(existing["id"]), False
             db.execute(
                 """
@@ -258,6 +1062,7 @@ class ControlDatabase:
                 (direction_id, fingerprint, json.dumps(intent, ensure_ascii=False), now, now),
             )
             self._event(db, None, None, "direction_registered", {"direction_id": direction_id})
+            db.execute("COMMIT")
         return direction_id, True
 
     def claim_direction(self, worker_id: str, lease_seconds: int = 60) -> dict[str, Any] | None:
@@ -281,6 +1086,7 @@ class ControlDatabase:
                         WHEN json_extract(intent_json, '$.requires_human_confirmation') THEN 0
                         ELSE 1
                     END,
+                    CAST(coalesce(json_extract(intent_json, '$.target_score'), -1) AS INTEGER) DESC,
                     CASE lower(coalesce(json_extract(intent_json, '$.risk_level'), 'low'))
                         WHEN 'critical' THEN 0
                         WHEN 'high' THEN 1
@@ -330,24 +1136,27 @@ class ControlDatabase:
         *,
         outcome: str | None = None,
         reason: str | None = None,
-    ) -> None:
+    ) -> bool:
         with self.connect() as db:
             status = outcome or ("completed" if success else "released")
             if status not in {
                 "completed", "rejected", "exhausted", "blocked", "cancelled", "released",
             }:
                 raise ValueError(f"非法 Intent 终态: {status}")
-            db.execute(
+            updated = db.execute(
                 """
                 UPDATE directions SET status=?,claimed_by=NULL,lease_expires_at=NULL,
                     terminal_reason=?,updated_at=?
-                WHERE id=? AND claimed_by=?
+                WHERE id=? AND claimed_by=? AND status='claimed'
                 """,
                 (status, reason, _now(), direction_id, worker_id),
             )
+            if updated.rowcount != 1:
+                return False
             self._event(db, None, None, "direction_finished", {
                 "direction_id": direction_id, "status": status, "reason": reason,
             })
+            return True
 
     def list_directions(self) -> list[dict[str, Any]]:
         with self.connect() as db:
@@ -442,22 +1251,25 @@ class ControlDatabase:
         direction_id: str,
         status: str,
         reason: str | None = None,
-    ) -> None:
+    ) -> bool:
         if status not in {
             "open", "released", "completed", "rejected", "exhausted", "blocked", "cancelled",
         }:
             raise ValueError(f"非法 Intent 状态: {status}")
         with self.connect() as db:
-            db.execute(
+            updated = db.execute(
                 """
                 UPDATE directions SET status=?,claimed_by=NULL,lease_expires_at=NULL,
                     terminal_reason=?,updated_at=? WHERE id=? AND status!='claimed'
                 """,
                 (status, reason, _now(), direction_id),
             )
+            if updated.rowcount != 1:
+                return False
             self._event(db, None, None, "direction_status_changed", {
                 "direction_id": direction_id, "status": status, "reason": reason,
             })
+            return True
 
     def claim_job(
         self,
@@ -601,13 +1413,20 @@ class ControlDatabase:
                 if not retryable or int(row["attempts"]) >= int(row["max_attempts"])
                 else "queued"
             )
-            db.execute(
+            updated = db.execute(
                 """
                 UPDATE jobs SET status=?, error=?, worker_id=NULL, lease_expires_at=NULL,
                     updated_at=? WHERE id=? AND worker_id=? AND status IN ('running','cancelling')
                 """,
                 (next_status, error, now, job_id, worker_id),
             )
+            if updated.rowcount != 1:
+                self._event(db, row["run_id"], job_id, "stale_write_rejected", {
+                    "worker_id": worker_id,
+                    "control_version": expected_version,
+                    "operation": "fail_job",
+                })
+                raise RuntimeError(f"任务控制版本或租约已失效: {job_id}")
             self._event(db, row["run_id"], job_id, "job_failed", {"status": next_status, "error": error})
             if stale:
                 self._event(db, row["run_id"], job_id, "stale_write_rejected", {
@@ -750,22 +1569,56 @@ class ControlDatabase:
             ).fetchone()
             return int(row["count"])
 
-    def set_run_status(self, run_id: str, status: str, error: str | None = None) -> None:
+    def set_run_status(self, run_id: str, status: str, error: str | None = None) -> bool:
         with self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
             current = db.execute(
                 "SELECT status FROM automation_runs WHERE id=?", (run_id,)
             ).fetchone()
             if current is None:
+                db.execute("ROLLBACK")
                 raise RuntimeError(f"运行不存在: {run_id}")
-            if current["status"] in {"stopped", "cancelled", "completed", "failed"}:
-                if status != current["status"]:
-                    raise RuntimeError(f"终结运行 {run_id} 不能从 {current['status']} 变为 {status}")
-                return
-            db.execute(
-                "UPDATE automation_runs SET status=?,error=?,updated_at=? WHERE id=?",
-                (status, error, _now(), run_id),
+            current_status = str(current["status"])
+            if current_status in {"stopped", "cancelled", "completed", "failed"}:
+                if status != current_status:
+                    db.execute("ROLLBACK")
+                    raise RuntimeError(f"终结运行 {run_id} 不能从 {current_status} 变为 {status}")
+                db.execute("COMMIT")
+                return False
+            updated = db.execute(
+                """
+                UPDATE automation_runs SET status=?,error=?,updated_at=?
+                WHERE id=? AND status=?
+                """,
+                (status, error, _now(), run_id, current_status),
             )
+            if updated.rowcount != 1:
+                db.execute("ROLLBACK")
+                return False
             self._event(db, run_id, None, "run_status_changed", {"status": status, "error": error})
+            db.execute("COMMIT")
+            return True
+
+    def renew_run_execution_deadline(self, run_id: str, lease_seconds: int) -> str:
+        deadline = _lease_deadline(max(60, int(lease_seconds)))
+        with self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            updated = db.execute(
+                """
+                UPDATE automation_runs SET execution_deadline=?,updated_at=?
+                WHERE id=? AND status='paused'
+                """,
+                (deadline, _now(), run_id),
+            )
+            if updated.rowcount != 1:
+                db.execute("ROLLBACK")
+                raise RuntimeError(f"运行 {run_id} 不能续签执行预算")
+            self._event(db, run_id, None, "run_execution_budget_renewed", {
+                "execution_deadline": deadline,
+                "lease_seconds": max(60, int(lease_seconds)),
+            })
+            db.execute("COMMIT")
+        return deadline
 
     def update_run_counters(
         self,
@@ -796,11 +1649,362 @@ class ControlDatabase:
                 (completed_delta, low_streak, no_streak, _now(), run_id),
             )
 
+    def accept_commit_plan(
+        self,
+        *,
+        event: dict[str, Any],
+        plan: dict[str, Any],
+        job_id: str | None = None,
+        control_version: int | None = None,
+    ) -> dict[str, Any]:
+        now = _now()
+        with self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            try:
+                existing = db.execute(
+                    "SELECT * FROM commit_events WHERE idempotency_key=?",
+                    (event["idempotency_key"],),
+                ).fetchone()
+                if existing is not None:
+                    if str(existing["payload_sha256"]) != str(event["payload_sha256"]):
+                        raise RuntimeError("相同幂等键对应不同提交载荷")
+                    db.execute("COMMIT")
+                    return dict(existing)
+                run_id = event.get("run_id")
+                if job_id:
+                    job = db.execute(
+                        """
+                        SELECT j.*,r.status AS run_status,r.control_version AS run_control_version
+                        FROM jobs j JOIN automation_runs r ON r.id=j.run_id WHERE j.id=?
+                        """,
+                        (job_id,),
+                    ).fetchone()
+                    if job is None or job["status"] != "completed":
+                        raise RuntimeError(f"Job {job_id} 不接受候选提交")
+                    if control_version is None or (
+                        int(job["control_version"]) != int(control_version)
+                        or int(job["run_control_version"]) != int(control_version)
+                    ):
+                        raise RuntimeError(f"Job {job_id} 控制版本已失效")
+                    if job["run_status"] not in {"running", "paused"}:
+                        raise RuntimeError(f"运行 {job['run_id']} 不接受候选提交")
+                    if job["commit_state"] in {"enqueued", "projected"}:
+                        existing = db.execute(
+                            "SELECT * FROM commit_events WHERE event_id=?",
+                            (job["commit_event_id"],),
+                        ).fetchone()
+                        db.execute("COMMIT")
+                        return dict(existing) if existing else {}
+                    run_id = str(job["run_id"])
+                db.execute(
+                    """
+                    INSERT INTO commit_events(
+                        event_id,idempotency_key,event_type,aggregate_type,aggregate_id,
+                        source_type,source_id,run_id,job_id,control_version,payload_json,
+                        payload_sha256,status,attempts,available_at,occurred_at,enqueued_at
+                    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,'pending',0,?,?,?)
+                    """,
+                    (
+                        event["event_id"], event["idempotency_key"], event["event_type"],
+                        event["aggregate_type"], event["aggregate_id"], event["source_type"],
+                        event["source_id"], run_id, job_id, control_version,
+                        event["payload_json"], event["payload_sha256"], now,
+                        event["occurred_at"], now,
+                    ),
+                )
+                db.execute(
+                    """
+                    INSERT INTO commit_plans(
+                        plan_id,event_id,plan_version,plan_json,plan_sha256,
+                        action_count,created_at
+                    ) VALUES (?,?,?,?,?,?,?)
+                    """,
+                    (
+                        plan["plan_id"], event["event_id"], plan["plan_version"],
+                        plan["plan_json"], plan["plan_sha256"], plan["action_count"], now,
+                    ),
+                )
+                if job_id:
+                    updated = db.execute(
+                        """
+                        UPDATE jobs SET commit_state='enqueued',commit_event_id=?,
+                            commit_enqueued_at=?,commit_error=NULL,updated_at=?
+                        WHERE id=? AND status='completed' AND commit_state='none'
+                        """,
+                        (event["event_id"], now, now, job_id),
+                    )
+                    if updated.rowcount != 1:
+                        raise RuntimeError(f"Job {job_id} 提交状态发生并发变化")
+                    self._event(db, run_id, job_id, "job_commit_enqueued", {
+                        "event_id": event["event_id"],
+                        "idempotency_key": event["idempotency_key"],
+                    })
+                db.execute("COMMIT")
+                return dict(db.execute(
+                    "SELECT * FROM commit_events WHERE event_id=?", (event["event_id"],)
+                ).fetchone())
+            except Exception:
+                db.execute("ROLLBACK")
+                raise
+
+    def recover_commit_leases(self) -> int:
+        now = _now()
+        with self.connect() as db:
+            updated = db.execute(
+                """
+                UPDATE commit_events SET status='pending',lease_owner=NULL,
+                    lease_expires_at=NULL,last_error=coalesce(last_error,'投影租约过期')
+                WHERE status='projecting' AND lease_expires_at IS NOT NULL
+                  AND lease_expires_at<=?
+                """,
+                (now,),
+            )
+            return int(updated.rowcount)
+
+    def claim_next_commit(self, worker_id: str, lease_seconds: int = 30) -> dict[str, Any] | None:
+        now = _now()
+        with self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            row = db.execute(
+                """
+                SELECT e.*,p.plan_id,p.plan_version,p.plan_json,p.plan_sha256,p.action_count
+                FROM commit_events e JOIN commit_plans p ON p.event_id=e.event_id
+                WHERE (
+                    e.status='pending'
+                    OR (e.status='retry_wait' AND e.available_at<=?)
+                    OR (
+                      e.status='projecting'
+                      AND (e.lease_expires_at IS NULL OR e.lease_expires_at<=?)
+                    )
+                )
+                AND NOT EXISTS (
+                    SELECT 1 FROM commit_events earlier
+                    WHERE earlier.aggregate_type=e.aggregate_type
+                      AND earlier.aggregate_id=e.aggregate_id
+                      AND earlier.sequence<e.sequence
+                      AND earlier.status IN ('pending','projecting','retry_wait')
+                )
+                ORDER BY e.sequence LIMIT 1
+                """,
+                (now, now),
+            ).fetchone()
+            if row is None:
+                db.execute("COMMIT")
+                return None
+            deadline = _lease_deadline(lease_seconds)
+            updated = db.execute(
+                """
+                UPDATE commit_events SET status='projecting',attempts=attempts+1,
+                    lease_owner=?,lease_expires_at=?,last_error=NULL
+                WHERE event_id=? AND status IN ('pending','retry_wait','projecting')
+                """,
+                (worker_id, deadline, row["event_id"]),
+            )
+            if updated.rowcount != 1:
+                db.execute("ROLLBACK")
+                return None
+            db.execute("COMMIT")
+            result = dict(row)
+            result["lease_owner"] = worker_id
+            result["lease_expires_at"] = deadline
+            return result
+
+    def commit_projection_rejection_reason(self, event_id: str, worker_id: str) -> str | None:
+        """Return why a claimed event is no longer authorized to mutate project state."""
+
+        with self.connect() as db:
+            row = db.execute(
+                """
+                SELECT e.status,e.lease_owner,e.run_id,e.control_version,
+                    r.status AS run_status,r.control_version AS run_control_version
+                FROM commit_events e
+                LEFT JOIN automation_runs r ON r.id=e.run_id
+                WHERE e.event_id=?
+                """,
+                (event_id,),
+            ).fetchone()
+        if row is None:
+            return "提交事件不存在"
+        if row["status"] != "projecting" or row["lease_owner"] != worker_id:
+            return "投影租约已失效"
+        if not row["run_id"]:
+            return None
+        if row["run_status"] not in {"running", "paused"}:
+            return f"运行状态已变更为 {row['run_status'] or 'missing'}"
+        if (
+            row["control_version"] is None
+            or int(row["control_version"]) != int(row["run_control_version"])
+        ):
+            return "运行控制版本已失效"
+        return None
+
+    def discard_claimed_commit_event(self, event_id: str, worker_id: str, reason: str) -> None:
+        now = _now()
+        with self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            row = db.execute(
+                "SELECT job_id FROM commit_events WHERE event_id=? AND status='projecting' AND lease_owner=?",
+                (event_id, worker_id),
+            ).fetchone()
+            if row is None:
+                db.execute("ROLLBACK")
+                raise RuntimeError(f"提交事件 {event_id} 投影租约已失效")
+            db.execute(
+                """
+                UPDATE commit_events SET status='discarded',last_error=?,
+                    lease_owner=NULL,lease_expires_at=NULL WHERE event_id=?
+                """,
+                (reason[:4000], event_id),
+            )
+            if row["job_id"]:
+                db.execute(
+                    """
+                    UPDATE jobs SET commit_state='rejected',commit_error=?,
+                        committed_at=?,updated_at=? WHERE id=? AND commit_event_id=?
+                    """,
+                    (reason[:4000], now, now, row["job_id"], event_id),
+                )
+            db.execute("COMMIT")
+
+    def projection_receipt_exists(self, event_id: str, action_key: str) -> bool:
+        with self.connect() as db:
+            return db.execute(
+                "SELECT 1 FROM projection_receipts WHERE event_id=? AND action_key=?",
+                (event_id, action_key),
+            ).fetchone() is not None
+
+    def record_projection_receipt(
+        self,
+        *,
+        event_id: str,
+        action_key: str,
+        idempotency_key: str,
+        sink_type: str,
+        sink_path: str,
+        content_sha256: str,
+        byte_count: int,
+    ) -> None:
+        with self.connect() as db:
+            db.execute(
+                """
+                INSERT INTO projection_receipts(
+                    event_id,action_key,idempotency_key,sink_type,sink_path,
+                    content_sha256,byte_count,completed_at
+                ) VALUES (?,?,?,?,?,?,?,?)
+                ON CONFLICT(event_id,action_key) DO NOTHING
+                """,
+                (
+                    event_id, action_key, idempotency_key, sink_type, sink_path,
+                    content_sha256, max(0, int(byte_count)), _now(),
+                ),
+            )
+
+    def complete_commit_event(self, event_id: str, worker_id: str) -> None:
+        now = _now()
+        with self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            event = db.execute(
+                "SELECT sequence,job_id,status,lease_owner FROM commit_events WHERE event_id=?",
+                (event_id,),
+            ).fetchone()
+            if event is None:
+                db.execute("ROLLBACK")
+                raise RuntimeError(f"提交事件不存在: {event_id}")
+            if event["status"] == "committed":
+                db.execute("COMMIT")
+                return
+            if event["status"] != "projecting" or event["lease_owner"] != worker_id:
+                db.execute("ROLLBACK")
+                raise RuntimeError(f"提交事件 {event_id} 投影租约已失效")
+            db.execute(
+                """
+                UPDATE commit_events SET status='committed',projected_at=?,lease_owner=NULL,
+                    lease_expires_at=NULL,last_error=NULL WHERE event_id=?
+                """,
+                (now, event_id),
+            )
+            if event["job_id"]:
+                db.execute(
+                    """
+                    UPDATE jobs SET commit_state='projected',commit_projected_at=?,
+                        commit_error=NULL,updated_at=?
+                    WHERE id=? AND commit_event_id=?
+                    """,
+                    (now, now, event["job_id"], event_id),
+                )
+            db.execute(
+                """
+                UPDATE projector_meta SET last_projected_sequence=max(last_projected_sequence,?),
+                    last_success_at=?,last_error=NULL,updated_at=? WHERE id=1
+                """,
+                (int(event["sequence"]), now, now),
+            )
+            db.execute("COMMIT")
+
+    def fail_commit_event(
+        self,
+        event_id: str,
+        worker_id: str,
+        error: str,
+        *,
+        max_attempts: int = 5,
+    ) -> str:
+        with self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            row = db.execute(
+                "SELECT attempts,lease_owner FROM commit_events WHERE event_id=? AND status='projecting'",
+                (event_id,),
+            ).fetchone()
+            if row is None or row["lease_owner"] != worker_id:
+                db.execute("ROLLBACK")
+                raise RuntimeError(f"提交事件 {event_id} 投影租约已失效")
+            status = "blocked" if int(row["attempts"]) >= max_attempts else "retry_wait"
+            available_at = _lease_deadline(min(300, 2 ** min(int(row["attempts"]), 8)))
+            db.execute(
+                """
+                UPDATE commit_events SET status=?,available_at=?,lease_owner=NULL,
+                    lease_expires_at=NULL,last_error=? WHERE event_id=?
+                """,
+                (status, available_at, str(error)[:4000], event_id),
+            )
+            db.execute(
+                "UPDATE projector_meta SET last_error=?,fatal_error=?,updated_at=? WHERE id=1",
+                (str(error)[:4000], str(error)[:4000] if status == "blocked" else None, _now()),
+            )
+            db.execute("COMMIT")
+            return status
+
+    def commit_event_counts(self) -> dict[str, int]:
+        with self.connect() as db:
+            return {
+                str(row["status"]): int(row["count"])
+                for row in db.execute(
+                    "SELECT status,count(*) AS count FROM commit_events GROUP BY status"
+                ).fetchall()
+            }
+
+    def mark_projection_recovery_complete(self) -> None:
+        now = _now()
+        with self.connect() as db:
+            db.execute(
+                """
+                UPDATE projector_meta
+                SET recovery_completed_at=?,last_success_at=?,
+                    last_error=NULL,updated_at=?
+                WHERE id=1
+                """,
+                (now, now, now),
+            )
+
     def mark_job_committed(self, job_id: str, error: str | None = None) -> None:
         with self.connect() as db:
             db.execute(
-                "UPDATE jobs SET committed_at=?,commit_error=?,updated_at=? WHERE id=?",
-                (_now() if error is None else None, error, _now(), job_id),
+                """
+                UPDATE jobs SET committed_at=?,commit_error=?,
+                    commit_state=CASE WHEN ? IS NULL THEN 'projected' ELSE commit_state END,
+                    updated_at=? WHERE id=?
+                """,
+                (_now() if error is None else None, error, error, _now(), job_id),
             )
             row = db.execute("SELECT run_id FROM jobs WHERE id=?", (job_id,)).fetchone()
             self._event(
@@ -815,10 +2019,23 @@ class ControlDatabase:
         """Permanently consume a malformed candidate instead of pausing forever."""
         now = _now()
         with self.connect() as db:
+            event = db.execute(
+                "SELECT commit_event_id FROM jobs WHERE id=?",
+                (job_id,),
+            ).fetchone()
             db.execute(
-                "UPDATE jobs SET committed_at=?,commit_error=?,updated_at=? WHERE id=?",
+                "UPDATE jobs SET committed_at=?,commit_error=?,commit_state='rejected',updated_at=? WHERE id=?",
                 (now, error, now, job_id),
             )
+            if event and event["commit_event_id"]:
+                db.execute(
+                    """
+                    UPDATE commit_events SET status='discarded',last_error=?,
+                        lease_owner=NULL,lease_expires_at=NULL
+                    WHERE event_id=? AND status!='committed'
+                    """,
+                    (error[:4000], event["commit_event_id"]),
+                )
             row = db.execute("SELECT run_id FROM jobs WHERE id=?", (job_id,)).fetchone()
             self._event(
                 db,
@@ -879,6 +2096,26 @@ class ControlDatabase:
                 WHERE run_id=? AND status='running'
                 """,
                 (reason, now, run_id),
+            )
+            db.execute(
+                """
+                UPDATE commit_events SET status='discarded',last_error=?,
+                    lease_owner=NULL,lease_expires_at=NULL
+                WHERE run_id=? AND status IN ('pending','retry_wait')
+                """,
+                (f"run_stopped:{reason}"[:4000], run_id),
+            )
+            db.execute(
+                """
+                UPDATE jobs SET commit_state='rejected',commit_error=?,
+                    committed_at=?,updated_at=?
+                WHERE run_id=? AND commit_state='enqueued'
+                  AND commit_event_id IN (
+                    SELECT event_id FROM commit_events
+                    WHERE run_id=? AND status='discarded'
+                  )
+                """,
+                (f"run_stopped:{reason}"[:4000], now, now, run_id, run_id),
             )
             db.execute(
                 """

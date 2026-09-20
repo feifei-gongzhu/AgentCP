@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import hashlib
+import threading
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
@@ -7,12 +10,50 @@ from typing import Any
 from uuid import uuid4
 
 
+_GENERATION_CONTEXT = threading.local()
+
+
+@contextmanager
+def deterministic_generation(event_id: str, occurred_at: str):
+    previous = getattr(_GENERATION_CONTEXT, "value", None)
+    _GENERATION_CONTEXT.value = {
+        "event_id": str(event_id),
+        "occurred_at": str(occurred_at),
+        "counters": {},
+    }
+    try:
+        yield
+    finally:
+        _GENERATION_CONTEXT.value = previous
+
+
 def now_iso() -> str:
+    context = getattr(_GENERATION_CONTEXT, "value", None)
+    if context:
+        return str(context["occurred_at"])
     return datetime.now(timezone.utc).isoformat()
 
 
 def new_id(prefix: str) -> str:
+    context = getattr(_GENERATION_CONTEXT, "value", None)
+    if context:
+        counters = context["counters"]
+        ordinal = int(counters.get(prefix, 0))
+        counters[prefix] = ordinal + 1
+        material = f"{context['event_id']}:{prefix}:{ordinal}".encode("utf-8")
+        return f"{prefix}-{hashlib.sha256(material).hexdigest()[:10]}"
     return f"{prefix}-{uuid4().hex[:10]}"
+
+
+VALID_WORKER_KINDS = frozenset({
+    "fact",
+    "intent",
+    "plan_batch",
+    "decision",
+    "negative_evidence",
+    "target_profile_batch",
+    "none",
+})
 
 
 class Phase(str, Enum):
@@ -164,6 +205,71 @@ class Fact:
 
 
 @dataclass
+class TechnologyObservation:
+    """A technology fingerprint bound to one concrete HTTP(S) URL."""
+
+    url: str
+    technology: str
+    category: str
+    confidence: float
+    evidence_type: str
+    evidence_path: str = ""
+    version: str = ""
+    verification_status: str = "suspected"
+    source_fact_id: str | None = None
+    hypothesis_id: str | None = None
+    intent_id: str | None = None
+    proposed_by: str = "worker"
+    id: str = field(default_factory=lambda: new_id("TECH"))
+    observed_at: str = field(default_factory=now_iso)
+    last_verified_at: str = field(default_factory=now_iso)
+
+
+@dataclass
+class TargetProfileRecord:
+    """One model-observed target function, intentionally limited to three outputs."""
+
+    url: str
+    function: str
+    technology_stack: list[str] = field(default_factory=list)
+    proposed_by: str = "profile_mapper"
+    id: str = field(default_factory=lambda: new_id("TP"))
+    observed_at: str = field(default_factory=now_iso)
+
+
+@dataclass
+class TargetAssessment:
+    """A model judgment used to prioritize a profiled target, not a vulnerability fact."""
+
+    url: str
+    profile_class: str
+    target_score: int | None = None
+    risk_tags: list[str] = field(default_factory=list)
+    score_reason: str = ""
+    recommended_tests: list[str] = field(default_factory=list)
+    target_profile_id: str | None = None
+    proposed_by: str = "profile_mapper"
+    id: str = field(default_factory=lambda: new_id("TA"))
+    assessed_at: str = field(default_factory=now_iso)
+
+
+@dataclass
+class RoutineTargetGroup:
+    """A collapsed family of routine display URLs. Routine groups are never scored."""
+
+    label: str
+    hostname: str
+    url_pattern: str
+    member_count: int
+    representative_urls: list[str] = field(default_factory=list)
+    classification_reason: str = ""
+    group_key: str = ""
+    proposed_by: str = "profile_mapper"
+    id: str = field(default_factory=lambda: new_id("RTG"))
+    assessed_at: str = field(default_factory=now_iso)
+
+
+@dataclass
 class EvidenceMetrics:
     """Evidence-derived tri-state metrics used by deterministic validators.
 
@@ -215,6 +321,7 @@ class HumanVerdict:
     final_classification: str
     final_severity: str
     reason: str
+    duplicate_of_finding_id: str | None = None
     reason_codes: list[str] = field(default_factory=list)
     applicable_scope: str = "current_finding"
     reviewed_by: str = "project_owner"
@@ -280,6 +387,7 @@ class Intent:
     scope_refs: list[str] = field(default_factory=list)
     expected_business_impact: str = ""
     hypothesis_id: str | None = None
+    source_fact_ids: list[str] = field(default_factory=list)
     potential_impact: float = 0.0
     boundary_reachability: float = 0.0
     information_gain: float = 0.0
@@ -291,6 +399,10 @@ class Intent:
     priority_score: float = 0.0
     risk_level: str = "low"
     requires_human_confirmation: bool = False
+    target_profile_id: str | None = None
+    target_score: int | None = None
+    risk_tags: list[str] = field(default_factory=list)
+    recommended_tests: list[str] = field(default_factory=list)
     proposed_by: str = "worker"
     claimed_by: str | None = None
     lease_expires_at: str | None = None

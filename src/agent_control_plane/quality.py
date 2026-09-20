@@ -3,11 +3,9 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-from dataclasses import asdict
-from pathlib import Path
 from typing import Any
 
-from .schemas import HumanVerdict, RefutationMemory, now_iso
+from .schemas import HumanVerdict, RefutationMemory
 from .store import ProjectStore
 
 
@@ -17,6 +15,7 @@ REVIEW_ACTIONS = {
     "refuted",
     "reclassified",
     "retest_requested",
+    "same_root",
 }
 FALSE_POSITIVE_ACTIONS = {"refuted", "reclassified"}
 CONFIRMED_ACTIONS = {"accepted", "adjusted"}
@@ -35,6 +34,65 @@ class QualityLedger:
         final_classification: str,
         final_severity: str,
         reason: str,
+        duplicate_of_finding_id: str | None = None,
+        reason_codes: list[str] | None = None,
+        applicable_scope: str = "current_finding",
+        reviewed_by: str = "project_owner",
+    ) -> HumanVerdict:
+        from .commits import CommitCoordinator, CommitPlanner, new_source_id
+
+        source_id = new_source_id("REVIEW")
+        payload = {
+            "finding_id": finding_id,
+            "action": action,
+            "final_classification": final_classification,
+            "final_severity": final_severity,
+            "reason": reason,
+            "duplicate_of_finding_id": duplicate_of_finding_id,
+            "reason_codes": reason_codes,
+            "applicable_scope": applicable_scope,
+            "reviewed_by": reviewed_by,
+        }
+        plan = CommitPlanner().freeze_action(
+            kind="quality_review",
+            payload=payload,
+            source_type="human_review",
+            source_id=source_id,
+            idempotency_key=f"human_review:{source_id}",
+            aggregate_type="human_verdict",
+            aggregate_id=finding_id,
+        )
+        result = CommitCoordinator(store).submit(plan)
+        if not isinstance(result, HumanVerdict):
+            projected = next(
+                (
+                    item
+                    for item in reversed(store.read_jsonl("human_verdicts.jsonl"))
+                    if (item.get("_projection") or {}).get("event_id")
+                    == plan.event.event_id
+                ),
+                None,
+            )
+            if projected:
+                projected = {
+                    key: value for key, value in projected.items()
+                    if key != "_projection"
+                }
+                result = HumanVerdict(**projected)
+        if not isinstance(result, HumanVerdict):
+            raise RuntimeError("人工裁决已提交但无法读取对应投影")
+        return result
+
+    def _review_legacy(
+        self,
+        store: ProjectStore,
+        *,
+        finding_id: str,
+        action: str,
+        final_classification: str,
+        final_severity: str,
+        reason: str,
+        duplicate_of_finding_id: str | None = None,
         reason_codes: list[str] | None = None,
         applicable_scope: str = "current_finding",
         reviewed_by: str = "project_owner",
@@ -44,7 +102,7 @@ class QualityLedger:
             raise ValueError(f"不支持的人工裁决动作: {action}")
         if not reason.strip():
             raise ValueError("人工裁决必须填写理由。")
-        if final_classification not in {"vulnerability", "risk_lead", "attack_surface", "inconclusive"}:
+        if final_classification not in {"vulnerability", "same_root_vulnerability", "risk_lead", "attack_surface", "inconclusive"}:
             raise ValueError(f"不支持的最终分类: {final_classification}")
         if final_severity not in SEVERITY_ORDER:
             raise ValueError(f"不支持的最终等级: {final_severity}")
@@ -58,6 +116,19 @@ class QualityLedger:
             raise ValueError(f"漏洞不存在: {finding_id}")
         if fact.get("classification") != "vulnerability":
             raise ValueError("只有系统漏洞池中的记录可以进行漏洞驳斥。")
+        duplicate_of_finding_id = str(duplicate_of_finding_id or "").strip() or None
+        if action == "same_root":
+            if final_classification != "same_root_vulnerability":
+                raise ValueError("同源漏洞的最终分类必须为 same_root_vulnerability。")
+            if not duplicate_of_finding_id or duplicate_of_finding_id == finding_id:
+                raise ValueError("同源漏洞必须指定另一个主漏洞。")
+            master = next((item for item in facts if item.get("id") == duplicate_of_finding_id), None)
+            if master is None or master.get("classification") != "vulnerability":
+                raise ValueError("指定的同源主漏洞不存在于系统漏洞池。")
+        elif final_classification == "same_root_vulnerability":
+            raise ValueError("只有同源漏洞裁决可以使用 same_root_vulnerability 分类。")
+        elif duplicate_of_finding_id:
+            raise ValueError("只有同源漏洞裁决可以指定主漏洞。")
 
         previous = self.latest_verdicts(store).get(finding_id)
         verdict = HumanVerdict(
@@ -66,6 +137,7 @@ class QualityLedger:
             final_classification=final_classification,
             final_severity=final_severity,
             reason=reason.strip(),
+            duplicate_of_finding_id=duplicate_of_finding_id,
             reason_codes=list(dict.fromkeys(reason_codes or [])),
             applicable_scope=applicable_scope,
             reviewed_by=reviewed_by,
@@ -108,6 +180,7 @@ class QualityLedger:
         reviewed = [item for item in verdicts if item.get("action") != "retest_requested"]
         false_positives = [item for item in reviewed if item.get("action") in FALSE_POSITIVE_ACTIONS]
         confirmed = [item for item in reviewed if item.get("action") in CONFIRMED_ACTIONS]
+        same_root = [item for item in reviewed if item.get("action") == "same_root"]
         adjusted = [item for item in confirmed if item.get("action") == "adjusted"]
         overestimated = 0
         underestimated = 0
@@ -123,7 +196,7 @@ class QualityLedger:
                 underestimated += 1
             else:
                 exact += 1
-        denominator = len(reviewed)
+        denominator = len(confirmed) + len(false_positives)
         confirmed_denominator = len(confirmed)
         return {
             "system_vulnerabilities": sum(
@@ -136,6 +209,11 @@ class QualityLedger:
                 if item.get("classification") == "vulnerability"
             ) - sum(1 for item in verdicts if item.get("action") != "retest_requested")),
             "confirmed": len(confirmed),
+            "same_root": len(same_root),
+            "unique_vulnerabilities": max(0, sum(
+                1 for item in store.read_jsonl("facts.jsonl")
+                if item.get("classification") == "vulnerability"
+            ) - len(same_root)),
             "false_positives": len(false_positives),
             "false_positive_rate": len(false_positives) / denominator if denominator else None,
             "confirmation_rate": len(confirmed) / denominator if denominator else None,
@@ -164,6 +242,7 @@ class QualityLedger:
         reviewed = [item for item in items if item.get("human_action") != "retest_requested"]
         false_positives = [item for item in reviewed if item.get("human_action") in FALSE_POSITIVE_ACTIONS]
         confirmed = [item for item in reviewed if item.get("human_action") in CONFIRMED_ACTIONS]
+        same_root = [item for item in reviewed if item.get("human_action") == "same_root"]
         by_guardian: dict[str, dict[str, int]] = {}
         for item in reviewed:
             version = str((item.get("versions") or {}).get("guardian", "unknown"))
@@ -178,7 +257,7 @@ class QualityLedger:
             }
             for version, values in by_guardian.items()
         }
-        denominator = len(reviewed)
+        denominator = len(confirmed) + len(false_positives)
         patterns: dict[str, dict[str, Any]] = {}
         for item in false_positives:
             codes = sorted(str(code) for code in item.get("reason_codes", []))
@@ -205,6 +284,7 @@ class QualityLedger:
         return {
             "reviewed": denominator,
             "confirmed": len(confirmed),
+            "same_root": len(same_root),
             "false_positives": len(false_positives),
             "false_positive_rate": len(false_positives) / denominator if denominator else None,
             "sample_size": denominator,
@@ -227,6 +307,10 @@ class QualityLedger:
             "human_action": verdict.action,
             "human_classification": verdict.final_classification,
             "human_severity": verdict.final_severity,
+            "duplicate_of_finding_id_hash": (
+                hashlib.sha256(verdict.duplicate_of_finding_id.encode("utf-8")).hexdigest()
+                if verdict.duplicate_of_finding_id else None
+            ),
             "reason_codes": verdict.reason_codes,
             "applicable_scope": verdict.applicable_scope,
             "model_context": verdict.model_context,
@@ -234,6 +318,15 @@ class QualityLedger:
             "created_at": verdict.created_at,
         }
         destination = root / "quality_ledger.jsonl"
+        if destination.exists():
+            for line in destination.read_text(encoding="utf-8").splitlines():
+                if not line.strip():
+                    continue
+                try:
+                    if json.loads(line).get("id") == verdict.id:
+                        return
+                except json.JSONDecodeError:
+                    continue
         with destination.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(record, ensure_ascii=False) + "\n")
             handle.flush()
