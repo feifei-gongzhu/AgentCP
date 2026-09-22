@@ -239,6 +239,7 @@ def record_target_assessments(
     rows: list[dict[str, Any]],
     *,
     proposed_by: str,
+    jev_shadow_by_url: dict[str, Any] | None = None,
 ) -> list[TargetAssessment]:
     """Append AI target-priority judgments without mutating collection facts.
 
@@ -247,6 +248,10 @@ def record_target_assessments(
     the current version is an idempotent replay, while any different content
     (including content equal to a HISTORICAL version, e.g. reverting B back
     to A) records a new version that supersedes the current one.
+
+    ``jev_shadow_by_url`` 是提交前由 JEV System One 旁路产出、随载荷冻结
+    的影子分类，合入记录的 classification_provenance 供旁路对比评测；
+    显式标记 influences_scheduling=False，不参与调度。
     """
 
     profiles = {str(item["url"]): item for item in target_profile(store)}
@@ -288,6 +293,14 @@ def record_target_assessments(
             # 与“当前版本”完全一致才视为重放；内容与历史某版本相同但不同于
             # 当前版本时，是新一次判断（例如 B 恢复为 A），必须记录为新版本。
             continue
+        provenance: dict[str, Any] = {
+            "source": str(proposed_by or "profile_mapper"),
+            "policy_version": ASSESSMENT_POLICY_VERSION,
+        }
+        shadow = (jev_shadow_by_url or {}).get(url)
+        if isinstance(shadow, dict):
+            # 影子数据只随记录留档；键名即声明其非权威性。
+            provenance["jev_shadow"] = shadow
         record = TargetAssessment(
             url=url,
             target_profile_id=str(profiles[url].get("id") or "") or None,
@@ -298,10 +311,7 @@ def record_target_assessments(
             recommended_tests=tests,
             proposed_by=proposed_by,
             supersedes=str(previous.get("id")) if previous else None,
-            classification_provenance={
-                "source": str(proposed_by or "profile_mapper"),
-                "policy_version": ASSESSMENT_POLICY_VERSION,
-            },
+            classification_provenance=provenance,
         )
         store.append_jsonl("target_assessments.jsonl", record)
         recorded.append(record)

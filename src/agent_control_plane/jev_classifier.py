@@ -97,6 +97,33 @@ def build_state_entry(row: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def merge_collection_context(
+    assessments: list[dict[str, Any]],
+    records: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """把同一批次的采集观察（records）按 URL 合并进评估行副本。
+
+    评估行只有分类结论；mrecon 的 observation_kind/status/参数名/技术栈
+    在 records 行里。合并进**副本**后作为 JEV 状态，不修改提交载荷本体。
+    """
+    by_url: dict[str, dict[str, Any]] = {}
+    for row in records:
+        if isinstance(row, dict) and row.get("url"):
+            by_url.setdefault(str(row["url"]), row if isinstance(row, dict) else {})
+    enriched: list[dict[str, Any]] = []
+    for row in assessments:
+        if not isinstance(row, dict):
+            continue
+        merged = dict(row)
+        source = by_url.get(str(row.get("url") or ""))
+        if source:
+            for key in ("observation_kind", "status", "parameter_names", "technology_stack"):
+                if key in source and key not in merged:
+                    merged[key] = source[key]
+        enriched.append(merged)
+    return enriched
+
+
 def build_questions(index: int) -> dict[str, dict[str, Any]]:
     """一批次中第 ``index`` 个目标的原子问题集（字面化、单判断）。"""
     prefix = f"t{index}_"

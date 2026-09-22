@@ -1719,6 +1719,53 @@ class AutomationEngine:
                     claim_version=direction_version,
                 )
 
+    def _attach_jev_shadow(
+        self,
+        run_id: str,
+        job: dict[str, Any],
+        payload: dict[str, Any],
+    ) -> None:
+        """JEV 影子分类：在提交计划冻结前完成模型调用并写入载荷。
+
+        时序保证：此处是 commit 路径（apply_worker_output 冻结之前），
+        投影重放只读取冻结后的 ``jev_shadow`` 字典，绝不重新调用模型。
+        失败只记事件、载荷保持无 jev 键，绝不阻断候选提交。
+        """
+        if payload.get("kind") != "target_profile_batch":
+            return
+        assessments = payload.get("assessments") or []
+        if not isinstance(assessments, list) or not assessments:
+            return
+        from .jev_classifier import classify_targets, merge_collection_context
+
+        try:
+            shadow_rows = merge_collection_context(
+                assessments, list(payload.get("records") or []),
+            )
+            classification = classify_targets(shadow_rows)
+        except Exception as exc:
+            self.db.add_event(run_id, job["id"], "jev_shadow_failed", {
+                "member": job.get("member_name"),
+                "error": str(exc)[:500],
+            })
+            return
+        if classification is None:
+            return  # JEV 未配置：零足迹
+        shadow_by_url: dict[str, Any] = {}
+        for url in sorted(classification.answers_by_url):
+            provenance = classification.provenance_for(url)
+            if provenance:
+                shadow_by_url[url] = provenance
+        if shadow_by_url:
+            payload["jev_shadow"] = shadow_by_url
+        if classification.skipped:
+            payload["jev_shadow_skipped"] = classification.skipped
+        self.db.add_event(run_id, job["id"], "jev_shadow_recorded", {
+            "member": job.get("member_name"),
+            "targets": len(shadow_by_url),
+            "skipped": classification.skipped,
+        })
+
     @staticmethod
     def _bound_direction_claim_version(
         database: ControlDatabase,
@@ -1985,6 +2032,7 @@ class AutomationEngine:
                             "rejected": rejected[:100],
                             "assignment_count": len(profile_assignments),
                         })
+                self._attach_jev_shadow(run_id, job, payload)
                 message = apply_worker_output(
                     self.store,
                     payload,

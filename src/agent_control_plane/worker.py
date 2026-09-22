@@ -294,8 +294,12 @@ def _apply_worker_output_legacy(store: ProjectStore, payload: dict[str, Any]) ->
         assessment_rows = payload.get("assessments") or []
         if not isinstance(assessment_rows, list):
             raise WorkerError("目标画像 assessments 必须是数组。")
+        # JEV 影子数据由 commit 路径在冻结前调用模型并写入载荷；此处（含
+        # 投影重放）只读取字典，绝不触发新的模型调用。
+        jev_shadow = payload.get("jev_shadow")
         assessments = record_target_assessments(
             store, assessment_rows, proposed_by=proposed_by,
+            jev_shadow_by_url=jev_shadow if isinstance(jev_shadow, dict) else None,
         )
         routine_rows = payload.get("routine_groups") or []
         if not isinstance(routine_rows, list):
