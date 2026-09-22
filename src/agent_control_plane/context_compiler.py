@@ -97,6 +97,8 @@ def compile_worker_context(
     identity = _task_identity(task)
     selected_ids: dict[str, list[str]] = {}
     omitted: dict[str, int] = {}
+    mrecon_assigned: int | None = None
+    mrecon_unassessed: int | None = None
 
     context: dict[str, Any] = {
         "state": _compact_state(state),
@@ -137,6 +139,30 @@ def compile_worker_context(
             target_profile(store),
             task,
         )
+        # 待评估记录是本轮的实际工作，先于既有画像/技术画像占用预算；
+        # 未评估 URL 排在最前，避免每轮都重复处理已评估的头部记录而
+        # 永远截掉尾部（分片自愈）。覆盖情况写入 manifest 供审计。
+        # 注意“已评估”来自评估记录（target_assessments），不是采集记录。
+        assessed_urls = {
+            str(item.get("url") or "").casefold()
+            for item in _profile_rows_for_task(target_assessments(store), task)
+        }
+        mrecon_rows = _unassessed_first(
+            _profile_rows_for_task(compact_mrecon_rows(store), task),
+            assessed_urls,
+        )
+        mrecon_assigned = len(mrecon_rows)
+        mrecon_unassessed = sum(
+            1
+            for row in mrecon_rows
+            if str(row.get("url") or "").casefold() not in assessed_urls
+        )
+        add_records(
+            "mrecon_observations",
+            mrecon_rows,
+            limit=120,
+            newest_first=False,
+        )
         context["existing_target_profile"] = _fit_profile_records(
             context,
             "existing_target_profile",
@@ -149,12 +175,6 @@ def compile_worker_context(
         )
         context["technology_asset_profile"] = _fit_value(
             context, "technology_asset_profile", technology_profile(store), budget,
-        )
-        add_records(
-            "mrecon_observations",
-            _profile_rows_for_task(compact_mrecon_rows(store), task),
-            limit=120,
-            newest_first=False,
         )
         add_records("recent_facts", facts, limit=6)
         add_records("recent_negative_evidence", negative, limit=4)
@@ -252,6 +272,14 @@ def compile_worker_context(
         "owner_directive_ids": context["owner_directive_ids"],
         "retry_delta_chars": len(retry_delta),
     }
+    if mrecon_assigned is not None:
+        # 覆盖率在预算裁剪之后计算，确保 included/omitted 与最终上下文一致。
+        manifest["mrecon_coverage"] = {
+            "assigned_rows": mrecon_assigned,
+            "unassessed_rows": mrecon_unassessed or 0,
+            "included_rows": len(context.get("mrecon_observations") or []),
+            "omitted_rows": omitted.get("mrecon_observations", 0),
+        }
     return CompiledWorkerContext(context=context, manifest=manifest)
 
 
@@ -417,6 +445,22 @@ def _profile_rows_for_task(
     ]
 
 
+def _unassessed_first(
+    rows: list[dict[str, Any]],
+    assessed_urls: set[str],
+) -> list[dict[str, Any]]:
+    """Stable partition: URLs without an existing assessment come first.
+
+    Keeps URL ordering deterministic inside each partition, so repeated passes
+    make forward progress instead of always re-including the same head rows.
+    """
+    def sort_key(row: dict[str, Any]) -> tuple[int, str]:
+        url = str(row.get("url") or "").casefold()
+        return (0 if url not in assessed_urls else 1, url)
+
+    return sorted(rows, key=sort_key)
+
+
 def _fit_profile_records(
     context: dict[str, Any],
     key: str,
@@ -454,7 +498,6 @@ def _enforce_budget(
         "method_pack",
         "routine_network_summary",
         "technology_asset_profile",
-        "mrecon_observations",
         "retrieved_lessons",
         "recent_plan_batches",
         "recent_decisions",
@@ -473,6 +516,9 @@ def _enforce_budget(
         "related_facts",
         "related_negative_evidence",
         "open_waf_branches",
+        # mrecon observations are the profile task's core work input; prune
+        # them only after every auxiliary section has already given way.
+        "mrecon_observations",
     )
     for key in prune_order:
         if _json_chars(context) <= budget:
@@ -480,7 +526,9 @@ def _enforce_budget(
         value = context.get(key)
         if isinstance(value, list):
             while value and _json_chars(context) > budget:
-                removed = value.pop(0)
+                # 常规列表最旧在前，从头部裁剪；mrecon 观察是“最重要在前”
+                # （未评估优先），从尾部裁剪以保住头部待评估记录。
+                removed = value.pop() if key == "mrecon_observations" else value.pop(0)
                 omitted[key] = omitted.get(key, 0) + 1
                 removed_id = str(removed.get("id")) if isinstance(removed, dict) and removed.get("id") else None
                 if removed_id and key in selected_ids:

@@ -36,15 +36,17 @@ from .target_profile import (
     mark_incremental_profile_started,
     pending_baseline_profile_targets,
     pending_incremental_profile_urls,
+    pending_needs_review_urls,
+    mark_needs_review_queued,
     queue_incremental_profile_urls,
     seed_priority_target_directions,
+    DIRECTION_BACKLOG_HIGH_WATERMARK,
 )
 from .asset_inventory import AssetInventory
 from .projector import PROJECTOR_MANAGER
 
 
 LOW_VALUE_CATEGORIES = {"other", "asset", "electron_config", "supply_chain"}
-DIRECTION_BACKLOG_HIGH_WATERMARK = 12
 NON_RETRYABLE_MODEL_ERRORS = {
     "no available channel",
     "invalid api key",
@@ -1176,19 +1178,42 @@ class AutomationEngine:
             return False
         legacy_pending = pending_incremental_profile_urls(self.store, run_id=run["id"])
         asset_pending = AssetInventory(self.store).pending_profile_seeds()
-        pending = list(dict.fromkeys([*legacy_pending, *asset_pending]))
+        # needs_review 复核不新增常驻 Agent：并入既有增量画像通道。
+        # 只并入能解析到画像任务分派的 URL；每 Run 至多一批
+        # （needs_review_attempted_run_id 限流）；达到复核上限的 URL 进入
+        # exhausted 终态。复核次数只对实际进入调度分片的 URL 计数，
+        # 超出分片容量或调度失败都不消耗次数。
+        review_pending = pending_needs_review_urls(self.store, exclude_run_id=str(run["id"]))
+        resolvable_review = []
+        if review_pending:
+            inventory = AssetInventory(self.store)
+            resolvable_review = [
+                url for url in review_pending
+                if inventory.profile_assignments_for_seeds([url])
+            ]
+        pending = list(dict.fromkeys([*legacy_pending, *asset_pending, *resolvable_review]))
         if not pending:
             return False
-        mark_incremental_profile_started(self.store, run["id"])
-        seed_urls = pending
-        self._schedule_profile_job(
+        seed_urls = pending[:100]
+        scheduled = self._schedule_profile_job(
             run["id"],
             member,
             mode="incremental",
-            seed_urls=seed_urls[:100],
+            seed_urls=seed_urls,
         )
+        if not scheduled:
+            # 没有可调度的分派时不标记“本 Run 已尝试”，也不消耗复核次数。
+            return False
+        scheduled_seeds = set(seed_urls)
+        queued_review = mark_needs_review_queued(
+            self.store,
+            [url for url in resolvable_review if url in scheduled_seeds],
+            run_id=str(run["id"]),
+        )
+        mark_incremental_profile_started(self.store, run["id"])
         self.db.add_event(run["id"], None, "profile_incremental_scheduled", {
-            "seed_urls": seed_urls[:100],
+            "seed_urls": seed_urls,
+            "needs_review_recheck_urls": queued_review,
         })
         return True
 
@@ -1633,14 +1658,19 @@ class AutomationEngine:
                     policy_cooldown = (
                         datetime.now(timezone.utc) + timedelta(hours=6)
                     ).isoformat()
-                    self.db.finish_direction(
-                        direction["id"], direction["claimed_by"],
-                        outcome="cancelled" if status == "cancelled" else "released",
-                        reason=(
-                            f"policy_blocked_until:{policy_cooldown}"
-                            if policy_restricted else visible_error[:1000]
-                        ),
+                    direction_authorized, direction_version = (
+                        self._bound_direction_claim_version(self.db, direction)
                     )
+                    if direction_authorized:
+                        self.db.finish_direction(
+                            direction["id"], direction["claimed_by"],
+                            outcome="cancelled" if status == "cancelled" else "released",
+                            reason=(
+                                f"policy_blocked_until:{policy_cooldown}"
+                                if policy_restricted else visible_error[:1000]
+                            ),
+                            claim_version=direction_version,
+                        )
                 outputs.append(
                     f"[{job['member_name']}] "
                     f"{'模型策略受限' if policy_restricted else '执行失败'}，"
@@ -1679,9 +1709,34 @@ class AutomationEngine:
                     "visibility": "scheduler_heartbeat_only",
                 })
             if direction:
-                self.db.heartbeat_direction(
-                    direction["id"], direction["claimed_by"], lease_seconds=30
+                direction_authorized, direction_version = (
+                    self._bound_direction_claim_version(self.db, direction)
                 )
+                if not direction_authorized:
+                    return
+                self.db.heartbeat_direction(
+                    direction["id"], direction["claimed_by"], lease_seconds=30,
+                    claim_version=direction_version,
+                )
+
+    @staticmethod
+    def _bound_direction_claim_version(
+        database: ControlDatabase,
+        bound: dict[str, Any],
+    ) -> tuple[bool, int]:
+        """Resolve the claim version a job may use against its bound direction.
+
+        升级前持久化的任务没有 claim_version：迁移前的认领固定对应版本 0。
+        始终以 0 作为预期版本交给数据库做**原子**条件校验——方向此后被
+        新代码认领（版本 >= 1）时条件写回自动失败。不读取当前状态做
+        预判断（读取与写回之间存在状态变化窗口），也不返回 None 放弃
+        校验，更不允许用当前版本号"补齐"旧任务。
+        """
+        del database  # 不做任何读侧预判断，原子性完全由 SQL 条件保证
+        bound_version = bound.get("claim_version")
+        if bound_version is not None:
+            return True, int(bound_version)
+        return True, 0
 
     def _finish_bound_direction(
         self,
@@ -1699,11 +1754,17 @@ class AutomationEngine:
             return
         if payload is not None:
             outcome, reason = _direction_outcome(payload)
+        # 使用任务绑定时的认领者与认领版本：方向在执行期间被否决+恢复并
+        # 重新认领后（同 run:member 名称会复用），旧结果不得终结新认领。
+        authorized, claim_version = self._bound_direction_claim_version(self.db, bound)
+        if not authorized:
+            return
         self.db.finish_direction(
             direction_id,
-            str(current["claimed_by"]),
+            str(bound.get("claimed_by") or current["claimed_by"]),
             outcome=outcome or "released",
             reason=reason,
+            claim_version=claim_version,
         )
 
     def _commit_candidates(

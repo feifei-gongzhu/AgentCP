@@ -29,7 +29,8 @@ def test_parallel_batch_commits_then_waits_for_approval(tmp_path: Path, monkeypa
     assert "reason done" in output
     assert "metacog done" in output
     assert "reviewer done" in output
-    assert store.load_state().gate_status == "awaiting_approval"
+    # V3.3 显式门禁：并发批次完成不再默认暂停等待批准（人工复核异步进行）。
+    assert store.load_state().gate_status == "running"
     assert len(store.read_jsonl("team_runs.jsonl")) == 1
 
 

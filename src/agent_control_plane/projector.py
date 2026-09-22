@@ -160,6 +160,20 @@ class Projector:
                             }
                             self.store.append_jsonl("decision_log.jsonl", decision)
                             message = decision
+                elif kind == "record_direction_intent":
+                    occurred_at = str(row["occurred_at"])
+                    with deterministic_generation(event_id, occurred_at):
+                        with self.store.projection_context(event_id, self.fault_hook):
+                            # 调度器注册的方向（含 Method Pack 假设）：SQLite 为
+                            # 权威，intents.jsonl / hypotheses.jsonl 是投影；写失败
+                            # 时事件保持 pending，由本机制幂等补写。
+                            payload = dict(action.get("payload") or {})
+                            hypothesis = payload.get("hypothesis")
+                            if isinstance(hypothesis, dict):
+                                self.store.append_jsonl("hypotheses.jsonl", hypothesis)
+                            intent = payload.get("intent")
+                            if isinstance(intent, dict):
+                                self.store.append_jsonl("intents.jsonl", intent)
                 elif kind == "scheduler_decision":
                     from .schemas import ProjectState
 
@@ -211,6 +225,36 @@ class Projector:
             projected += 1
         self.database.mark_projection_recovery_complete()
         return projected
+
+
+def drain_direction_intent_projection(
+    store: ProjectStore,
+    database: Any,
+    event_id: str | None,
+) -> None:
+    """Synchronously project a just-registered direction; defer on failure.
+
+    调度器注册方向后调用。正常路径同步落盘 intents/hypotheses 投影；
+    失败时不阻断播种——事件保持 pending，由 ProjectorManager 后台循环
+    或恢复入口按幂等回执补写。异常分类：磁盘类 ``OSError``（含
+    TimeoutError）静默延迟；其余异常额外记录排障事件，便于区分
+    环境故障与程序缺陷。
+    """
+    if not event_id:
+        return
+    try:
+        Projector(store, database).drain_until(event_id, timeout=10.0)
+    except OSError:
+        return
+    except Exception as exc:
+        try:
+            database.add_event(None, None, "direction_intent_projection_deferred", {
+                "event_id": event_id,
+                "error": str(exc)[:500],
+            })
+        except Exception:
+            pass
+        return
 
 
 class ProjectorManager:

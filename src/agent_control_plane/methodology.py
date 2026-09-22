@@ -5,7 +5,7 @@ import json
 from dataclasses import asdict, dataclass
 from typing import Any
 
-from .database import ControlDatabase
+from .database import ControlDatabase, direction_intent_projection_event_id
 from .schemas import AttackHypothesis, Fact, Intent
 from .store import CHECKLIST_FILE, ProjectStore
 
@@ -162,21 +162,45 @@ def seed_methodology_portfolio(
 
 
 def seed_portfolio(store: ProjectStore, pack: MethodPack, database: ControlDatabase | None = None) -> int:
+    """Seed one baseline direction per Method Pack dimension.
+
+    SQLite 为权威：方向注册与其 intents/hypotheses 投影事件在同一事务内
+    落库，文件写入由既有 Projector 幂等补写——文件写失败不会静默丢失攻击
+    面维度。``_hypothesis_fingerprint`` 的确定性 ID 使崩溃/写失败后的重播
+    种由数据库去重，而不是依赖可能缺失的文件内容；hypotheses.jsonl 的
+    文件级去重仅作为旧数据的兼容预检保留。
+    """
+    from .projector import drain_direction_intent_projection
+
     target = store.read_json("target.json")
     targets = [str(item).strip() for item in target.get("targets", []) if str(item).strip()]
     target_path = str(target.get("target_path") or "").strip()
     primary = targets[0] if targets else target_path
     if not primary:
         return 0
+    if database is None:
+        database = ControlDatabase(store.path / "control_plane.db")
     existing = {
         _hypothesis_fingerprint(item)
         for item in store.read_jsonl("hypotheses.jsonl")
     }
     created = 0
+    last_event_id: str | None = None
     for dimension in pack.dimensions:
+        statement = f"{primary} 在「{dimension.name}」维度可能存在尚未验证的安全边界"
+        fingerprint = _hypothesis_fingerprint({
+            "statement": statement,
+            "target": primary,
+            "dimension": dimension.id,
+        })
+        if fingerprint in existing:
+            continue
         hypothesis = AttackHypothesis(
+            # 确定性 ID：同一维度+目标在重播种时生成相同方向指纹，
+            # 由 SQLite 去重兜底（文件可能因写失败而缺失）。
+            id=f"AH-{fingerprint[:10]}",
             title=f"{dimension.name}：{primary}",
-            statement=f"{primary} 在「{dimension.name}」维度可能存在尚未验证的安全边界",
+            statement=statement,
             target=primary,
             dimension=dimension.id,
             validation_plan={
@@ -195,18 +219,23 @@ def seed_portfolio(store: ProjectStore, pack: MethodPack, database: ControlDatab
             action_safety_risk="low",
             source="method_pack_seed",
         )
-        fingerprint = _hypothesis_fingerprint(asdict(hypothesis))
-        if fingerprint in existing:
-            continue
         intent = intent_from_hypothesis(hypothesis)
         hypothesis.intent_ids.append(intent.id)
         hypothesis.status = "selected"
-        store.append_jsonl("hypotheses.jsonl", hypothesis)
-        store.append_jsonl("intents.jsonl", intent)
-        if database is not None:
-            database.register_direction(asdict(intent))
+        direction_id, inserted = database.register_direction(
+            asdict(intent),
+            record_intent_projection=True,
+            hypothesis_payload=asdict(hypothesis),
+        )
         existing.add(fingerprint)
+        if not inserted:
+            continue  # 数据库权威去重：崩溃恢复后的重播种不产生重复方向
+        last_event_id = direction_intent_projection_event_id(str(direction_id))
         created += 1
+    if last_event_id:
+        # 末位事件之前的投影按序完成；失败时全部事件保持 pending，
+        # 由 ProjectorManager/恢复入口补写，不阻断播种。
+        drain_direction_intent_projection(store, database, last_event_id)
     return created
 
 
@@ -306,13 +335,24 @@ def derive_bounded_follow_up(
         for item in store.read_jsonl("hypotheses.jsonl")
     ):
         return None
+    if database is None:
+        database = ControlDatabase(store.path / "control_plane.db")
+    # 确定性 ID + DB 先行：与 seed_portfolio 相同的恢复语义。
+    hypothesis.id = f"AH-{fingerprint[:10]}"
     intent = intent_from_hypothesis(hypothesis)
     hypothesis.intent_ids.append(intent.id)
     hypothesis.status = "selected"
-    store.append_jsonl("hypotheses.jsonl", hypothesis)
-    store.append_jsonl("intents.jsonl", intent)
-    if database is not None:
-        database.register_direction(asdict(intent))
+    direction_id, inserted = database.register_direction(
+        asdict(intent),
+        record_intent_projection=True,
+        hypothesis_payload=asdict(hypothesis),
+    )
+    if inserted:
+        from .projector import drain_direction_intent_projection
+
+        drain_direction_intent_projection(
+            store, database, direction_intent_projection_event_id(str(direction_id)),
+        )
     return hypothesis
 
 

@@ -137,7 +137,7 @@ def _worksheet_xml(rows: list[dict]) -> tuple[str, str | None]:
             _inline_cell(f"G{index}", confidences, 0),
             _inline_cell(f"H{index}", evidence, 0),
             _inline_cell(f"I{index}", "" if item.get("target_score") is None else item.get("target_score"), 0),
-            _inline_cell(f"J{index}", item.get("profile_class") or "needs_review", 0),
+            _inline_cell(f"J{index}", item.get("profile_class") or "尚未评估", 0),
             _inline_cell(f"K{index}", "; ".join(item.get("risk_tags") or []), 0),
             _inline_cell(f"L{index}", item.get("score_reason") or "", 0),
             _inline_cell(f"M{index}", "; ".join(item.get("recommended_tests") or []), 0),

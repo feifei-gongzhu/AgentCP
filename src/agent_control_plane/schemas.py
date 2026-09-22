@@ -239,7 +239,11 @@ class TargetProfileRecord:
 
 @dataclass
 class TargetAssessment:
-    """A model judgment used to prioritize a profiled target, not a vulnerability fact."""
+    """A model judgment used to prioritize a profiled target, not a vulnerability fact.
+
+    ``target_score`` is a scheduling/test priority (0-100). It is not a
+    severity and must never be mapped into ``risk_level`` semantics.
+    """
 
     url: str
     profile_class: str
@@ -249,6 +253,13 @@ class TargetAssessment:
     recommended_tests: list[str] = field(default_factory=list)
     target_profile_id: str | None = None
     proposed_by: str = "profile_mapper"
+    # Version link to the assessment this record replaces (same URL). History
+    # stays append-only; readers always resolve the latest record per URL.
+    supersedes: str | None = None
+    # Provenance of WHO classified and under which policy. Keeps the boundary
+    # for a future shadow classifier (e.g. typed-question model) without
+    # assuming anything about its accuracy.
+    classification_provenance: dict[str, Any] = field(default_factory=dict)
     id: str = field(default_factory=lambda: new_id("TA"))
     assessed_at: str = field(default_factory=now_iso)
 

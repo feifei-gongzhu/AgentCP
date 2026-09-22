@@ -323,12 +323,22 @@ def test_compose_spec_mounts_workspace_but_never_persists_api_key(
     assert "do-not-write-me" not in raw
     agent = document["agents"]["executor-primary"]
     assert agent["provider"] == "claude"
-    assert agent["volumes"][0] == {
-        "type": "bind",
-        "source": str(project.resolve()),
-        "target": "/agentcp-project",
-        "read_only": False,
-    }
+    # V3.3：项目挂载拆分为 evidence 与持久工作区两个独立 bind（不再整目录
+    # 挂载 /agentcp-project）；workspace-write 模式两者均可写。
+    assert agent["volumes"] == [
+        {
+            "type": "bind",
+            "source": str((project / "evidence").resolve()),
+            "target": "/agentcp-project/evidence",
+            "read_only": False,
+        },
+        {
+            "type": "bind",
+            "source": str((project / ".agentcp-work").resolve()),
+            "target": "/agentcp-project/.agentcp-work",
+            "read_only": False,
+        },
+    ]
     assert agent["image"] == "agent-compose-guest:latest"
 
 

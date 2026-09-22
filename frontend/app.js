@@ -894,11 +894,21 @@ function renderDirectionDetail() {
   } else {
     nodes.push(detailSection("论证结果", el("p", "", "该方向尚未产生已验证漏洞。")));
   }
-  const dismiss = el("button", `button small ${status.humanDismissed ? "ghost" : "danger"} direction-dismiss`, status.humanDismissed ? "已人工否决" : "删除方向");
-  dismiss.type = "button";
-  dismiss.dataset.directionId = intent.direction_id;
-  dismiss.disabled = status.humanDismissed;
-  nodes.push(el("div", "detail-section", dismiss));
+  const action = el("div", "detail-section");
+  if (status.humanDismissed) {
+    // 人工否决是终态：模型重评不能撤销；只有这里的显式人工恢复可以。
+    const restore = el("button", "button small secondary direction-restore", "恢复该方向");
+    restore.type = "button";
+    restore.dataset.directionId = intent.direction_id;
+    restore.title = "重新评分不会自动恢复该方向；确认后它重新开放调度，画像方向将按最新评估对齐";
+    action.append(restore);
+  } else {
+    const dismiss = el("button", "button small danger direction-dismiss", "删除方向");
+    dismiss.type = "button";
+    dismiss.dataset.directionId = intent.direction_id;
+    action.append(dismiss);
+  }
+  nodes.push(action);
   panel.replaceChildren(...nodes);
 }
 function renderSurfaceList() {
@@ -1982,15 +1992,24 @@ $("hintButton").addEventListener("click", async () => {
   }, () => "最高优先级指令已写入；旧上下文结果将被拦截");
   $("hintContent").value = "";
 });
-// 方向人工否决：必须填写理由
+// 方向人工否决/恢复：必须填写理由
 $("directionDetail").addEventListener("click", async event => {
-  const button = event.target.closest(".direction-dismiss");
-  if (!button || button.disabled) return;
-  const reason = window.prompt("请输入删除这个方向的理由。该方向会立即停止调度，但审计记录仍会保留：");
-  if (reason === null) return;
-  if (!reason.trim()) return showToast("必须填写删除理由", true);
-  if (!window.confirm("确认人工否决并停止这个方向？")) return;
-  await post("/api/directions/dismiss", { direction_id: button.dataset.directionId, reason: reason.trim() }, () => "方向已人工否决，不会再参与调度");
+  const dismissButton = event.target.closest(".direction-dismiss");
+  if (dismissButton && !dismissButton.disabled) {
+    const reason = window.prompt("请输入删除这个方向的理由。该方向会立即停止调度，但审计记录仍会保留：");
+    if (reason === null) return;
+    if (!reason.trim()) return showToast("必须填写删除理由", true);
+    if (!window.confirm("确认人工否决并停止这个方向？")) return;
+    await post("/api/directions/dismiss", { direction_id: dismissButton.dataset.directionId, reason: reason.trim() }, () => "方向已人工否决，不会再参与调度");
+    return;
+  }
+  const restoreButton = event.target.closest(".direction-restore");
+  if (!restoreButton) return;
+  const restoreReason = window.prompt("请输入恢复这个方向的理由。恢复后它重新开放调度并可被认领；模型重评本身不能撤销人工否决：");
+  if (restoreReason === null) return;
+  if (!restoreReason.trim()) return showToast("必须填写恢复理由", true);
+  if (!window.confirm("确认恢复该方向并允许重新排队？")) return;
+  await post("/api/directions/restore", { direction_id: restoreButton.dataset.directionId, reason: restoreReason.trim() }, () => "方向已恢复，重新开放调度");
 });
 // 人工漏洞裁决：必须填写理由，same_root 必须选主漏洞
 $("reviewAction").addEventListener("change", event => {

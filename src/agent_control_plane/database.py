@@ -427,6 +427,11 @@ _ASSET_SCHEMA_REQUIRED_UNIQUE_KEYS = {
 }
 
 
+def direction_intent_projection_event_id(direction_id: str) -> str:
+    """Deterministic projection-event id for a scheduler-registered direction."""
+    return f"EV-DIRINT-{hashlib.sha256(str(direction_id).encode('utf-8')).hexdigest()[:20]}"
+
+
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -557,6 +562,10 @@ class ControlDatabase:
                 self._ensure_column(db, "jobs", "commit_enqueued_at", "TEXT")
                 self._ensure_column(db, "jobs", "commit_projected_at", "TEXT")
                 self._ensure_column(db, "directions", "terminal_reason", "TEXT")
+                # 方向认领版本：每次认领自增。心跳/完成回写校验该版本，
+                # 防止恢复后同认领者名称（run_id:member 跨波次复用）的
+                # 旧 Worker 回调取消或影响新认领。
+                self._ensure_column(db, "directions", "claim_version", "INTEGER NOT NULL DEFAULT 0")
                 # Always replay idempotent DDL. This safely repairs missing tables and
                 # ordinary indexes even when an earlier local draft already stamped
                 # the database as V4.
@@ -1039,7 +1048,25 @@ class ControlDatabase:
             db.execute("COMMIT")
         return job_id
 
-    def register_direction(self, intent: dict[str, Any]) -> tuple[str, bool]:
+    def register_direction(
+        self,
+        intent: dict[str, Any],
+        *,
+        record_intent_projection: bool = False,
+        initial_status: str = "open",
+        initial_terminal_reason: str | None = None,
+        hypothesis_payload: dict[str, Any] | None = None,
+    ) -> tuple[str, bool]:
+        """Register a direction; optionally enqueue its intents.jsonl projection.
+
+        ``initial_status='released'`` + ``initial_terminal_reason`` 用于继承
+        同一测试未到期的策略冷却：新版本以冷却态注册，不可被立即认领。
+        ``record_intent_projection`` 在同一事务内写入待投影事件，交由既有
+        Projector 幂等补写 intents.jsonl——SQLite 提交成功而文件写入失败时
+        记录不会丢失。
+        """
+        if initial_status not in {"open", "released"}:
+            raise ValueError(f"非法初始方向状态: {initial_status}")
         identity = "\x1f".join(
             str(intent.get(key, "")).strip().casefold()
             for key in ("verb", "target", "hypothesis", "success_criteria", "chain_id", "sequence")
@@ -1056,14 +1083,82 @@ class ControlDatabase:
                 return str(existing["id"]), False
             db.execute(
                 """
-                INSERT INTO directions(id,fingerprint,intent_json,status,created_at,updated_at)
-                VALUES (?,?,?,'open',?,?)
+                INSERT INTO directions(id,fingerprint,intent_json,status,terminal_reason,created_at,updated_at)
+                VALUES (?,?,?,?,?,?,?)
                 """,
-                (direction_id, fingerprint, json.dumps(intent, ensure_ascii=False), now, now),
+                (
+                    direction_id, fingerprint, json.dumps(intent, ensure_ascii=False),
+                    initial_status, initial_terminal_reason, now, now,
+                ),
             )
+            if record_intent_projection:
+                self._insert_direction_intent_projection(
+                    db, direction_id, intent, hypothesis_payload=hypothesis_payload,
+                )
             self._event(db, None, None, "direction_registered", {"direction_id": direction_id})
             db.execute("COMMIT")
         return direction_id, True
+
+    @classmethod
+    def _insert_direction_intent_projection(
+        cls,
+        db: sqlite3.Connection,
+        direction_id: str,
+        intent_payload: dict[str, Any],
+        hypothesis_payload: dict[str, Any] | None = None,
+    ) -> str:
+        """Pending projection event for a scheduler-registered direction.
+
+        必须与方向 INSERT 处于同一事务：SQLite 是权威，intents.jsonl/
+        hypotheses.jsonl 只是投影；文件写入失败时事件保持 pending，由既有
+        Projector（后台循环或恢复入口）以幂等回执补写，不依赖调用方紧跟着
+        写文件。载荷结构：{"intent": ..., "hypothesis": ... | null}。
+        """
+        event_id = direction_intent_projection_event_id(direction_id)
+        now = _now()
+        action = {
+            "action_key": "record_direction_intent:0",
+            "kind": "record_direction_intent",
+            "payload": {
+                "intent": intent_payload,
+                "hypothesis": hypothesis_payload,
+            },
+        }
+        plan_json = cls._canonical_json({"version": 1, "event_id": event_id, "actions": [action]})
+        payload_json = cls._canonical_json({
+            "kind": "record_direction_intent",
+            "payload": action["payload"],
+        })
+        db.execute(
+            """
+            INSERT INTO commit_events(
+                event_id,idempotency_key,event_type,aggregate_type,aggregate_id,
+                source_type,source_id,run_id,job_id,control_version,payload_json,
+                payload_sha256,status,attempts,available_at,occurred_at,enqueued_at
+            ) VALUES (?,?,?,?,?,?,?,NULL,NULL,NULL,?,?,'pending',0,?,?,?)
+            ON CONFLICT(idempotency_key) DO NOTHING
+            """,
+            (
+                event_id, f"direction_intent:{direction_id}", "record_direction_intent",
+                "direction_intent", direction_id, "profile_scheduler", direction_id,
+                payload_json, hashlib.sha256(payload_json.encode("utf-8")).hexdigest(),
+                now, now, now,
+            ),
+        )
+        db.execute(
+            """
+            INSERT INTO commit_plans(
+                plan_id,event_id,plan_version,plan_json,plan_sha256,action_count,created_at
+            ) VALUES (?,?,?,?,?,1,?)
+            ON CONFLICT(event_id) DO NOTHING
+            """,
+            (
+                f"CP-DIRINT-{hashlib.sha256(str(direction_id).encode('utf-8')).hexdigest()[:20]}",
+                event_id, 1, plan_json,
+                hashlib.sha256(plan_json.encode("utf-8")).hexdigest(), now,
+            ),
+        )
+        return event_id
 
     def claim_direction(self, worker_id: str, lease_seconds: int = 60) -> dict[str, Any] | None:
         now = _now()
@@ -1086,7 +1181,7 @@ class ControlDatabase:
                         WHEN json_extract(intent_json, '$.requires_human_confirmation') THEN 0
                         ELSE 1
                     END,
-                    CAST(coalesce(json_extract(intent_json, '$.target_score'), -1) AS INTEGER) DESC,
+                    CAST(coalesce(json_extract(intent_json, '$.priority_score'), 0) AS REAL) DESC,
                     CASE lower(coalesce(json_extract(intent_json, '$.risk_level'), 'low'))
                         WHEN 'critical' THEN 0
                         WHEN 'high' THEN 1
@@ -1094,7 +1189,7 @@ class ControlDatabase:
                         WHEN 'low' THEN 3
                         ELSE 4
                     END,
-                    CAST(coalesce(json_extract(intent_json, '$.priority_score'), 0) AS REAL) DESC,
+                    CAST(coalesce(json_extract(intent_json, '$.target_score'), -1) AS INTEGER) DESC,
                     created_at,
                     id
                 LIMIT 1
@@ -1106,7 +1201,8 @@ class ControlDatabase:
                 return None
             db.execute(
                 """
-                UPDATE directions SET status='claimed',claimed_by=?,lease_expires_at=?,updated_at=? WHERE id=?
+                UPDATE directions SET status='claimed',claimed_by=?,lease_expires_at=?,
+                    claim_version=claim_version+1,updated_at=? WHERE id=?
                 """,
                 (worker_id, _lease_deadline(lease_seconds), now, row["id"]),
             )
@@ -1114,17 +1210,31 @@ class ControlDatabase:
             db.execute("COMMIT")
             result = dict(row)
             result["intent"] = json.loads(result.pop("intent_json"))
-            result.update({"status": "claimed", "claimed_by": worker_id})
+            result.update({
+                "status": "claimed",
+                "claimed_by": worker_id,
+                "claim_version": int(row["claim_version"] or 0) + 1,
+            })
             return result
 
-    def heartbeat_direction(self, direction_id: str, worker_id: str, lease_seconds: int = 60) -> bool:
+    def heartbeat_direction(
+        self,
+        direction_id: str,
+        worker_id: str,
+        lease_seconds: int = 60,
+        claim_version: int | None = None,
+    ) -> bool:
         with self.connect() as db:
             result = db.execute(
                 """
                 UPDATE directions SET lease_expires_at=?,updated_at=?
                 WHERE id=? AND claimed_by=? AND status='claimed'
+                  AND (? IS NULL OR claim_version=?)
                 """,
-                (_lease_deadline(lease_seconds), _now(), direction_id, worker_id),
+                (
+                    _lease_deadline(lease_seconds), _now(), direction_id, worker_id,
+                    claim_version, claim_version,
+                ),
             )
             return result.rowcount == 1
 
@@ -1136,6 +1246,7 @@ class ControlDatabase:
         *,
         outcome: str | None = None,
         reason: str | None = None,
+        claim_version: int | None = None,
     ) -> bool:
         with self.connect() as db:
             status = outcome or ("completed" if success else "released")
@@ -1148,8 +1259,12 @@ class ControlDatabase:
                 UPDATE directions SET status=?,claimed_by=NULL,lease_expires_at=NULL,
                     terminal_reason=?,updated_at=?
                 WHERE id=? AND claimed_by=? AND status='claimed'
+                  AND (? IS NULL OR claim_version=?)
                 """,
-                (status, reason, _now(), direction_id, worker_id),
+                (
+                    status, reason, _now(), direction_id, worker_id,
+                    claim_version, claim_version,
+                ),
             )
             if updated.rowcount != 1:
                 return False
@@ -1240,6 +1355,182 @@ class ControlDatabase:
             })
             db.execute("COMMIT")
         return self.get_direction(direction_id) or {}
+
+    def supersede_and_register_direction(
+        self,
+        intent: dict[str, Any],
+        *,
+        retire_direction_id: str,
+        retire_reason: str,
+        version_suffix: str,
+        cooldown_reason: str | None = None,
+    ) -> tuple[dict[str, Any] | None, str | None, str | None, bool]:
+        """Atomically retire one direction version and register its replacement.
+
+        单事务完成两步：①旧版本条件取消（claimed 仅限租约已过期；
+        open/released 直接取消）；②新版本注册（指纹去重与版本化链在同一
+        事务内判定，并写入待投影事件交由既有 Projector 补写 intents.jsonl）。
+        任一条件不满足即**整体回滚**——快照失效时调用方必须推迟处理，
+        不得在事务外重试创建。``cooldown_reason`` 非空时新版本以
+        released+冷却态注册（同一测试未到期的策略冷却不被重评分清除）。
+        成功返回（实际注册载荷, 新方向 ID, 投影事件 ID, True）；
+        快照失效返回 (None, None, None, False)。
+        """
+        now = _now()
+
+        def fingerprint_of(payload: dict[str, Any]) -> str:
+            identity = "\x1f".join(
+                str(payload.get(key, "")).strip().casefold()
+                for key in ("verb", "target", "hypothesis", "success_criteria", "chain_id", "sequence")
+            )
+            return hashlib.sha256(identity.encode("utf-8")).hexdigest()
+
+        base_chain = str(intent.get("chain_id") or "")
+        with self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            try:
+                row = db.execute(
+                    "SELECT status FROM directions WHERE id=?", (retire_direction_id,),
+                ).fetchone()
+                retired = False
+                if row is not None:
+                    status = str(row["status"])
+                    if status == "claimed":
+                        retired = db.execute(
+                            """
+                            UPDATE directions SET status='cancelled',claimed_by=NULL,
+                                lease_expires_at=NULL,terminal_reason=?,updated_at=?
+                            WHERE id=? AND status='claimed'
+                              AND lease_expires_at IS NOT NULL AND lease_expires_at<=?
+                            """,
+                            (retire_reason[:1000], now, retire_direction_id, now),
+                        ).rowcount == 1
+                    elif status in {"open", "released"}:
+                        retired = db.execute(
+                            """
+                            UPDATE directions SET status='cancelled',claimed_by=NULL,
+                                lease_expires_at=NULL,terminal_reason=?,updated_at=?
+                            WHERE id=? AND status!='claimed'
+                            """,
+                            (retire_reason[:1000], now, retire_direction_id),
+                        ).rowcount == 1
+                if not retired:
+                    db.execute("ROLLBACK")
+                    return None, None, None, False
+
+                base_payload = dict(intent)
+                for chain in (base_chain, f"{base_chain}#{version_suffix}"):
+                    candidate = dict(base_payload)
+                    candidate["chain_id"] = chain
+                    existing = db.execute(
+                        "SELECT id,status FROM directions WHERE fingerprint=?",
+                        (fingerprint_of(candidate),),
+                    ).fetchone()
+                    if existing is None:
+                        direction_id = str(candidate.get("id") or f"I-{uuid4().hex[:12]}")
+                        db.execute(
+                            """
+                            INSERT INTO directions(
+                                id,fingerprint,intent_json,status,terminal_reason,
+                                created_at,updated_at
+                            ) VALUES (?,?,?,?,?,?,?)
+                            """,
+                            (
+                                direction_id, fingerprint_of(candidate),
+                                json.dumps(candidate, ensure_ascii=False),
+                                "released" if cooldown_reason else "open",
+                                cooldown_reason, now, now,
+                            ),
+                        )
+                        event_id = self._insert_direction_intent_projection(
+                            db, direction_id, candidate,
+                        )
+                        self._event(db, None, None, "direction_superseded", {
+                            "direction_id": retire_direction_id,
+                            "replacement_id": direction_id,
+                            "reason": retire_reason[:1000],
+                        })
+                        self._event(db, None, None, "direction_registered", {
+                            "direction_id": direction_id,
+                        })
+                        db.execute("COMMIT")
+                        return candidate, direction_id, event_id, True
+                    if str(existing["status"]) not in {
+                        "cancelled", "completed", "rejected", "exhausted", "blocked",
+                    }:
+                        # 指纹命中仍可调度的方向：幂等场景，整体回滚推迟。
+                        break
+                    # 命中终态历史：换版本化链重试（下一轮循环）。
+                db.execute("ROLLBACK")
+                return None, None, None, False
+            except Exception:
+                db.execute("ROLLBACK")
+                raise
+
+    def restore_direction(self, direction_id: str, reason: str) -> dict[str, Any]:
+        """Human-restore a previously human-dismissed direction by re-opening it.
+
+        恢复对**所有类型**的方向生效：状态回到 open、清空认领与租约，
+        立即重新参与调度（下一个 Worker 可认领）。原方向绑定的已取消
+        Job 不复活，由新认领产生新任务。画像方向重新开放后，后续播种
+        仍会按最新评估对齐（实质变化时替代）。模型侧重评不能触发本入口。
+        """
+        reason = reason.strip()
+        if not reason:
+            raise ValueError("人工恢复方向必须填写理由。")
+        now = _now()
+        with self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            direction = db.execute(
+                "SELECT status,terminal_reason FROM directions WHERE id=?",
+                (direction_id,),
+            ).fetchone()
+            if direction is None:
+                db.execute("ROLLBACK")
+                raise RuntimeError(f"方向不存在: {direction_id}")
+            if direction["status"] != "cancelled" or not str(
+                direction["terminal_reason"] or ""
+            ).startswith("human_dismissed:"):
+                db.execute("ROLLBACK")
+                raise RuntimeError(f"方向 {direction_id} 不处于人工否决状态，不能恢复")
+            db.execute(
+                """
+                UPDATE directions SET status='open',claimed_by=NULL,
+                    lease_expires_at=NULL,terminal_reason=?,updated_at=? WHERE id=?
+                """,
+                (f"human_restored:{reason[:1000]}", now, direction_id),
+            )
+            self._event(db, None, None, "direction_human_restored", {
+                "direction_id": direction_id,
+                "reason": reason[:1000],
+            })
+            db.execute("COMMIT")
+        return self.get_direction(direction_id) or {}
+
+    def cancel_expired_claimed_direction(self, direction_id: str, reason: str) -> bool:
+        """Cancel a claimed direction only if its lease has already expired.
+
+        条件更新在数据库层判定租约过期，与 claim_direction 的可重领条件
+        使用同一时钟语义，避免降级清理与重新认领之间的竞态。
+        """
+        now = _now()
+        with self.connect() as db:
+            updated = db.execute(
+                """
+                UPDATE directions SET status='cancelled',claimed_by=NULL,
+                    lease_expires_at=NULL,terminal_reason=?,updated_at=?
+                WHERE id=? AND status='claimed'
+                  AND lease_expires_at IS NOT NULL AND lease_expires_at<=?
+                """,
+                (reason[:1000], now, direction_id, now),
+            )
+            cancelled = updated.rowcount == 1
+            if cancelled:
+                self._event(db, None, None, "direction_expired_claim_cancelled", {
+                    "direction_id": direction_id,
+                    "reason": reason[:1000],
+                })
+            return cancelled
 
     def job_status(self, job_id: str) -> str | None:
         with self.connect() as db:

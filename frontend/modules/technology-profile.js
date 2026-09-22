@@ -34,6 +34,29 @@ export function technologyStatusLabel(value) {
   })[value] || value || "模型报告";
 }
 
+export function profileClassLabel(value) {
+  if (value === null || value === undefined || value === "") return "尚未评估";
+  return ({
+    priority_target: "优先目标",
+    routine_network_info: "常规网络信息",
+    needs_review: "待复核",
+  })[value] || value;
+}
+
+function coverageSummary() {
+  const coverage = state.projectData?.profile_coverage;
+  if (!coverage) return "";
+  const parts = [
+    `采集 ${coverage.profiled_urls ?? 0}`,
+    `已评估 ${coverage.assessed ?? 0}`,
+    `未评估 ${coverage.unassessed ?? 0}`,
+  ];
+  if ((coverage.by_class?.needs_review ?? 0) > 0) {
+    parts.push(`待复核 ${coverage.by_class.needs_review}${coverage.needs_review_exhausted ? `（其中 ${coverage.needs_review_exhausted} 个复核耗尽）` : ""}`);
+  }
+  return `；覆盖：${parts.join(" · ")}`;
+}
+
 export function renderTechnologyProfile(profile, routineGroups = []) {
   const container = $("technologyProfileList");
   container.replaceChildren();
@@ -43,7 +66,7 @@ export function renderTechnologyProfile(profile, routineGroups = []) {
   const routines = Array.isArray(routineGroups) ? routineGroups : [];
   $("technologyProfileCount").textContent = String(rows.length);
   $("technologyProfileSummary").textContent = rows.length || routines.length
-    ? `${groups.length} 个主机名 · ${actionable.filter(item => item.profile_class === "priority_target").length} 个优先目标 · ${routines.reduce((sum, item) => sum + Number(item.member_count || 0), 0)} 条常规网络信息。`
+    ? `${groups.length} 个主机名 · ${actionable.filter(item => item.profile_class === "priority_target").length} 个优先目标 · ${routines.reduce((sum, item) => sum + Number(item.member_count || 0), 0)} 条常规网络信息${coverageSummary()}`
     : "尚未形成目标画像；请在团队配置中启用“目标画像采集”角色后启动运行。";
   if (!rows.length && !routines.length) {
     container.append(el("div", "empty-state", "尚未发现可下载的目标功能。"));
@@ -68,7 +91,7 @@ export function renderTechnologyProfile(profile, routineGroups = []) {
     const table = el("table", "data-table technology-profile-table");
     const head = document.createElement("thead");
     const headRow = document.createElement("tr");
-    ["评分", "URL", "功能与标签", "技术与验证"].forEach(label => {
+    ["评分", "分类", "URL", "功能与标签", "技术与验证"].forEach(label => {
       const node = document.createElement("th");
       node.textContent = label;
       headRow.append(node);
@@ -80,6 +103,7 @@ export function renderTechnologyProfile(profile, routineGroups = []) {
       const score = item.profile_class === "priority_target" && item.target_score != null
         ? String(item.target_score)
         : "—";
+      const classCell = cell(profileClassLabel(item.profile_class), `profile-class ${(item.profile_class || "unassessed")}`);
       const urlCell = cell(item.url, "mono target-profile-url");
       urlCell.title = item.url || "";
       const technologyCell = cell("", "technology-stack");
@@ -113,7 +137,7 @@ export function renderTechnologyProfile(profile, routineGroups = []) {
       const tags = Array.isArray(item.risk_tags) ? item.risk_tags : [];
       if (tags.length) functionCell.append(el("small", "", tags.join(" · ")));
       if (item.score_reason) functionCell.append(el("small", "", item.score_reason));
-      row.append(cell(score, "target-score"), urlCell, functionCell, technologyCell);
+      row.append(cell(score, "target-score"), classCell, urlCell, functionCell, technologyCell);
       body.append(row);
     });
     table.append(head, body);
@@ -224,7 +248,7 @@ export function downloadTechnologyProfile(format) {
         const technologies = item.technologies || [];
         return (technologies.length ? technologies : [{}]).map(technology => [
           item.target_score == null ? "" : item.target_score,
-          item.profile_class || "needs_review",
+          profileClassLabel(item.profile_class),
           item.url,
           item.function,
           (item.risk_tags || []).join("; "),

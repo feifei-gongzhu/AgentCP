@@ -96,7 +96,7 @@ def normalize_plan_batch(
             wave=wave,
             parent_fact_ids=[str(item) for item in raw.get("parent_fact_ids", [])],
         )
-        if hypothesis.action_safety_risk not in {"low", "medium", "high", "critical"}:
+        if hypothesis.action_safety_risk not in {"low", "medium", "high", "critical", "unknown"}:
             raise PlanningError("非法 action_safety_risk")
         hypothesis.score = score_hypothesis(asdict(hypothesis))
         normalized.append(hypothesis)

@@ -142,9 +142,10 @@ def test_frontend_assets_are_wired_to_control_api() -> None:
     assert "/api/projects" in script
     assert "project.run_status" in script
     assert "/api/evidence" in script
-    assert 'id="roleConfigBody"' in index
-    assert 'id="rolePromptMember"' in index
-    assert 'id="rolePromptText"' in index
+    # V3.3 前端：角色编辑器为 memberList/memberPanel（旧 roleConfigBody 已重写）。
+    assert 'id="memberList"' in index
+    assert 'id="memberPanel"' in index
+    assert 'id="mCustomPrompt"' in index
     assert "custom_prompt" in script
     assert 'id="saveTeamButton"' in index
     assert 'post("/api/config"' in script
@@ -157,53 +158,53 @@ def test_frontend_assets_are_wired_to_control_api() -> None:
     assert 'post("/api/target"' in script
     assert 'api("/api/projects"' in script
     assert "auth_mode" in script
-    assert 'id="deleteProjectButton"' in index
+    assert 'id="newTaskButton"' in index
+    assert '.project-delete' in script
     assert 'api("/api/projects/delete"' in script
-    assert index.index('<section id="target-setup"') < index.index('<section id="project-configuration"')
-    assert index.index('id="project-blackboard"') < index.index('<section id="overview"')
-    assert index.index('<section id="project-configuration"') < index.index('<section id="overview"')
+    assert "/api/directions/restore" in script
     assert "renderEmptyWorkspace" in script
     assert "requestGeneration" in script
     assert "location.reload()" not in script
     assert 'data-view="hub"' in index
-    assert index.count('data-view="config"') == 2
-    assert index.count('data-view="run"') == 5
+    assert index.count('data-view="config"') == 1
+    # V3.3 三视图顺序：任务中心 → 项目配置 → 执行与结果。
+    assert index.index('data-view="hub"') < index.index('data-view="config"')
+    assert index.index('data-view="config"') < index.index('data-view="run"')
+    assert index.count('data-view="run"') == 1
     assert 'data-route-link="hub"' in index
     assert 'data-route-link="config"' in index
     assert 'data-route-link="run"' in index
-    assert 'id="projectCards"' in index
+    # V3.3 任务中心：projectList 表格（旧 projectCards 卡片布局已重写）。
+    assert 'id="projectList"' in index
     assert 'id="hubFalsePositiveRate"' in index
-    assert "创建时间 / 已等待" in index
     assert "超过 24 小时标记为积压" in index
     assert "riskLeadLifecycle" in script
     assert "deduplicateRiskLeads" in script
-    assert 'direction_status:direction.status' in script
-    assert 'created_at:direction.created_at' in script
-    assert "复现方式与证据" in index
-    assert "reproductionCell" in script
+    assert 'direction_status: direction.status' in script
+    assert "复现方式" in script
     assert "evidenceForFact" in script
-    assert "vulnerability-evidence-open" in script
-    assert "project-card-quality" in script
+    assert "evidence-open" in script
+    assert "quality_metrics" in script
     assert "quality_summary" in script
     assert 'id="startAuditButton"' in index
     assert 'id="interventionType"' in index
     assert "项目所有者指令" in index
-    assert "scope:\"project\"" in script
+    assert 'scope: "project"' in script
     assert "controller_intervention_added" in (root / "src" / "agent_control_plane" / "webapp.py").read_text(encoding="utf-8")
     assert 'id="viewRunButton"' in index
-    assert 'new Set(["hub","config","run"])' in script
-    assert "renderProjectCards" in script
+    # V3.3 路由收敛到独立模块（hub/config/run 三视图）。
+    assert "./modules/router.js" in script
+    assert "renderProjectList" in script
     assert "launchAudit" in script
-    assert "当前在做什么" in index
-    assert "调度心跳只证明 AgentCP Worker 存活" in index
+    assert "当前任务" in index
+    assert "AgentCP 调度心跳" in script
     assert "等待 Claude CLI 返回" in script
     assert "model_tool_started" in script
     assert "正在执行工具" in script
     assert "Claude stream-json" in index
     assert 'id="assetMetricNote"' in index
-    assert 'id="jobMetricNote"' in index
+    assert 'id="coverageMetricNote"' in index
     assert "pending_facts" in script
-    assert "当前运行" in index
     assert 'id="submitFindingReview"' in index
     assert 'post("/api/findings/review"' in script
     assert 'post("/api/directions/dismiss"' in script
@@ -211,7 +212,7 @@ def test_frontend_assets_are_wired_to_control_api() -> None:
     assert "长期误报率" in index
     assert 'id="wafAssessmentsBody"' in index
     for action_id in (
-        "deleteProjectButton", "saveTargetButton", "launchButton", "cancelButton",
+        "refreshButton", "saveTargetButton", "launchButton", "cancelButton",
         "hintButton", "addRoleButton", "saveTeamButton", "copyBoard",
         "gateContinueButton", "gateStopButton",
         "submitFindingReview",

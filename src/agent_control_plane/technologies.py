@@ -331,7 +331,9 @@ def enriched_target_profile(store: ProjectStore) -> list[dict[str, Any]]:
         enriched.append({
             **row,
             "technologies": technologies,
-            "profile_class": assessment.get("profile_class") or "needs_review",
+            # None 表示“尚未评估”；只有存在 assessment 记录才可能是
+            # needs_review（已评估但信息不足）。两者不得混淆。
+            "profile_class": assessment.get("profile_class"),
             "target_score": assessment.get("target_score"),
             "risk_tags": list(assessment.get("risk_tags") or []),
             "score_reason": str(assessment.get("score_reason") or ""),

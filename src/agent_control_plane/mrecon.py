@@ -285,6 +285,23 @@ def _function_label(url: str, *, form: bool = False) -> str:
     return "页面/接口"
 
 
+def _observation_kind(source: str, status: object) -> str:
+    """Classify how an entry came to be known.
+
+    - ``requested``: the URL was actually fetched and a status was observed
+      (http_crawl / browser_xhr).
+    - ``inferred``: the entry was extracted from bundle or page text; it was
+      never requested (js_bundle).
+    - ``observed_not_requested``: the entry was seen verbatim in real content
+      (a link, a form, rendered DOM) but its endpoint was not exercised.
+    """
+    if source == "js_bundle":
+        return "inferred"
+    if source in {"http_crawl", "browser_xhr"}:
+        return "requested"
+    return "observed_not_requested"
+
+
 def _fingerprints(headers: dict[str, str], body: str) -> list[str]:
     haystack = " ".join([*headers.values(), body[:40_000]]).casefold()
     rules = (
@@ -409,6 +426,7 @@ def collect_mrecon(
             "final_url": final_url,
             "method": "GET",
             "status": status,
+            "observation_kind": _observation_kind("http_crawl", status),
             "content_type": content_type[:200],
             "response_size": len(body_bytes),
             "parameter_names": _parameter_names(url),
@@ -438,6 +456,7 @@ def collect_mrecon(
             ):
                 surface_observation = {
                     "id": new_id("MR"), **surface,
+                    "observation_kind": _observation_kind(str(surface.get("source") or ""), None),
                     "final_url": surface["url"],
                     "content_type": "", "response_size": None,
                     "technology_stack": technologies,
@@ -472,6 +491,7 @@ def collect_mrecon(
                     "final_url": action,
                     "method": str(form.get("method") or "GET"),
                     "status": None,
+                    "observation_kind": _observation_kind("html_form", None),
                     "content_type": "",
                     "response_size": None,
                     "parameter_names": list(dict.fromkeys(form.get("parameters") or []))[:80],
@@ -500,6 +520,9 @@ def collect_mrecon(
     for surface in browser_rows:
         browser_observation = {
             "id": new_id("MR"), **surface,
+            "observation_kind": _observation_kind(
+                str(surface.get("source") or ""), surface.get("status"),
+            ),
             "final_url": surface["url"],
             "content_type": surface.get("content_type", ""),
             "response_size": surface.get("response_size"),
@@ -549,7 +572,7 @@ def compact_mrecon_rows(store: ProjectStore, urls: list[str] | None = None) -> l
             for key in (
                 "id", "url", "method", "status", "content_type", "response_size",
                 "parameter_names", "function", "technology_stack", "source",
-                "discovered_from", "evidence_ref",
+                "observation_kind", "discovered_from", "evidence_ref",
             )
             if row.get(key) not in (None, "", [], {})
         })

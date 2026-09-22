@@ -80,8 +80,10 @@ def test_partial_result_does_not_hide_authentication_failure() -> None:
     assert not _can_complete_with_partial_transport_failures(jobs)
 
 
-def test_protocol_shape_error_is_not_retried() -> None:
-    assert not _model_error_is_retryable("模型未返回带合法 kind 的 AgentCP Worker JSON")
+def test_protocol_shape_error_is_retryable() -> None:
+    # V3.3：协议形状错误（未返回合法 kind）视为可重试——同一任务重试可能
+    # 产出合法 Worker JSON，重试上限仍由 max_attempts 约束。
+    assert _model_error_is_retryable("模型未返回带合法 kind 的 AgentCP Worker JSON")
 
 
 def test_cyber_policy_refusal_is_not_retried() -> None:
@@ -153,7 +155,7 @@ def test_cancelled_run_cannot_be_resumed(
         engine.resume(run_id)
 
 
-def test_stigmergy_iteration_persists_candidates_and_enters_gate(
+def test_stigmergy_iteration_persists_candidates_without_blocking_gate(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -176,7 +178,9 @@ def test_stigmergy_iteration_persists_candidates_and_enters_gate(
     status = engine.status(run_id)
 
     assert status["run"]["status"] == "completed"
-    assert store.load_state().gate_status == "awaiting_approval"
+    # V3.3 显式门禁：自动化批次完成不再默认进入 awaiting_approval；
+    # 强制门禁只由 15 分钟节拍或人工 complete-subsubtask/approve 触发。
+    assert store.load_state().gate_status == "running"
     assert all(job["committed_at"] for job in status["jobs"])
     assert any(event["event_type"] == "job_claimed" for event in status["events"])
     assert any(event["event_type"] == "model_call_started" for event in status["events"])
@@ -184,6 +188,12 @@ def test_stigmergy_iteration_persists_candidates_and_enters_gate(
     started = next(event for event in status["events"] if event["event_type"] == "model_call_started")
     assert started["data"]["activity"]["target"]
     assert started["data"]["activity"]["success_criteria"]
+    # 批次收敛记录为非阻塞决策：人工复核异步进行，不暂停自动化。
+    completion = [
+        item for item in store.read_jsonl("decision_log.jsonl")
+        if "候选结果已收敛" in str(item.get("reason") or "")
+    ]
+    assert completion, "批次完成应记录非阻塞子任务决策"
 
 
 def test_direction_backlog_suspends_planners_and_prioritizes_executor(
@@ -387,7 +397,7 @@ def test_all_policy_restricted_jobs_finish_run_without_retry_loop(
     assert status["jobs"][0]["attempts"] == 1
 
 
-def test_policy_refusal_falls_back_once_without_mutating_saved_custom_prompt(
+def test_policy_refusal_restricts_job_without_fallback_or_prompt_mutation(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -403,18 +413,12 @@ def test_policy_refusal_falls_back_once_without_mutating_saved_custom_prompt(
     }]}), encoding="utf-8")
     observed_prompts: list[str] = []
 
-    def fallback_run_member(store, member, timeout, dry_run, context_suffix="", cancel_check=None, progress_callback=None):
+    def refusing_run_member(store, member, timeout, dry_run, context_suffix="", cancel_check=None, progress_callback=None):
         observed_prompts.append(member.custom_prompt)
-        if member.custom_prompt:
-            raise RuntimeError("This content was flagged for possible cybersecurity risk.")
-        return {
-            "member": member.name,
-            "role": member.role,
-            "status": "ok",
-            "payload": {"kind": "none", "reason": "fallback completed"},
-        }
+        # V3.3：上游模型内容策略拒答。不再有“剥离提示词重试一次”的降级路径。
+        raise RuntimeError("This content was flagged for possible cybersecurity risk.")
 
-    monkeypatch.setattr(automation_module, "_run_member", fallback_run_member)
+    monkeypatch.setattr(automation_module, "_run_member", refusing_run_member)
     store = ProjectStore("fallback-vendor")
     store.init()
     engine = AutomationEngine(store)
@@ -422,12 +426,21 @@ def test_policy_refusal_falls_back_once_without_mutating_saved_custom_prompt(
     engine.run(run_id)
 
     status = engine.status(run_id)
-    assert observed_prompts == [original_prompt, ""]
-    assert status["run"]["status"] == "completed"
-    assert status["jobs"][0]["status"] == "completed"
-    assert any(event["event_type"] == "model_policy_fallback_started" for event in status["events"])
+    # 只调用一次，且专属提示词原样传入；不存在降级重试。
+    assert observed_prompts == [original_prompt]
+    job = status["jobs"][0]
+    assert job["status"] == "restricted", "策略拒答应为 restricted 终态，不重试"
+    assert job["attempts"] == 1
+    assert any(event["event_type"] == "model_policy_restricted" for event in status["events"])
+    assert not any(
+        event["event_type"] == "model_policy_fallback_started"
+        for event in status["events"]
+    ), "V3.3 已禁用提示词降级路径"
+    # 全部执行单元受限且无有效结果时，Run 以受限终态收敛。
+    assert status["run"]["status"] == "failed"
+    assert "受限" in str(status["run"].get("error") or "") or status["run"].get("error")
     saved = json.loads((team_module.TEAMS_DIR / "fallback.json").read_text(encoding="utf-8"))
-    assert saved["members"][0]["custom_prompt"] == original_prompt
+    assert saved["members"][0]["custom_prompt"] == original_prompt, "保存的专属提示词不得被改动"
 
 
 def test_same_run_next_wave_claims_committed_intent(
@@ -560,7 +573,7 @@ def test_explicit_new_run_clears_previous_stop_loss_latch(
     assert store.load_state().current_decision == "continue"
 
 
-def test_worker_stop_loss_decision_terminates_run(
+def test_worker_stop_loss_decision_is_demoted_and_run_continues(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -582,8 +595,21 @@ def test_worker_stop_loss_decision_terminates_run(
     engine = AutomationEngine(store)
     run_id = engine.start("stopper", max_workers=1)
     engine.run(run_id)
-    assert engine.db.get_run(run_id)["status"] == "stopped"
-    assert store.load_state().current_decision == "stop_loss"
+
+    status = engine.status(run_id)
+    events = status["events"] if isinstance(status, dict) else {}
+    # V3.3：模型只能提出止损建议，无权终止 Run；建议被降级为
+    # switch_target/continue 控制建议，Run 由确定性控制器自然收敛。
+    assert any(event["event_type"] == "model_stop_loss_demoted" for event in events)
+    decisions = [
+        item for item in store.read_jsonl("decision_log.jsonl")
+        if "模型止损建议" in str(item.get("reason") or "")
+    ]
+    assert decisions, "降级后的控制建议必须落决策日志"
+    assert decisions[-1]["action"] in {"switch_target", "continue"}
+    assert engine.db.get_run(run_id)["status"] in {"completed", "failed"}
+    assert store.load_state().current_decision != "stop_loss"
+    assert store.load_state().run_status != "stopped"
 
 
 def test_waf_branch_stop_loss_does_not_terminate_whole_run(

@@ -395,7 +395,7 @@ def _apply_worker_output_legacy(store: ProjectStore, payload: dict[str, Any]) ->
         if not all([intent.verb, intent.target, intent.evidence_sink, intent.success_criteria, intent.scope_check]):
             raise WorkerError("Intent 缺少 verb/target/evidence_sink/success_criteria/scope_check，已拒绝写入。")
         intent = Guardian().review_intent(intent, store.read_json("target.json"))
-        if intent.action_safety_risk not in {"low", "medium", "high", "critical"}:
+        if intent.action_safety_risk not in {"low", "medium", "high", "critical", "unknown"}:
             raise WorkerError("Intent action_safety_risk 非法。")
         intent.requires_human_confirmation = intent.action_safety_risk in {"high", "critical"}
         store.append_jsonl("intents.jsonl", intent)

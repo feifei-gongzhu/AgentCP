@@ -251,12 +251,14 @@ def test_phase_progression_is_evidence_driven_and_monotonic(
     state.vulnerability_count = 1
     state.pending_human_review_count = 1
     store.save_state(state)
-    assert reconcile_phase(store, "test_candidate") == "verify"
+    # V3.3：出现已验证漏洞后直接进入 report（verify 不再由计数自动触发）。
+    assert reconcile_phase(store, "test_candidate") == "report"
 
     state = store.load_state()
     state.pending_human_review_count = 0
     state.human_confirmed_count = 1
     store.save_state(state)
+    # 已在 report：单调不回退，不产生新事件。
     assert reconcile_phase(store, "test_confirmed") == "report"
 
     state = store.load_state()
@@ -266,5 +268,5 @@ def test_phase_progression_is_evidence_driven_and_monotonic(
     store.save_state(state)
     assert reconcile_phase(store, "delayed_old_write") == "report"
     assert [item["to"] for item in store.read_jsonl("phase_events.jsonl")] == [
-        "phase_0_5_probe", "recon", "hunt", "verify", "report",
+        "phase_0_5_probe", "recon", "hunt", "report",
     ]

@@ -14,6 +14,41 @@ PROFILE_STATE_FILE = "profile_state.json"
 PROFILE_MAX_BASELINE_PASSES = 3
 PROFILE_MAX_NO_PROGRESS_PASSES = 2
 
+# ---------------------------------------------------------------------------
+# 目标画像调度策略（工程初始值，尚未校准）。
+# 这些默认值只决定“画像方向是否入队/何时替代”，与漏洞严重度无关。
+# 可在 target.json 的 profile_policy 对象里按项目覆盖。
+# ---------------------------------------------------------------------------
+ASSESSMENT_POLICY_VERSION = "assessment-policy-v1"
+PROFILE_ENQUEUE_MIN_SCORE = 40
+PROFILE_SCORE_UPDATE_THRESHOLD = 15
+PROFILE_NEEDS_REVIEW_MAX_ATTEMPTS = 2
+PROFILE_NEEDS_REVIEW_BATCH_LIMIT = 20
+# 与自动化引擎共享的高水位：开放方向达到该数量时暂停播种新的画像方向。
+DIRECTION_BACKLOG_HIGH_WATERMARK = 12
+
+PROFILE_POLICY_DEFAULTS = {
+    "enqueue_min_score": PROFILE_ENQUEUE_MIN_SCORE,
+    "score_update_threshold": PROFILE_SCORE_UPDATE_THRESHOLD,
+    "needs_review_max_attempts": PROFILE_NEEDS_REVIEW_MAX_ATTEMPTS,
+}
+
+
+def profile_policy(store: ProjectStore) -> dict[str, int]:
+    """Read the per-project profile scheduling policy with safe clamps."""
+    policy = dict(PROFILE_POLICY_DEFAULTS)
+    raw = store.read_json("target.json").get("profile_policy")
+    if isinstance(raw, dict):
+        for key in policy:
+            try:
+                policy[key] = int(raw.get(key, policy[key]))
+            except (TypeError, ValueError):
+                continue
+    policy["enqueue_min_score"] = max(0, min(100, int(policy["enqueue_min_score"])))
+    policy["score_update_threshold"] = max(1, min(100, int(policy["score_update_threshold"])))
+    policy["needs_review_max_attempts"] = max(0, int(policy["needs_review_max_attempts"]))
+    return policy
+
 
 SENSITIVE_QUERY_MARKERS = (
     "access_token",
@@ -205,19 +240,21 @@ def record_target_assessments(
     *,
     proposed_by: str,
 ) -> list[TargetAssessment]:
-    """Append AI target-priority judgments without mutating collection facts."""
+    """Append AI target-priority judgments without mutating collection facts.
+
+    Deduplication compares against the URL's CURRENT version only, covering
+    the full decision content including ``recommended_tests``: resubmitting
+    the current version is an idempotent replay, while any different content
+    (including content equal to a HISTORICAL version, e.g. reverting B back
+    to A) records a new version that supersedes the current one.
+    """
 
     profiles = {str(item["url"]): item for item in target_profile(store)}
-    existing = {
-        (
-            str(item.get("url") or ""),
-            str(item.get("profile_class") or ""),
-            item.get("target_score"),
-            tuple(str(tag).casefold() for tag in item.get("risk_tags") or []),
-            str(item.get("score_reason") or "").casefold(),
-        )
-        for item in store.read_jsonl("target_assessments.jsonl")
-    }
+    latest_by_url: dict[str, dict[str, Any]] = {}
+    for item in store.read_jsonl("target_assessments.jsonl"):
+        url = str(item.get("url") or "")
+        if url:
+            latest_by_url[url] = item
     recorded: list[TargetAssessment] = []
     for raw in rows[:200]:
         if not isinstance(raw, dict):
@@ -238,11 +275,18 @@ def record_target_assessments(
         risk_tags = _short_list(raw.get("risk_tags"), limit=12, item_limit=80)
         score_reason = str(raw.get("score_reason") or "").strip()[:600]
         tests = _short_list(raw.get("recommended_tests"), limit=8, item_limit=100)
-        fingerprint = (
-            url, profile_class, score, tuple(item.casefold() for item in risk_tags),
-            score_reason.casefold(),
-        )
-        if fingerprint in existing:
+        fingerprint = _assessment_fingerprint({
+            "url": url,
+            "profile_class": profile_class,
+            "target_score": score,
+            "risk_tags": risk_tags,
+            "score_reason": score_reason,
+            "recommended_tests": tests,
+        })
+        previous = latest_by_url.get(url)
+        if previous is not None and _assessment_fingerprint(previous) == fingerprint:
+            # 与“当前版本”完全一致才视为重放；内容与历史某版本相同但不同于
+            # 当前版本时，是新一次判断（例如 B 恢复为 A），必须记录为新版本。
             continue
         record = TargetAssessment(
             url=url,
@@ -253,11 +297,27 @@ def record_target_assessments(
             score_reason=score_reason,
             recommended_tests=tests,
             proposed_by=proposed_by,
+            supersedes=str(previous.get("id")) if previous else None,
+            classification_provenance={
+                "source": str(proposed_by or "profile_mapper"),
+                "policy_version": ASSESSMENT_POLICY_VERSION,
+            },
         )
         store.append_jsonl("target_assessments.jsonl", record)
         recorded.append(record)
-        existing.add(fingerprint)
+        latest_by_url[url] = record.__dict__
     return recorded
+
+
+def _assessment_fingerprint(item: dict[str, Any]) -> tuple[Any, ...]:
+    return (
+        str(item.get("url") or ""),
+        str(item.get("profile_class") or ""),
+        item.get("target_score"),
+        tuple(str(tag).casefold() for tag in item.get("risk_tags") or []),
+        str(item.get("score_reason") or "").casefold(),
+        tuple(str(test).casefold() for test in item.get("recommended_tests") or []),
+    )
 
 
 def target_assessments(store: ProjectStore) -> list[dict[str, Any]]:
@@ -401,11 +461,27 @@ def project_target_priority_blackboard(store: ProjectStore) -> None:
 
 
 def seed_priority_target_directions(store: ProjectStore, database: Any) -> int:
-    """Turn scored profile targets into compact, deduplicated Executor Intents."""
+    """Turn scored profile targets into bounded, lifecycle-aware Executor Intents.
 
-    from .schemas import Intent
+    语义约定：``target_score``/``priority_score`` 只表示测试优先级（调度顺序），
+    不推导 ``risk_level``（潜在风险）也不推导漏洞严重度；画像方向的
+    ``action_safety_risk``/``risk_level`` 为 ``unknown``，因为画像阶段没有评估
+    动作风险与潜在影响。生命周期：未入队阈值的低分目标只保留评估记录；
+    跨越入队阈值（含跌破）立即生效、先于分数防抖；建议专项或评分显著变化
+    会替代（supersede）旧的待执行方向，仅调分数也必须完成替代；目标降级后
+    待执行方向取消（降级清理不受背压限制），评估恢复高优先时方向重新入队；
+    背压限制开放方向总量，净新增按剩余容量播种；正在执行（claimed）的方向
+    不打断，遵循既有租约与过期结果拦截机制。
+    """
 
+    policy = profile_policy(store)
     created = 0
+    # 降级清理必须先于背压判断执行：背压只限制新增方向，
+    # 不能阻止已降级目标的待执行方向被取消。
+    _cancel_ineligible_profile_directions(store, database)
+    # 高水位限制的是开放方向总量：只按剩余容量播种净新增方向；
+    # 替代（supersede 后重建）不增加总量，不消耗容量。
+    capacity = DIRECTION_BACKLOG_HIGH_WATERMARK - database.open_direction_count()
     for assessment in target_assessments(store):
         if assessment.get("profile_class") != "priority_target":
             continue
@@ -414,35 +490,401 @@ def seed_priority_target_directions(store: ProjectStore, database: Any) -> int:
         tags = _short_list(assessment.get("risk_tags"), limit=12, item_limit=80)
         target = str(assessment.get("url") or "")
         reason = str(assessment.get("score_reason") or "").strip()
-        test_label = "、".join(tests) if tests else "目标边界验证"
-        intent = Intent(
-            verb=f"按画像优先级执行 {test_label}",
-            target=target,
-            evidence_sink=f"evidence/profile-targets/{assessment['id']}.txt",
-            success_criteria="形成可复核证据，确认或否定该目标是否存在真实安全边界突破。",
-            hypothesis=reason or f"{target} 被目标画像标记为高价值攻击面",
-            scope_check="项目所有测试目标已统一授权",
-            scope_refs=["*"],
-            expected_business_impact=f"画像标签：{'、'.join(tags)}" if tags else "待专项验证",
-            prerequisite_readiness=0.8,
-            information_gain=0.8,
-            estimated_cost=max(0.1, min(0.8, 1.0 - score / 125.0)),
-            priority_score=round(score / 100.0, 4),
-            risk_level=("critical" if score >= 95 else "high" if score >= 80 else "medium" if score >= 50 else "low"),
-            action_safety_risk="low",
-            evidence_maturity="hypothesis",
-            target_profile_id=str(assessment.get("target_profile_id") or "") or None,
-            target_score=score,
-            risk_tags=tags,
-            recommended_tests=tests,
-            proposed_by=str(assessment.get("proposed_by") or "profile_mapper"),
-            chain_id=str(assessment.get("id") or ""),
-        )
-        _direction_id, inserted = database.register_direction(asdict(intent))
-        if inserted:
-            store.append_jsonl("intents.jsonl", intent)
+        if not target:
+            continue
+        existing = _profile_directions_for(database, target)
+        cooldown = _active_policy_cooldown(existing, tests)
+        claim_valid, claimable, terminal = _split_claimable_directions(existing)
+        if claim_valid:
+            # 唯一执行中的版本受租约保护；其余可认领版本（含过期认领和
+            # 存量重复 open）一律取消，保证同一目标同时最多一个可认领/执行
+            # 版本，不会形成两个并行执行。
+            _cancel_claimable_directions(
+                database, claimable,
+                "profile_duplicate_pending:superseded_by_active_claim",
+            )
+            continue
+        if len(claimable) > 1:
+            # 可认领版本归并（open、released 与**过期认领**一起参与）：
+            # 只保留最新一个（列表按 created_at,id 排序，末位最新），其余取消。
+            # 部分取消失败（被抢先重领）说明快照失效：本轮推迟整个目标的归并。
+            expected = len(claimable) - 1
+            if _cancel_claimable_directions(
+                database, claimable[:-1], "profile_duplicate_pending:collapsed",
+            ) < expected:
+                continue
+            claimable = claimable[-1:]
+        replacement = False
+        if claimable:
+            survivor = claimable[0]
+            survivor_claimed = survivor["status"] == "claimed"  # 过期认领幸存者
+            if score < policy["enqueue_min_score"]:
+                # 跨越入队阈值必须立即生效，先于分数防抖判断。
+                demote_reason = f"profile_below_enqueue_threshold:{assessment.get('id')}"
+                if survivor_claimed:
+                    if not database.cancel_expired_claimed_direction(str(survivor["id"]), demote_reason):
+                        continue  # 取消失败（被抢先重领）：快照失效，推迟
+                elif not _supersede_directions(database, [survivor], demote_reason):
+                    continue  # 取消失败（如被抢先认领）：快照失效，推迟
+                continue
+            current = survivor.get("intent") or {}
+            if not _assessment_materially_changed(current, score, tests, policy):
+                continue  # 幂等/防抖：内容一致时保留现状（幸存者仍可被认领）。
+            # 替代走数据库层单事务：旧版本条件取消 + 新版本注册要么同时
+            # 成功，要么同时回滚；取消失败时禁止在事务外创建替代版本。
+            payload = _build_profile_direction_payload(
+                assessment=assessment, score=score, tests=tests, tags=tags,
+                target=target, reason=reason,
+            )
+            registered, _new_id, event_id, replaced = database.supersede_and_register_direction(
+                payload,
+                retire_direction_id=str(survivor["id"]),
+                retire_reason=f"superseded_by_assessment:{assessment.get('id')}",
+                version_suffix=str(assessment.get("id") or ""),
+                cooldown_reason=cooldown,
+            )
+            if not replaced:
+                continue  # 快照失效：不注册替代版本，等待下一轮同步
+            # intents.jsonl 不再由调用方直写：事务内已记录待投影事件，
+            # SQLite 为权威，文件写入失败时由既有 Projector 幂等补写。
+            _drain_direction_intent_projection(store, database, event_id)
             created += 1
+            continue
+        else:
+            if score < policy["enqueue_min_score"]:
+                continue
+            if terminal:
+                last_direction = terminal[-1]
+                last = last_direction.get("intent") or {}
+                last_reason = str(last_direction.get("terminal_reason") or "")
+                if last_reason.startswith("human_dismissed:"):
+                    # 人工否决只能由显式的人工恢复（restore_direction，重开方向）
+                    # 撤销；重新评分、建议专项变化等模型侧重评一律不得绕过。
+                    continue
+                died_by_demotion = last_reason.startswith((
+                    "profile_downgraded:",
+                    "profile_below_enqueue_threshold:",
+                ))
+                if not died_by_demotion and not _assessment_materially_changed(last, score, tests, policy):
+                    continue  # 已完成且无实质变化，不重复触发相同测试。
+                # 因降级/跌破阈值而终止的方向：评估恢复可入队状态时重新入队。
+        if not replacement and capacity <= 0:
+            continue
+        payload = _build_profile_direction_payload(
+            assessment=assessment, score=score, tests=tests, tags=tags,
+            target=target, reason=reason,
+        )
+        registered, _direction_id, event_id, inserted = _register_or_version(
+            database, payload, str(assessment.get("id") or ""),
+            cooldown_reason=cooldown,
+        )
+        if inserted:
+            # intents.jsonl 由投影事件补写（与替代路径一致），实际注册对象
+            # （版本化时 chain_id 带 #评估ID 后缀）由 Projector 落盘，
+            # 保证 SQLite 与 intents.jsonl 两个读取来源完全一致。
+            _drain_direction_intent_projection(store, database, event_id)
+            created += 1
+            if not replacement and not cooldown:
+                # 继承冷却的方向以 released 注册，不计入开放方向数，
+                # 因此也不消耗背压容量。
+                capacity -= 1
+        # 指纹命中仍开放的方向（并发/重复提交）按既有幂等语义跳过，不占容量。
     return created
+
+
+def _active_policy_cooldown(
+    directions: list[dict[str, Any]],
+    tests: list[str],
+) -> str | None:
+    """同一目标、同一建议专项集合的未到期策略冷却约束。
+
+    分数变化不得清除冷却；更换建议专项（不同的测试集合）不继承。
+    返回可直接作为新方向 terminal_reason 的 ``policy_blocked_until:`` 字符串。
+    """
+    new_tests = {str(item).casefold() for item in tests}
+    current_time = now_iso()
+    for item in reversed(directions):
+        reason = str(item.get("terminal_reason") or "")
+        if not reason.startswith("policy_blocked_until:"):
+            continue
+        until = reason[len("policy_blocked_until:"):]
+        if until <= current_time:
+            continue
+        old_tests = {
+            str(entry).casefold()
+            for entry in (item.get("intent") or {}).get("recommended_tests") or []
+        }
+        if old_tests == new_tests:
+            return reason
+    return None
+
+
+def _drain_direction_intent_projection(store: ProjectStore, database: Any, event_id: str | None) -> None:
+    """转发到共享实现：磁盘失败静默延迟，非磁盘异常记录排障事件。"""
+    from .projector import drain_direction_intent_projection
+
+    drain_direction_intent_projection(store, database, event_id)
+
+
+def _build_profile_direction_payload(
+    *,
+    assessment: dict[str, Any],
+    score: int,
+    tests: list[str],
+    tags: list[str],
+    target: str,
+    reason: str,
+) -> dict[str, Any]:
+    from .schemas import Intent
+
+    test_label = "、".join(tests) if tests else "目标边界验证"
+    intent = Intent(
+        verb="verify",
+        target=target,
+        evidence_sink=f"evidence/profile-targets/{assessment['id']}.txt",
+        success_criteria=(
+            f"按画像建议专项验证并形成可复核证据：{test_label}。"
+            "确认或否定该目标是否存在真实安全边界突破。"
+        ),
+        hypothesis=reason or f"{target} 被目标画像标记为高价值攻击面",
+        scope_check="项目所有测试目标已统一授权",
+        scope_refs=["*"],
+        expected_business_impact=f"画像标签：{'、'.join(tags)}" if tags else "待专项验证",
+        prerequisite_readiness=0.8,
+        information_gain=0.8,
+        estimated_cost=max(0.1, min(0.8, 1.0 - score / 125.0)),
+        priority_score=round(score / 100.0, 4),
+        risk_level="unknown",
+        action_safety_risk="unknown",
+        evidence_maturity="hypothesis",
+        target_profile_id=str(assessment.get("target_profile_id") or "") or None,
+        target_score=score,
+        risk_tags=tags,
+        recommended_tests=tests,
+        proposed_by=str(assessment.get("proposed_by") or "profile_mapper"),
+        chain_id=f"profile:{target}",
+    )
+    return asdict(intent)
+
+
+def _register_or_version(
+    database: Any,
+    payload: dict[str, Any],
+    assessment_id: str,
+    *,
+    cooldown_reason: str | None = None,
+) -> tuple[dict[str, Any], str, str | None, bool]:
+    """Register a profile direction; version the chain when the fingerprint
+    only collides with terminal history.
+
+    方向指纹不含分数。仅调分数的实质重评会与刚被 supersede 的旧方向同指纹，
+    历史内容恢复（B→A）也会与更早的终结方向同指纹。此时在 chain_id 上追加
+    评估版本号重新注册，保证替代与复活可靠发生；指纹命中的是仍开放的
+    方向时按既有幂等语义跳过。返回**实际注册成功**的载荷，调用方必须
+    持久化该对象而非原始 Intent，避免双源记录漂移。
+    """
+    from .database import direction_intent_projection_event_id
+
+    payload = dict(payload)
+    direction_id, inserted = database.register_direction(
+        payload,
+        record_intent_projection=True,
+        initial_status="released" if cooldown_reason else "open",
+        initial_terminal_reason=cooldown_reason,
+    )
+    if inserted:
+        return payload, str(direction_id), direction_intent_projection_event_id(str(direction_id)), True
+    existing = database.get_direction(str(direction_id))
+    if existing and str(existing.get("status")) in {
+        "cancelled", "completed", "rejected", "exhausted", "blocked",
+    }:
+        versioned = dict(payload)
+        versioned["chain_id"] = f"{payload['chain_id']}#{assessment_id}"
+        version_id, version_inserted = database.register_direction(
+            versioned,
+            record_intent_projection=True,
+            initial_status="released" if cooldown_reason else "open",
+            initial_terminal_reason=cooldown_reason,
+        )
+        return (
+            versioned, str(version_id),
+            direction_intent_projection_event_id(str(version_id)), version_inserted,
+        )
+    return payload, str(direction_id), None, False
+
+
+def ensure_profile_direction_restorable(store: ProjectStore, database: Any, direction_id: str) -> None:
+    """恢复画像方向前的校验：同一逻辑方向已有有效后继时拒绝恢复过期版本。
+
+    非画像方向不做该检查（没有“后继”概念），走通用恢复语义。
+    """
+    direction = database.get_direction(direction_id)
+    if direction is None:
+        raise ValueError(f"方向不存在: {direction_id}")
+    intent = direction.get("intent") or {}
+    if not _is_profile_direction(intent):
+        return
+    url = str(intent.get("target") or "").casefold()
+    if not url:
+        return
+    successors = [
+        item for item in database.list_directions()
+        if item["id"] != direction_id
+        and _is_profile_direction(item.get("intent") or {})
+        and str((item.get("intent") or {}).get("target") or "").casefold() == url
+        and item.get("status") in {"open", "released", "claimed"}
+    ]
+    if successors:
+        successor_ids = ", ".join(sorted(str(item["id"]) for item in successors))
+        raise ValueError(
+            f"该目标已有更新的有效方向（{successor_ids}），不能恢复过期版本；请直接使用现有方向。"
+        )
+
+
+def _latest_intent(directions: list[dict[str, Any]]) -> dict[str, Any]:
+    return (directions[-1] or {}).get("intent") or {}
+
+
+def _assessment_materially_changed(
+    intent: dict[str, Any],
+    score: int,
+    tests: list[str],
+    policy: dict[str, int],
+) -> bool:
+    old_tests = {str(item).casefold() for item in intent.get("recommended_tests") or []}
+    new_tests = {str(item).casefold() for item in tests}
+    if old_tests != new_tests:
+        return True
+    try:
+        old_score = int(intent.get("target_score") or 0)
+    except (TypeError, ValueError):
+        old_score = 0
+    return abs(score - old_score) >= policy["score_update_threshold"]
+
+
+def _is_profile_direction(intent: dict[str, Any]) -> bool:
+    chain_id = str(intent.get("chain_id") or "")
+    return chain_id.startswith("profile:") or bool(intent.get("target_profile_id"))
+
+
+def _profile_directions_for(database: Any, target: str) -> list[dict[str, Any]]:
+    wanted = str(target).casefold()
+    result = []
+    for direction in database.list_directions():
+        intent = direction.get("intent") or {}
+        if not _is_profile_direction(intent):
+            continue
+        if str(intent.get("target") or "").casefold() == wanted:
+            result.append(direction)
+    return result
+
+
+def _split_claimable_directions(
+    directions: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
+    """按租约有效性分组：有效认领 / 可认领（open、released、过期认领）/ 终态。
+
+    保持 created_at 顺序。租约缺失的 claimed 保守视为有效（与
+    claim_direction 的重领条件一致：NULL 租约不可被重领）。过期认领
+    属于"可认领"：claim_direction 的过期重领通道使它与新 open 等价，
+    必须一起参与版本归并，不能一概跳过。
+    """
+    current_time = now_iso()
+    claim_valid: list[dict[str, Any]] = []
+    claimable: list[dict[str, Any]] = []
+    terminal: list[dict[str, Any]] = []
+    for item in directions:
+        status = str(item.get("status") or "")
+        if status in {"open", "released"}:
+            claimable.append(item)
+        elif status == "claimed":
+            lease = str(item.get("lease_expires_at") or "")
+            if not lease or lease > current_time:
+                claim_valid.append(item)
+            else:
+                claimable.append(item)
+        else:
+            terminal.append(item)
+    return claim_valid, claimable, terminal
+
+
+def _cancel_claimable_directions(database: Any, directions: list[dict[str, Any]], reason: str) -> int:
+    """Cancel open/released directly; claimed only through the expired-lease path."""
+    cancelled = 0
+    for item in directions:
+        status = str(item.get("status") or "")
+        if status in {"open", "released"}:
+            if database.set_direction_status(str(item["id"]), "cancelled", reason[:1000]):
+                cancelled += 1
+        elif status == "claimed":
+            if database.cancel_expired_claimed_direction(str(item["id"]), reason[:1000]):
+                cancelled += 1
+    return cancelled
+
+
+def _supersede_directions(database: Any, directions: list[dict[str, Any]], reason: str) -> int:
+    superseded = 0
+    for direction in directions:
+        if direction.get("status") not in {"open", "released"}:
+            continue
+        if database.set_direction_status(str(direction["id"]), "cancelled", reason[:1000]):
+            superseded += 1
+    return superseded
+
+
+def _cancel_ineligible_profile_directions(store: ProjectStore, database: Any) -> int:
+    """Cancel profile directions whose target is no longer eligible for enqueue.
+
+    可入队的统一判定：最新评估存在、仍为 priority_target、且分数不低于
+    当前入队阈值（含策略上调后的阈值）。open/released 的不合格方向取消
+    （跌破阈值的 open 方向由主循环以带评估 ID 的精确理由取消）；claimed
+    且租约已过期的方向若不合格也必须取消——否则 claim_direction 的
+    “过期租约可重领”通道会让降级或跌破阈值的方向被新 Worker 重新执行。
+    持有有效租约的 claimed 方向保留（执行中任务尊重租约）；已完成方向
+    与历史证据保留。
+    """
+    policy = profile_policy(store)
+    latest_by_url: dict[str, dict[str, Any]] = {
+        str(item.get("url") or "").casefold(): item
+        for item in target_assessments(store)
+    }
+    cancelled = 0
+    for direction in database.list_directions():
+        intent = direction.get("intent") or {}
+        if not _is_profile_direction(intent):
+            continue
+        status = str(direction.get("status") or "")
+        if status not in {"open", "released", "claimed"}:
+            continue
+        url = str(intent.get("target") or "").casefold()
+        if not url:
+            continue
+        assessment = latest_by_url.get(url)
+        eligible = (
+            assessment is not None
+            and str(assessment.get("profile_class")) == "priority_target"
+            and max(0, min(100, int(assessment.get("target_score") or 0)))
+            >= policy["enqueue_min_score"]
+        )
+        if eligible:
+            continue
+        if assessment is None:
+            reason = "profile_no_current_assessment"
+        elif str(assessment.get("profile_class")) != "priority_target":
+            reason = "profile_downgraded:not_priority_target"
+        else:
+            reason = f"profile_below_enqueue_threshold:{assessment.get('id')}"
+        if status in {"open", "released"}:
+            if assessment is not None and str(assessment.get("profile_class")) == "priority_target":
+                # 跌破阈值的 open/released 由主循环 pending 分支取消（理由带评估 ID）。
+                continue
+            if database.set_direction_status(str(direction["id"]), "cancelled", reason):
+                cancelled += 1
+        elif status == "claimed":
+            # 条件更新只在租约确实已过期时生效；有效租约保留。
+            if database.cancel_expired_claimed_direction(str(direction["id"]), reason):
+                cancelled += 1
+    return cancelled
 
 
 def target_profile_fingerprint(store: ProjectStore) -> str:
@@ -741,3 +1183,116 @@ def finish_incremental_profile(
             *seed_urls,
         ]))
     return save_profile_state(store, state)
+
+
+# ---------------------------------------------------------------------------
+# needs_review 有界复核（与“尚未评估”严格区分）。
+# 复核不新增常驻 Agent：needs_review URL 合并进已有的增量画像通道，
+# 每个方向 Run 至多复核一批（incremental_attempted_run_id 天然限流），
+# 达到上限后进入 exhausted 终态，不再重复消耗模型调用。
+# ---------------------------------------------------------------------------
+
+def _needs_review_attempts(store: ProjectStore) -> dict[str, int]:
+    state = load_profile_state(store)
+    values = state.get("needs_review_attempts")
+    if not isinstance(values, dict):
+        return {}
+    return {
+        str(url): int(attempts)
+        for url, attempts in values.items()
+        if isinstance(attempts, int) and attempts >= 0
+    }
+
+
+def pending_needs_review_urls(
+    store: ProjectStore,
+    *,
+    limit: int = PROFILE_NEEDS_REVIEW_BATCH_LIMIT,
+    exclude_run_id: str | None = None,
+) -> list[str]:
+    """needs_review 且复核次数未耗尽的 URL，按最新评估顺序有界返回。
+
+    ``exclude_run_id`` 是每 Run 一批的围栏：本 Run 已排队过复核的 URL
+    不再重复返回，避免同一 Run 多波反复消耗复核次数。
+    """
+    cap = profile_policy(store)["needs_review_max_attempts"]
+    state = load_profile_state(store)
+    if exclude_run_id and str(state.get("needs_review_attempted_run_id") or "") == str(exclude_run_id):
+        return []
+    attempts = _needs_review_attempts(store)
+    result: list[str] = []
+    for assessment in target_assessments(store):
+        if assessment.get("profile_class") != "needs_review":
+            continue
+        url = str(assessment.get("url") or "")
+        if not url or attempts.get(url, 0) >= cap:
+            continue
+        result.append(url)
+        if len(result) >= max(1, limit):
+            break
+    return result
+
+
+def mark_needs_review_queued(
+    store: ProjectStore,
+    urls: list[str],
+    *,
+    run_id: str | None = None,
+) -> list[str]:
+    """Record one review attempt per URL at queue time (not at model time).
+
+    调用方必须只对实际进入增量画像 Job 的 URL 计数；未入队的 URL 不得
+    消耗复核次数。``run_id`` 记录本 Run 已排队，配合 exclude_run_id 限流。
+    """
+    state = load_profile_state(store)
+    attempts = _needs_review_attempts(store)
+    queued: list[str] = []
+    for value in urls:
+        url = str(value or "").strip()
+        if url:
+            attempts[url] = attempts.get(url, 0) + 1
+            queued.append(url)
+    if queued:
+        state["needs_review_attempts"] = attempts
+        if run_id:
+            state["needs_review_attempted_run_id"] = str(run_id)
+        save_profile_state(store, state)
+    return queued
+
+
+def needs_review_exhausted_urls(store: ProjectStore) -> list[str]:
+    cap = profile_policy(store)["needs_review_max_attempts"]
+    attempts = _needs_review_attempts(store)
+    return [
+        str(assessment.get("url") or "")
+        for assessment in target_assessments(store)
+        if assessment.get("profile_class") == "needs_review"
+        and attempts.get(str(assessment.get("url") or ""), 0) >= cap
+    ]
+
+
+def assessment_coverage(store: ProjectStore) -> dict[str, Any]:
+    """采集 / 评估 / 待复核三维度覆盖，避免把“有 URL 记录”当成“已评级”。"""
+    profiled_urls = {str(item.get("url") or "") for item in target_profile(store)}
+    latest = target_assessments(store)
+    by_class = {"priority_target": 0, "routine_network_info": 0, "needs_review": 0}
+    assessed_urls: set[str] = set()
+    for assessment in latest:
+        profile_class = str(assessment.get("profile_class") or "")
+        if profile_class in by_class:
+            by_class[profile_class] += 1
+        url = str(assessment.get("url") or "")
+        if url:
+            assessed_urls.add(url)
+    exhausted = {url for url in needs_review_exhausted_urls(store) if url}
+    policy = profile_policy(store)
+    return {
+        "profiled_urls": len(profiled_urls),
+        "assessed": len(assessed_urls & profiled_urls),
+        "unassessed": len(profiled_urls - assessed_urls),
+        "by_class": by_class,
+        "needs_review_pending_recheck": max(0, by_class["needs_review"] - len(exhausted)),
+        "needs_review_exhausted": len(exhausted),
+        "enqueue_min_score": policy["enqueue_min_score"],
+        "assessment_policy_version": ASSESSMENT_POLICY_VERSION,
+    }

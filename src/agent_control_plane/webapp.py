@@ -29,7 +29,13 @@ from .quality import QualityLedger
 from .waf import WAFManager
 from .store import PROJECTS, ROOT, ProjectStore
 from .technologies import enriched_target_profile, technology_profile
-from .target_profile import routine_target_groups, target_assessments, target_profile
+from .target_profile import (
+    assessment_coverage,
+    ensure_profile_direction_restorable,
+    routine_target_groups,
+    target_assessments,
+    target_profile,
+)
 from .profile_workbook import build_profile_workbook
 from .platform_paths import valid_project_name
 from .projector import PROJECTOR_MANAGER
@@ -1071,6 +1077,7 @@ class AgentControlHandler(SimpleHTTPRequestHandler):
                     "technology_profile": technology_profile(store),
                     "target_profile": target_profile(store),
                     "target_assessments": target_assessments(store),
+                    "profile_coverage": assessment_coverage(store),
                     "routine_target_groups": routine_target_groups(store),
                     "enriched_target_profile": enriched_target_profile(store),
                     "asset_inventory": AssetInventory(store).summary(),
@@ -1318,7 +1325,7 @@ class AgentControlHandler(SimpleHTTPRequestHandler):
             guarded_paths = {
                 "/api/projects", "/api/target", "/api/config", "/api/gate/approve",
                 "/api/team-presets/save", "/api/team-presets/apply",
-                "/api/directions/dismiss",
+                "/api/directions/dismiss", "/api/directions/restore",
                 "/api/automation/start", "/api/automation/launch", "/api/automation/run",
                 "/api/automation/resume", "/api/automation/cancel", "/api/subtask/complete",
                 "/api/hints", "/api/team/run", "/api/findings/review",
@@ -1426,6 +1433,30 @@ class AgentControlHandler(SimpleHTTPRequestHandler):
                     "direction_id": direction_id,
                     "reason": reason,
                     "previous_intent": (direction.get("intent") or {}).get("verb"),
+                })
+                render_dashboard(store)
+                self._json({"ok": True, "direction": direction})
+                return
+
+            if parsed.path == "/api/directions/restore":
+                payload = self._read_json()
+                store = _safe_project(payload.get("vendor", DEFAULT_VENDOR))
+                direction_id = str(payload.get("direction_id", "")).strip()
+                reason = str(payload.get("reason", "")).strip()
+                if not direction_id:
+                    raise WebAppError("缺少 direction_id")
+                if not reason:
+                    raise WebAppError("人工恢复方向必须填写理由")
+                engine = AutomationEngine(store)
+                try:
+                    # 画像方向：同一逻辑方向已有有效后继时拒绝恢复过期版本。
+                    ensure_profile_direction_restorable(store, engine.db, direction_id)
+                except ValueError as exc:
+                    raise WebAppError(str(exc)) from exc
+                direction = engine.db.restore_direction(direction_id, reason)
+                _audit(store, "direction_human_restored", {
+                    "direction_id": direction_id,
+                    "reason": reason,
                 })
                 render_dashboard(store)
                 self._json({"ok": True, "direction": direction})
