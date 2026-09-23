@@ -2168,10 +2168,10 @@ class AssetInventory:
                         new_status = (
                             "exhausted" if int(item["attempts"] or 0) >= cap else "partial"
                         )
-                    elif complete and matched:
-                        new_status = "completed"
                     elif matched:
-                        new_status = "partial"
+                        # URL 粒度：该 URL 已有采集记录即完成——不依赖批次级
+                        # exploration_complete（批次未探索完只影响剩余 URL）。
+                        new_status = "completed"
                     else:
                         # kind=none / 无匹配记录：不能当作成功画像。
                         new_status = (

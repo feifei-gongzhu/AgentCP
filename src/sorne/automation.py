@@ -683,11 +683,14 @@ class AutomationEngine:
             for index in range(worker_count)
         ]
         for index, item_shard in enumerate(item_shards):
+            # 完整 URL 列表始终作为任务清单（URL 粒度）；端点 assignment
+            # 只用于身份与范围约束，不得覆盖具体 URL 列表。
             seed_shard = [str(item["canonical_url"]) for item in item_shard]
             assignments = AssetInventory.work_item_assignments(item_shard)
             if mode == "baseline":
-                # 基础画像的种子优先用项目所有者声明的原始目标（同主机时），
-                # 与配置目标保持一致的可点击入口。
+                # 基础画像的 assignment 种子优先用项目所有者声明的原始目标
+                # （同主机时），供 mrecon 采集使用；不改变交给 Worker 的
+                # URL 任务清单。
                 configured = pending_baseline_profile_targets(self.store)
                 configured_by_host = {
                     str(urlparse(value if "://" in value else f"https://{value}").hostname or "").casefold(): value
@@ -703,8 +706,6 @@ class AutomationEngine:
                     }
                     for item in assignments
                 ]
-                # mrecon 完成度按派发种子判定，同步替换 mrecon 去重用的种子串。
-                seed_shard = [str(item["seed_url"]) for item in assignments]
             job_member_name = (
                 member.name
                 if worker_count == 1
