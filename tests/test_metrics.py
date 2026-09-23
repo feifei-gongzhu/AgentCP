@@ -2,10 +2,10 @@ from pathlib import Path
 
 import pytest
 
-from src.agent_control_plane import store as store_module
-from src.agent_control_plane.metrics import collect_metrics
-from src.agent_control_plane.worker import apply_worker_output
-from src.agent_control_plane.store import ProjectStore
+from src.sorne import store as store_module
+from src.sorne.metrics import collect_metrics
+from src.sorne.worker import apply_worker_output
+from src.sorne.store import ProjectStore
 
 
 def test_empty_project_metrics_are_stable(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

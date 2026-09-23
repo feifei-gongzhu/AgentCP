@@ -3,14 +3,14 @@ import subprocess
 
 import pytest
 
-from src.agent_control_plane.drivers import (
+from src.sorne.drivers import (
     ClaudeCliDriver,
     CodexCliDriver,
     DriverConfig,
     DriverError,
     run_driver,
 )
-from src.agent_control_plane.store import ROOT
+from src.sorne.store import ROOT
 
 
 def emit_claude_result(line_callback, result: str = '{"kind":"none","reason":"ok"}') -> None:

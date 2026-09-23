@@ -3,14 +3,14 @@ from pathlib import Path
 
 import pytest
 
-from src.agent_control_plane import store as store_module
-from src.agent_control_plane.database import ControlDatabase
-from src.agent_control_plane.methodology import ensure_methodology
-from src.agent_control_plane.planning import intents_for_selected, normalize_plan_batch
-from src.agent_control_plane.schemas import GateStatus
-from src.agent_control_plane.phase import reconcile_phase
-from src.agent_control_plane.store import ProjectStore
-from src.agent_control_plane.worker import apply_worker_output
+from src.sorne import store as store_module
+from src.sorne.database import ControlDatabase
+from src.sorne.methodology import ensure_methodology
+from src.sorne.planning import intents_for_selected, normalize_plan_batch
+from src.sorne.schemas import GateStatus
+from src.sorne.phase import reconcile_phase
+from src.sorne.store import ProjectStore
+from src.sorne.worker import apply_worker_output
 
 
 def _project(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, name: str = "v3") -> ProjectStore:
@@ -37,14 +37,14 @@ def test_web_method_pack_generates_checklist_and_ten_seed_hypotheses(
 
     pack = store.read_json("method_pack.json")
     checklist = store.read_json("checklist.json")
-    assert result["method_pack"] == "agentcp-web-v3"
+    assert result["method_pack"] == "sorne-web-v3"
     assert len(pack["dimensions"]) == 10
     assert {item["id"] for item in pack["dimensions"]} == {
         "api_endpoint", "listening_port_service", "priv_esc_path", "asset_web_directory",
         "framework_config", "parser_target", "supply_chain_third_party", "credential_leak",
         "cloud_entitlement", "business_logic",
     }
-    assert checklist["method_pack_id"] == "agentcp-web-v3"
+    assert checklist["method_pack_id"] == "sorne-web-v3"
     assert "第三方支付生产环境" in checklist["red_lines"]
     assert len(store.read_jsonl("hypotheses.jsonl")) == 10
     assert len(store.read_jsonl("intents.jsonl")) == 10
@@ -251,7 +251,7 @@ def test_phase_progression_is_evidence_driven_and_monotonic(
     state.vulnerability_count = 1
     state.pending_human_review_count = 1
     store.save_state(state)
-    # V3.3：出现已验证漏洞后直接进入 report（verify 不再由计数自动触发）。
+    # Sorne 0.0.3：出现已验证漏洞后直接进入 report（verify 不再由计数自动触发）。
     assert reconcile_phase(store, "test_candidate") == "report"
 
     state = store.load_state()

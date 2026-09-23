@@ -3,10 +3,10 @@ from pathlib import Path
 
 import pytest
 
-from src.agent_control_plane import drivers as drivers_module
-from src.agent_control_plane import agent_compose as agent_compose_module
-from src.agent_control_plane import local_docker as local_docker_module
-from src.agent_control_plane.agent_compose import (
+from src.sorne import drivers as drivers_module
+from src.sorne import agent_compose as agent_compose_module
+from src.sorne import local_docker as local_docker_module
+from src.sorne.agent_compose import (
     AgentComposeProfile,
     AgentComposeRuntime,
     profile_from_driver_config,
@@ -18,8 +18,8 @@ from src.agent_control_plane.agent_compose import (
     _extract_worker_result,
     _agent_compose_log_fragment,
 )
-from src.agent_control_plane.drivers import DriverConfig
-from src.agent_control_plane.local_docker import (
+from src.sorne.drivers import DriverConfig
+from src.sorne.local_docker import (
     LocalDockerError,
     LocalDockerRuntime,
     _extract_runtime_payload,
@@ -42,7 +42,7 @@ def _fake_binary(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     binary = tmp_path / "agent-compose"
     binary.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
     binary.chmod(0o755)
-    monkeypatch.setenv("AGENTCP_AGENT_COMPOSE_BIN", str(binary))
+    monkeypatch.setenv("SORNE_AGENT_COMPOSE_BIN", str(binary))
     return binary
 
 
@@ -54,7 +54,7 @@ def test_configured_docker_binary_works_without_path(
     docker.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
     docker.chmod(0o755)
     monkeypatch.setenv("PATH", "/usr/bin:/bin")
-    monkeypatch.setenv("AGENTCP_DOCKER_BIN", str(docker))
+    monkeypatch.setenv("SORNE_DOCKER_BIN", str(docker))
 
     assert find_docker_binary() == str(docker.resolve())
 
@@ -169,7 +169,7 @@ def test_local_docker_codex_omits_incompatible_shared_output_schema(
     runtime_root = tmp_path / "runtime"
     runtime_root.mkdir()
     monkeypatch.setattr(
-        "src.agent_control_plane.local_docker.find_docker_binary",
+        "src.sorne.local_docker.find_docker_binary",
         lambda: "/usr/bin/docker",
     )
     runtime = LocalDockerRuntime(
@@ -239,13 +239,13 @@ def test_local_docker_claude_keeps_stdin_open_and_uses_root_safe_permissions(
     input_root.mkdir()
     schema_source = (
         Path(__file__).resolve().parents[1]
-        / "src" / "agent_control_plane" / "worker_output_schema.json"
+        / "src" / "sorne" / "worker_output_schema.json"
     )
     (input_root / "worker_output_schema.json").write_bytes(schema_source.read_bytes())
     runtime_root = tmp_path / "runtime"
     runtime_root.mkdir()
     monkeypatch.setattr(
-        "src.agent_control_plane.local_docker.find_docker_binary",
+        "src.sorne.local_docker.find_docker_binary",
         lambda: "/usr/bin/docker",
     )
     runtime = LocalDockerRuntime(
@@ -281,9 +281,9 @@ def test_frontend_claude_config_becomes_daemon_profile(
         type="claude-cli",
         model="deepseek-v4-pro",
         base_url="https://relay.example/anthropic",
-        api_key_env="AGENTCP_RUNTIME_API_KEY",
+        api_key_env="SORNE_RUNTIME_API_KEY",
         auth_mode="bearer",
-        env={"AGENTCP_RUNTIME_API_KEY": "frontend-secret"},
+        env={"SORNE_RUNTIME_API_KEY": "frontend-secret"},
         extra={"project_path": str(project), "member_name": "reason-main"},
     )
 
@@ -323,19 +323,19 @@ def test_compose_spec_mounts_workspace_but_never_persists_api_key(
     assert "do-not-write-me" not in raw
     agent = document["agents"]["executor-primary"]
     assert agent["provider"] == "claude"
-    # V3.3：项目挂载拆分为 evidence 与持久工作区两个独立 bind（不再整目录
-    # 挂载 /agentcp-project）；workspace-write 模式两者均可写。
+    # Sorne 0.0.3：项目挂载拆分为 evidence 与持久工作区两个独立 bind（不再整目录
+    # 挂载 /sorne-project）；workspace-write 模式两者均可写。
     assert agent["volumes"] == [
         {
             "type": "bind",
             "source": str((project / "evidence").resolve()),
-            "target": "/agentcp-project/evidence",
+            "target": "/sorne-project/evidence",
             "read_only": False,
         },
         {
             "type": "bind",
-            "source": str((project / ".agentcp-work").resolve()),
-            "target": "/agentcp-project/.agentcp-work",
+            "source": str((project / ".sorne-work").resolve()),
+            "target": "/sorne-project/.sorne-work",
             "read_only": False,
         },
     ]
@@ -729,9 +729,9 @@ def test_docker_cli_process_env_keeps_host_home(tmp_path: Path) -> None:
     """
     import os
 
-    from src.agent_control_plane.agent_compose import profile_from_driver_config
-    from src.agent_control_plane.drivers import DriverConfig
-    from src.agent_control_plane.local_docker import LocalDockerRuntime
+    from src.sorne.agent_compose import profile_from_driver_config
+    from src.sorne.drivers import DriverConfig
+    from src.sorne.local_docker import LocalDockerRuntime
 
     config = DriverConfig(
         type="claude-cli",

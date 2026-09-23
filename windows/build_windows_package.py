@@ -9,14 +9,14 @@ from zipfile import ZIP_DEFLATED, ZipFile
 
 
 ROOT = Path(__file__).resolve().parents[1]
-OUTPUT = ROOT / "dist" / "AgentCP-Windows-v3.3.zip"
+OUTPUT = ROOT / "dist" / "Sorne-Windows-0.0.3.zip"
 INCLUDE_ROOTS = ("src", "frontend", "teams", "windows", "docs", "third_party/agent-compose")
 ROOT_FILES = (
-    "agentcp", "agentcp.cmd", "Install-AgentCP.cmd", "Start-AgentCP.cmd",
-    "Stop-AgentCP.cmd", "README.md", "pyproject.toml",
+    "sorne", "sorne.cmd", "Install-Sorne.cmd", "Start-Sorne.cmd",
+    "Stop-Sorne.cmd", "README.md", "pyproject.toml",
 )
 EXCLUDED_PARTS = {
-    ".git", ".github", ".cache", ".claude", ".venv", ".venv-windows", ".agentcp-windows",
+    ".git", ".github", ".cache", ".claude", ".venv", ".venv-windows", ".sorne-windows",
     "__pycache__", "node_modules", "build", "coverage", "test-results",
     "playwright-report", "projects", "user_presets",
 }
@@ -45,7 +45,7 @@ def main() -> int:
     OUTPUT.parent.mkdir(parents=True, exist_ok=True)
     files = package_files()
     manifest = {
-        "product": "AgentCP", "version": "3.3.0",
+        "product": "Sorne", "version": "0.0.3",
         "platform": "Windows 10/11 x64",
         "created_at": datetime.now(timezone.utc).isoformat(),
         "file_count": len(files), "projects_included": False,
@@ -53,9 +53,9 @@ def main() -> int:
     }
     with ZipFile(OUTPUT, "w", ZIP_DEFLATED, compresslevel=9) as archive:
         for path in files:
-            archive.write(path, Path("AgentCP-Windows") / path.relative_to(ROOT))
+            archive.write(path, Path("Sorne-Windows") / path.relative_to(ROOT))
         archive.writestr(
-            "AgentCP-Windows/WINDOWS-PACKAGE.json",
+            "Sorne-Windows/WINDOWS-PACKAGE.json",
             json.dumps(manifest, ensure_ascii=False, indent=2) + "\n",
         )
     digest = hashlib.sha256(OUTPUT.read_bytes()).hexdigest()

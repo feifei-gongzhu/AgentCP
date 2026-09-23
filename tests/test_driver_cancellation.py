@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from src.agent_control_plane.drivers import ClaudeCliDriver, ContainerWorkerDriver, CodexCliDriver, DriverConfig, DriverError
+from src.sorne.drivers import ClaudeCliDriver, ContainerWorkerDriver, CodexCliDriver, DriverConfig, DriverError
 
 
 def test_cli_process_can_be_cancelled() -> None:

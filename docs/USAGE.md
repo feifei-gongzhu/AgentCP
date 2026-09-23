@@ -43,7 +43,7 @@ Worker 不直接修改黑板，Worker 之间不直接通信。所有协作都通
 
 项目配置中的每个角色都可以独立选择运行模式：
 
-- **本地 Docker（默认）**：AgentCP 直接创建本地容器并运行模型，不启动 agent-compose daemon。需要预先构建 `agent-compose-guest:latest`，项目位于容器 `/workspace`，可选目标源码只读挂载到 `/target`。
+- **本地 Docker（默认）**：Sorne 直接创建本地容器并运行模型，不启动 agent-compose daemon。需要预先构建 `agent-compose-guest:latest`，项目位于容器 `/workspace`，可选目标源码只读挂载到 `/target`。
 - **CT agent-compose（可选）**：使用仓库内 vendored agent-compose 的 daemon、session 与 sandbox。只有选择该模式时才需要构建其 Go 二进制。
 - **本地 CLI**：直接调用本机 Claude Code、Codex CLI、Ollama 或兼容 HTTP API，不要求 Docker。该模式没有容器级隔离，应继续使用 `read-only` 或 `workspace-write` 权限，并仅向可信目标开放。
 
@@ -74,8 +74,8 @@ projects/{项目名}/prompt_snapshots/P-xxxxxxxxxxxx.txt
 ## 3. 获取项目并准备 Python
 
 ```bash
-git clone https://github.com/feifei-gongzhu/AgentCP.git
-cd AgentCP
+git clone https://github.com/feifei-gongzhu/Sorne.git
+cd Sorne
 ```
 
 创建虚拟环境：
@@ -116,8 +116,8 @@ python -m pytest -q
 
 ```bash
 codex --version
-python3 agentcp init production-security
-python3 agentcp run-team production-security \
+python3 sorne init production-security
+python3 sorne run-team production-security \
   --team default \
   --max-workers 3 \
   --dry-run
@@ -126,7 +126,7 @@ python3 agentcp run-team production-security \
 `--dry-run` 只预览上下文，不发送模型请求。确认无误后再启动真实自动化：
 
 ```bash
-python3 agentcp automate production-security \
+python3 sorne automate production-security \
   --team default \
   --max-workers 3 \
   --timeout 600
@@ -135,7 +135,7 @@ python3 agentcp automate production-security \
 ## 5. 项目初始化
 
 ```bash
-python3 agentcp init vendor-name
+python3 sorne init vendor-name
 ```
 
 `vendor-name` 只能是安全的目录名，不能包含 `/`、`\` 或以 `.` 开头。
@@ -296,7 +296,7 @@ codex --version
 先预览 Prompt：
 
 ```bash
-python3 agentcp run-team vendor-name \
+python3 sorne run-team vendor-name \
   --team default \
   --max-workers 3 \
   --dry-run
@@ -305,7 +305,7 @@ python3 agentcp run-team vendor-name \
 单 Worker 预览：
 
 ```bash
-python3 agentcp run-worker vendor-name \
+python3 sorne run-worker vendor-name \
   --backend codex \
   --role reason \
   --dry-run
@@ -425,9 +425,9 @@ claude --version
 仓库提供正式 Worker 镜像定义：
 
 ```bash
-docker build -t agentcp-worker:latest worker-container
+docker build -t sorne-worker:latest worker-container
 export OPENAI_API_KEY="你的密钥"
-python3 agentcp automate production-security \
+python3 sorne automate production-security \
   --team production-container \
   --max-workers 4 \
   --timeout 600
@@ -482,7 +482,7 @@ teams/client-security.example.json
 ## 13. 一次性团队运行
 
 ```bash
-python3 agentcp run-team vendor-name \
+python3 sorne run-team vendor-name \
   --team default \
   --max-workers 3 \
   --timeout 300
@@ -499,7 +499,7 @@ python3 agentcp run-team vendor-name \
 ## 14. 运行一次自动化迭代
 
 ```bash
-python3 agentcp automate vendor-name \
+python3 sorne automate vendor-name \
   --team default \
   --max-workers 4 \
   --timeout 300
@@ -521,7 +521,7 @@ python3 agentcp automate vendor-name \
 本地模式：
 
 ```bash
-python3 agentcp automation-daemon vendor-name \
+python3 sorne automation-daemon vendor-name \
   --team default \
   --max-workers 4 \
   --timeout 300 \
@@ -539,7 +539,7 @@ python3 agentcp automation-daemon vendor-name \
 只跑一次：
 
 ```bash
-python3 agentcp automation-daemon vendor-name \
+python3 sorne automation-daemon vendor-name \
   --team default \
   --once
 ```
@@ -564,7 +564,7 @@ python3 agentcp automation-daemon vendor-name \
 批准继续：
 
 ```bash
-python3 agentcp approve-gate vendor-name \
+python3 sorne approve-gate vendor-name \
   --action continue \
   --reason "当前路径仍具有高业务价值，批准继续"
 ```
@@ -585,27 +585,27 @@ python3 agentcp approve-gate vendor-name \
 查看最新运行：
 
 ```bash
-python3 agentcp automation-status vendor-name
+python3 sorne automation-status vendor-name
 ```
 
 查看指定 Run：
 
 ```bash
-python3 agentcp automation-status vendor-name \
+python3 sorne automation-status vendor-name \
   --run-id R-xxxxxxxxxxxx
 ```
 
 恢复未完成 Run：
 
 ```bash
-python3 agentcp automation-resume vendor-name \
+python3 sorne automation-resume vendor-name \
   --run-id R-xxxxxxxxxxxx
 ```
 
 取消：
 
 ```bash
-python3 agentcp automation-cancel vendor-name \
+python3 sorne automation-cancel vendor-name \
   --run-id R-xxxxxxxxxxxx \
   --reason "用户主动停止"
 ```
@@ -644,7 +644,7 @@ python3 agentcp automation-cancel vendor-name \
 Hint 是人工干预 Worker 的唯一正式通道。
 
 ```bash
-python3 agentcp add-hint vendor-name \
+python3 sorne add-hint vendor-name \
   --content "metacog：从更新链路与本地服务降级组合方向重新检查" \
   --target "update-service" \
   --priority 10
@@ -655,7 +655,7 @@ Hint 包含 `metacog` 时会强制触发一轮 Metacog。同一 Hint 不会重�
 ## 20. 手动写入发现
 
 ```bash
-python3 agentcp add-fact vendor-name \
+python3 sorne add-fact vendor-name \
   --title "IPC 命令注入" \
   --category "ipc_endpoint" \
   --evidence "运行 PoC 后观察到命令返回 uid=0，日志中写入了可复核标记。" \
@@ -671,7 +671,7 @@ Guardian 会重新检查该发现，不会因为是人工输入就绕过质量�
 ## 21. 工程指标
 
 ```bash
-python3 agentcp metrics vendor-name
+python3 sorne metrics vendor-name
 ```
 
 输出包含：
@@ -696,13 +696,13 @@ unverified → observed → verified
 生成一个随机长 Token，并作为环境变量：
 
 ```bash
-export AGENTCP_SERVER_TOKEN="replace-with-a-long-random-token"
+export SORNE_SERVER_TOKEN="replace-with-a-long-random-token"
 ```
 
 启动服务：
 
 ```bash
-python3 agentcp serve \
+python3 sorne serve \
   --host 127.0.0.1 \
   --port 8765
 ```
@@ -718,13 +718,13 @@ http://127.0.0.1:8765/frontend/?vendor=vendor-name
 在另一个终端设置相同 Token：
 
 ```bash
-export AGENTCP_SERVER_TOKEN="replace-with-a-long-random-token"
+export SORNE_SERVER_TOKEN="replace-with-a-long-random-token"
 ```
 
 然后：
 
 ```bash
-python3 agentcp automation-daemon vendor-name \
+python3 sorne automation-daemon vendor-name \
   --server http://127.0.0.1:8765 \
   --team default \
   --max-workers 4
@@ -733,17 +733,17 @@ python3 agentcp automation-daemon vendor-name \
 远程查询：
 
 ```bash
-python3 agentcp automation-status vendor-name \
+python3 sorne automation-status vendor-name \
   --server http://127.0.0.1:8765
 
-python3 agentcp metrics vendor-name \
+python3 sorne metrics vendor-name \
   --server http://127.0.0.1:8765
 ```
 
 远程 Hint：
 
 ```bash
-python3 agentcp add-hint vendor-name \
+python3 sorne add-hint vendor-name \
   --server http://127.0.0.1:8765 \
   --content "metacog：检查 IPC 与更新链路的组合攻击面"
 ```
@@ -751,13 +751,13 @@ python3 agentcp add-hint vendor-name \
 远程批准：
 
 ```bash
-python3 agentcp approve-gate vendor-name \
+python3 sorne approve-gate vendor-name \
   --server http://127.0.0.1:8765 \
   --action continue \
   --reason "批准继续"
 ```
 
-如未设置 `AGENTCP_SERVER_TOKEN`，API 在本地模式下不要求 Token。任何非本机部署都应强制设置 Token，并由反向代理提供 HTTPS。
+如未设置 `SORNE_SERVER_TOKEN`，API 在本地模式下不要求 Token。任何非本机部署都应强制设置 Token，并由反向代理提供 HTTPS。
 
 ## 23. 主要 HTTP API
 
@@ -781,7 +781,7 @@ python3 agentcp approve-gate vendor-name \
 Token Header：
 
 ```text
-Authorization: Bearer <AGENTCP_SERVER_TOKEN>
+Authorization: Bearer <SORNE_SERVER_TOKEN>
 ```
 
 ### 暴露面资产底座
@@ -803,7 +803,7 @@ XLSX。导入不是把文件内容直接拼进 Prompt，而是先写入项目 SQ
 时才自动进入画像。失败任务在当前 Run 内不会无限重试；下一次由用户启动
 新 Run 时才会重新释放。
 
-SQLite 的内部 schema version 6 指的是提交 Outbox 数据模型版本，不是 AgentCP 产品版本，也不是模型输出 JSON 的版本。V5 负责资产结构与敏感来源最小化；V6 在此基础上增加 CommitPlan、commit event、投影 receipt、lease 与恢复游标。旧项目启动后会先验证实际表、列、索引、唯一约束和外键：缺表或普通索引可幂等补齐，无法无损修复的结构异常会 fail closed，绝不会只因版本号正确就盖章。V5 清理过的 `raw_json`、`raw_target` 和 `observed_value` 不会恢复秘密原值；已有目标画像也不要求重新花费一次基础画像。
+SQLite 的内部 schema version 6 指的是提交 Outbox 数据模型版本，不是 Sorne 产品版本，也不是模型输出 JSON 的版本。V5 负责资产结构与敏感来源最小化；V6 在此基础上增加 CommitPlan、commit event、投影 receipt、lease 与恢复游标。旧项目启动后会先验证实际表、列、索引、唯一约束和外键：缺表或普通索引可幂等补齐，无法无损修复的结构异常会 fail closed，绝不会只因版本号正确就盖章。V5 清理过的 `raw_json`、`raw_target` 和 `observed_value` 不会恢复秘密原值；已有目标画像也不要求重新花费一次基础画像。
 
 Worker 结果先在一个 SQLite 事务中校验 fencing token、写入冻结的
 CommitPlan，并把 Job 标记为 `enqueued`；事务提交后投影器才写 JSONL、
@@ -883,8 +883,8 @@ Fact 进入黑板时会更新对应维度的 `observed` 或 `verified` 状态。
 使用 WAL 的数据库：
 
 ```bash
-python3 agentcp backup vendor-name --output exports/vendor-name.agentcp-backup
-python3 agentcp verify-backup exports/vendor-name.agentcp-backup
+python3 sorne backup vendor-name --output exports/vendor-name.sorne-backup
+python3 sorne verify-backup exports/vendor-name.sorne-backup
 ```
 
 备份通过 SQLite online backup 获取一致快照，并排除 PID、日志、锁、
@@ -895,8 +895,8 @@ fail closed。
 Run：
 
 ```bash
-python3 agentcp restore exports/vendor-name.agentcp-backup --confirm vendor-name
-python3 agentcp restore exports/vendor-name.agentcp-backup --confirm vendor-name --replace
+python3 sorne restore exports/vendor-name.sorne-backup --confirm vendor-name
+python3 sorne restore exports/vendor-name.sorne-backup --confirm vendor-name --replace
 ```
 
 恢复会先在同文件系统隐藏 staging 中流式校验路径、类型、大小、压缩比、
@@ -905,14 +905,14 @@ python3 agentcp restore exports/vendor-name.agentcp-backup --confirm vendor-name
 恢复未投影 Outbox 并刷新 Markdown/dashboard 派生视图：
 
 ```bash
-python3 agentcp rebuild-projections vendor-name --confirm vendor-name
+python3 sorne rebuild-projections vendor-name --confirm vendor-name
 ```
 
 先完成并复验备份、再删除源项目：
 
 ```bash
-python3 agentcp archive vendor-name \
-  --output exports/vendor-name.agentcp-backup \
+python3 sorne archive vendor-name \
+  --output exports/vendor-name.sorne-backup \
   --confirm vendor-name
 ```
 
@@ -934,7 +934,7 @@ GET /readyz
 执行：
 
 ```bash
-python3 agentcp approve-gate vendor-name \
+python3 sorne approve-gate vendor-name \
   --action continue \
   --reason "批准继续"
 ```
@@ -959,7 +959,7 @@ teams/foo.json
 
 ```bash
 codex --version
-python3 agentcp run-worker vendor-name --backend codex --role reason --dry-run
+python3 sorne run-worker vendor-name --backend codex --role reason --dry-run
 ```
 
 再检查 Codex 本身的登录或 Provider 配置。
@@ -979,13 +979,13 @@ export OPENAI_API_KEY="your-key"
 查看：
 
 ```bash
-python3 agentcp automation-status vendor-name
+python3 sorne automation-status vendor-name
 ```
 
 如 Worker 已崩溃，租约过期后任务会被重新认领。如需立即终止：
 
 ```bash
-python3 agentcp automation-cancel vendor-name \
+python3 sorne automation-cancel vendor-name \
   --run-id R-xxxxxxxxxxxx
 ```
 
@@ -994,7 +994,7 @@ python3 agentcp automation-cancel vendor-name \
 通常是提交过程中触发了高危门禁。结果仍在 SQLite，批准门禁后执行：
 
 ```bash
-python3 agentcp automation-resume vendor-name \
+python3 sorne automation-resume vendor-name \
   --run-id R-xxxxxxxxxxxx
 ```
 
@@ -1013,25 +1013,25 @@ docker image inspect your-worker-image:latest
 
 ```bash
 # 1. 初始化
-python3 agentcp init client-audit
+python3 sorne init client-audit
 
 # 2. 在前端“目标配置”填写测试目标（推荐）
 # 或编辑 projects/client-audit/目标信息.md 与 target.json
 # 编辑 projects/client-audit/检查清单.yaml
 
 # 3. 预览三个角色的 Prompt
-python3 agentcp run-team client-audit \
+python3 sorne run-team client-audit \
   --team default \
   --max-workers 3 \
   --dry-run
 
 # 4. 启动控制平面
-export AGENTCP_SERVER_TOKEN="replace-with-a-long-random-token"
-python3 agentcp serve --host 127.0.0.1 --port 8765
+export SORNE_SERVER_TOKEN="replace-with-a-long-random-token"
+python3 sorne serve --host 127.0.0.1 --port 8765
 
 # 5. 在另一个终端启动调度器
-export AGENTCP_SERVER_TOKEN="replace-with-a-long-random-token"
-python3 agentcp automation-daemon client-audit \
+export SORNE_SERVER_TOKEN="replace-with-a-long-random-token"
+python3 sorne automation-daemon client-audit \
   --server http://127.0.0.1:8765 \
   --team default \
   --max-workers 4 \
@@ -1041,18 +1041,18 @@ python3 agentcp automation-daemon client-audit \
 # http://127.0.0.1:8765/frontend/?vendor=client-audit
 
 # 7. 根据需要写入 Hint
-python3 agentcp add-hint client-audit \
+python3 sorne add-hint client-audit \
   --server http://127.0.0.1:8765 \
   --content "metacog：从高业务影响倒推新的组合攻击路径"
 
 # 8. 门禁审批
-python3 agentcp approve-gate client-audit \
+python3 sorne approve-gate client-audit \
   --server http://127.0.0.1:8765 \
   --action continue \
   --reason "批准进入下一迭代"
 
 # 9. 查看指标
-python3 agentcp metrics client-audit \
+python3 sorne metrics client-audit \
   --server http://127.0.0.1:8765
 ```
 

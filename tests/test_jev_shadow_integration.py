@@ -5,17 +5,17 @@ from pathlib import Path
 
 import pytest
 
-from src.agent_control_plane import store as store_module
-from src.agent_control_plane.asset_inventory import AssetInventory
-from src.agent_control_plane.database import ControlDatabase
-from src.agent_control_plane.jev_classifier import JEV_QUESTION_SET_VERSION, classify_targets
-from src.agent_control_plane.store import ProjectStore
-from src.agent_control_plane.target_profile import record_target_profile, target_assessments
-from src.agent_control_plane.worker import apply_worker_output
+from src.sorne import store as store_module
+from src.sorne.asset_inventory import AssetInventory
+from src.sorne.database import ControlDatabase
+from src.sorne.jev_classifier import JEV_QUESTION_SET_VERSION, classify_targets
+from src.sorne.store import ProjectStore
+from src.sorne.target_profile import record_target_profile, target_assessments
+from src.sorne.worker import apply_worker_output
 
 
 def _project(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, vendor: str = "jev-shadow") -> ProjectStore:
-    monkeypatch.delenv("AGENTCP_JEV_ENDPOINT", raising=False)
+    monkeypatch.delenv("SORNE_JEV_ENDPOINT", raising=False)
     monkeypatch.setattr(store_module, "PROJECTS", tmp_path / "projects")
     store = ProjectStore(vendor)
     store.init()
@@ -48,7 +48,7 @@ def test_shadow_attaches_in_commit_path_and_freezes_into_payload(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """影子数据在提交冻结前生成、随载荷冻结；调度行为零变化。"""
-    from src.agent_control_plane.automation import AutomationEngine
+    from src.sorne.automation import AutomationEngine
 
     store = _project(tmp_path, monkeypatch)
     record_target_profile(store, [{
@@ -73,10 +73,10 @@ def test_shadow_attaches_in_commit_path_and_freezes_into_payload(
         return {"answers": answers, "model": "jev-1.13"}
 
     monkeypatch.setattr(
-        "src.agent_control_plane.jev_classifier.jev_configured", lambda: True,
+        "src.sorne.jev_classifier.jev_configured", lambda: True,
     )
     monkeypatch.setattr(
-        "src.agent_control_plane.jev_classifier.default_transport", transport,
+        "src.sorne.jev_classifier.default_transport", transport,
     )
     summaries = engine._commit_candidates(run_id)
 
@@ -107,9 +107,9 @@ def test_projection_replay_never_reinvokes_transport(
     retry_wait，恢复写入后由 Projector.recover() 领取重放；JSONL 幂等
     标记保证记录不重复，transport 调用数不得增加。
     """
-    from src.agent_control_plane.automation import AutomationEngine
-    from src.agent_control_plane.database import ControlDatabase
-    from src.agent_control_plane.projector import Projector
+    from src.sorne.automation import AutomationEngine
+    from src.sorne.database import ControlDatabase
+    from src.sorne.projector import Projector
 
     store = _project(tmp_path, monkeypatch)
     engine = AutomationEngine(store)
@@ -135,10 +135,10 @@ def test_projection_replay_never_reinvokes_transport(
         }
 
     monkeypatch.setattr(
-        "src.agent_control_plane.jev_classifier.jev_configured", lambda: True,
+        "src.sorne.jev_classifier.jev_configured", lambda: True,
     )
     monkeypatch.setattr(
-        "src.agent_control_plane.jev_classifier.default_transport", counting_transport,
+        "src.sorne.jev_classifier.default_transport", counting_transport,
     )
 
     # 回执写入前注入失败（第一次调用抛 OSError，之后恢复正常）。
@@ -197,7 +197,7 @@ def test_projection_replay_never_reinvokes_transport(
 def test_transport_failure_does_not_block_candidate(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from src.agent_control_plane.automation import AutomationEngine
+    from src.sorne.automation import AutomationEngine
 
     store = _project(tmp_path, monkeypatch)
     engine = AutomationEngine(store)
@@ -211,14 +211,14 @@ def test_transport_failure_does_not_block_candidate(
     }], proposed_by="test")
 
     monkeypatch.setattr(
-        "src.agent_control_plane.jev_classifier.jev_configured", lambda: True,
+        "src.sorne.jev_classifier.jev_configured", lambda: True,
     )
 
     def broken_transport(state, questions):
         raise RuntimeError("jev endpoint 500")
 
     monkeypatch.setattr(
-        "src.agent_control_plane.jev_classifier.default_transport", broken_transport,
+        "src.sorne.jev_classifier.default_transport", broken_transport,
     )
     summaries = engine._commit_candidates(run_id)
 
@@ -236,7 +236,7 @@ def test_transport_failure_does_not_block_candidate(
 def test_disabled_leaves_zero_footprint(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from src.agent_control_plane.automation import AutomationEngine
+    from src.sorne.automation import AutomationEngine
 
     store = _project(tmp_path, monkeypatch)  # fixture 里已删除端点环境变量
     engine = AutomationEngine(store)
@@ -265,7 +265,7 @@ def test_disabled_leaves_zero_footprint(
 def test_provenance_merges_through_record_target_assessments(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from src.agent_control_plane.target_profile import record_target_assessments
+    from src.sorne.target_profile import record_target_assessments
 
     store = _project(tmp_path, monkeypatch)
     record_target_profile(store, [{

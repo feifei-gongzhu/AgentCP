@@ -6,7 +6,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import pytest
 
-from src.agent_control_plane.jev_classifier import (
+from src.sorne.jev_classifier import (
     ENTRY_TYPE_CRITERIA,
     JEV_MAX_TARGETS_PER_CALL,
     JEV_QUESTION_SET_VERSION,
@@ -50,7 +50,7 @@ def _official_answers(state_text: str) -> dict:
 
 
 def test_disabled_without_endpoint_or_transport(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv("AGENTCP_JEV_ENDPOINT", raising=False)
+    monkeypatch.delenv("SORNE_JEV_ENDPOINT", raising=False)
     assert classify_targets([_row()]) is None, "未配置端点时必须零行为"
 
 
@@ -91,8 +91,8 @@ def test_official_rest_contract_with_local_http_mock(
     server = HTTPServer(("127.0.0.1", 0), Handler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
-    monkeypatch.setenv("AGENTCP_JEV_ENDPOINT", f"http://127.0.0.1:{server.server_port}")
-    monkeypatch.setenv("AGENTCP_JEV_API_KEY", "test-key")
+    monkeypatch.setenv("SORNE_JEV_ENDPOINT", f"http://127.0.0.1:{server.server_port}")
+    monkeypatch.setenv("SORNE_JEV_API_KEY", "test-key")
     try:
         result = classify_targets([_row()])
     finally:
@@ -175,7 +175,7 @@ def test_state_fingerprint_is_deterministic_and_sensitive_to_state() -> None:
 
 
 def test_batch_is_bounded_and_overflow_recorded(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv("AGENTCP_JEV_ENDPOINT", raising=False)
+    monkeypatch.delenv("SORNE_JEV_ENDPOINT", raising=False)
     seen: list[int] = []
 
     def transport(state_text, questions):
@@ -201,7 +201,7 @@ def test_confidence_band_three_range_defaults() -> None:
 
 
 def test_malformed_transport_answer_is_tolerated(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv("AGENTCP_JEV_ENDPOINT", raising=False)
+    monkeypatch.delenv("SORNE_JEV_ENDPOINT", raising=False)
 
     def transport(state_text, questions):
         return {
@@ -226,7 +226,7 @@ def test_malformed_transport_answer_is_tolerated(monkeypatch: pytest.MonkeyPatch
 
 def test_long_urls_keep_identity_and_do_not_cross(monkeypatch: pytest.MonkeyPatch) -> None:
     """前 300 字符相同的长 URL：结果按完整 URL 归位，不得丢失或串记录。"""
-    monkeypatch.delenv("AGENTCP_JEV_ENDPOINT", raising=False)
+    monkeypatch.delenv("SORNE_JEV_ENDPOINT", raising=False)
     prefix = "https://example.com/" + "a" * 285  # 305 字符的前缀，前 300 完全相同
     url_one = prefix + "/one?x=1"
     url_two = prefix + "/two?x=2"
@@ -259,7 +259,7 @@ def test_long_urls_keep_identity_and_do_not_cross(monkeypatch: pytest.MonkeyPatc
 
 def test_invalid_answers_are_rejected_and_recorded(monkeypatch: pytest.MonkeyPatch) -> None:
     """choice 选项越界、confidence/noul 超范围或非数值：拒绝并记录解析失败。"""
-    monkeypatch.delenv("AGENTCP_JEV_ENDPOINT", raising=False)
+    monkeypatch.delenv("SORNE_JEV_ENDPOINT", raising=False)
 
     def transport(state_text, questions):
         return {

@@ -3,16 +3,16 @@ import sys
 
 import pytest
 
-from src.agent_control_plane import store as store_module
-from src.agent_control_plane import webapp as webapp_module
-from src.agent_control_plane import cli as cli_module
-from src.agent_control_plane.automation import AutomationEngine
-from src.agent_control_plane.dashboard import render_dashboard
-from src.agent_control_plane.lifecycle import ProjectLifecycleMissing, project_execution_lock
-from src.agent_control_plane.metrics import collect_metrics
-from src.agent_control_plane.store import ProjectStore
-from src.agent_control_plane.team import run_team
-from src.agent_control_plane.worker import run_worker
+from src.sorne import store as store_module
+from src.sorne import webapp as webapp_module
+from src.sorne import cli as cli_module
+from src.sorne.automation import AutomationEngine
+from src.sorne.dashboard import render_dashboard
+from src.sorne.lifecycle import ProjectLifecycleMissing, project_execution_lock
+from src.sorne.metrics import collect_metrics
+from src.sorne.store import ProjectStore
+from src.sorne.team import run_team
+from src.sorne.worker import run_worker
 
 
 def _projects_at(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
@@ -136,7 +136,7 @@ def test_local_cli_commands_cannot_revive_deleted_project(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     projects = _projects_at(tmp_path, monkeypatch)
-    monkeypatch.setattr(sys, "argv", ["agentcp", *arguments])
+    monkeypatch.setattr(sys, "argv", ["sorne", *arguments])
 
     with pytest.raises(ProjectLifecycleMissing):
         cli_module.main()

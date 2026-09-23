@@ -25,7 +25,7 @@ import {
 } from "./modules/technology-profile.js";
 import { ROUTES, routeFromHash } from "./modules/router.js";
 /* ==========================================================================
-   AgentCP 前端（app.js）
+   Sorne 前端（app.js）
    原生 JS，无构建步骤。结构：
      1. 状态与工具   2. API    3. 路由    4. 任务中心
      5. 数据派生     6. 运行页  7. 配置页  8. 动作与事件绑定  9. 启动
@@ -1093,7 +1093,7 @@ function renderJobsPanel(automation) {
       const signal = latestModelSignal(job, automationEvents);
       const activity = cell("", "job-activity");
       activity.append(el("strong", "", jobSignalText(job, signal)));
-      activity.append(el("span", "", job.last_heartbeat_at ? `AgentCP 调度心跳 ${formatEventTime(job.last_heartbeat_at)}` : "尚未收到 AgentCP 调度心跳"));
+      activity.append(el("span", "", job.last_heartbeat_at ? `Sorne 调度心跳 ${formatEventTime(job.last_heartbeat_at)}` : "尚未收到 Sorne 调度心跳"));
       if (job.status === "running") activity.append(el("small", "", "工具事件来自 Claude stream-json；调度心跳与工具进度独立"));
       if (job.error) {
         const errorNode = el("code", "", truncateText(job.error, 220));
@@ -1136,7 +1136,7 @@ function friendlyEvent(event) {
   if (type === "model_policy_fallback_started") return { kind: "waiting", title: "历史版本提示词降级记录", summary: member, meta: "当前版本已禁用此降级；新调用与重试始终携带 Agent 专属提示词", detail: data.reason || "该事件由旧版本运行产生" };
   if (["model_call_retry", "model_call_retried", "model_retry_scheduled", "model_call_retry_scheduled"].includes(type)) return { kind: "retry", title: "已安排模型重试", summary: member, meta: data.next_attempt ? `下一次：第 ${data.next_attempt}/${data.max_attempts || "?"} 次` : "即将重新调用模型服务" };
   if (type === "model_thinking_progress") return { kind: "thinking", title: "模型思考中", summary: activityTarget || member, meta: data.estimated_tokens != null ? `已思考 ${data.estimated_tokens} tokens` : "模型正在分析上下文和规划执行步骤", detail: "模型 Extended Thinking 进行中，思考完成后将开始工具调用。" };
-  if (type === "model_call_waiting") return { kind: "waiting", title: "等待模型运行时新事件", summary: activityTarget || member, meta: data.elapsed_seconds == null ? "AgentCP 调度心跳正常" : `已等待 ${data.elapsed_seconds}s / ${data.timeout_seconds || "?"}s · AgentCP 调度心跳正常`, detail: "这是调度心跳；任务行会继续保留最近一次模型工具动作。" };
+  if (type === "model_call_waiting") return { kind: "waiting", title: "等待模型运行时新事件", summary: activityTarget || member, meta: data.elapsed_seconds == null ? "Sorne 调度心跳正常" : `已等待 ${data.elapsed_seconds}s / ${data.timeout_seconds || "?"}s · Sorne 调度心跳正常`, detail: "这是调度心跳；任务行会继续保留最近一次模型工具动作。" };
   if (type === "run_execution_budget_paused") return { kind: "waiting", title: "运行预算不足，已安全暂停", summary: `下一阶段：${data.next_stage || "待定"}`, meta: `剩余 ${data.remaining_seconds ?? 0}s · 完整调用需要 ${data.required_seconds ?? "?"}s`, detail: "没有创建新的模型任务；已完成结果和未完成待办均已持久化，可恢复运行继续。" };
   if (type === "run_execution_budget_renewed") return { kind: "completed", title: "运行预算已续签", summary: data.execution_deadline ? `新截止时间：${formatEventTime(data.execution_deadline)}` : "可继续执行", meta: data.lease_seconds ? `新增预算 ${formatDuration(data.lease_seconds)}` : "" };
   return null;
@@ -1429,13 +1429,13 @@ function applyMemberFieldVisibility() {
     note.hidden = false;
   } else if ($("mRuntimeMode").value === "local-cli") {
     const localCliHints = {
-      "codex": "本地 CLI 模式会直接调用宿主机上的 codex CLI，请确保它已安装并在启动 AgentCP 服务的进程 PATH 中，否则会报“未找到可执行文件”。",
-      "claude-cli": relay
+      "codex": "本地 CLI 模式会直接调用宿主机上的 codex CLI，请确保它已安装并在启动 Sorne 服务的进程 PATH 中，否则会报“未找到可执行文件”。",
+      "claude-cli": claudeRelay
         ? "claude 中转站模式：请在下方填入会话 API Key（保存到系统钥匙串），密钥会自动注入子进程，无需手动设置环境变量。"
         : "本机 Claude 登录态：直接使用 claude CLI 已登录的账号，无需配置任何密钥；只有填写服务地址（中转站）时才需要密钥。",
       "openai-compatible": "openai-compatible 通过 HTTP 请求服务地址指向的模型 API，不依赖本地可执行文件，无需安装 CLI。",
     };
-    note.textContent = localCliHints[type] || `本地 CLI 模式会直接调用宿主机上的 ${type}，请确保它已安装并在启动 AgentCP 服务的进程 PATH 中。`;
+    note.textContent = localCliHints[type] || `本地 CLI 模式会直接调用宿主机上的 ${type}，请确保它已安装并在启动 Sorne 服务的进程 PATH 中。`;
     note.hidden = false;
   } else {
     note.hidden = true;

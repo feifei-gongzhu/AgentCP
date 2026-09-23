@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-from src.agent_control_plane.database import ControlDatabase
+from src.sorne.database import ControlDatabase
 
 
 def test_expired_lease_can_be_reclaimed(tmp_path: Path) -> None:

@@ -100,14 +100,14 @@ https://relay.example.com/openai/company-a/v1
 这里填写环境变量名，不是真实 Key。例如：
 
 ```text
-AGENTCP_RELAY_API_KEY
+SORNE_RELAY_API_KEY
 ```
 
-真实密钥必须在启动 AgentCP 服务的同一个终端环境中设置：
+真实密钥必须在启动 Sorne 服务的同一个终端环境中设置：
 
 ```bash
-export AGENTCP_RELAY_API_KEY="你的中转站密钥"
-python3 agentcp serve --host 127.0.0.1 --port 8765
+export SORNE_RELAY_API_KEY="你的中转站密钥"
+python3 sorne serve --host 127.0.0.1 --port 8765
 ```
 
 如果服务已经运行，再执行 `export` 不会改变现有服务进程的环境变量；需要停止服务后，从已经设置变量的终端重新启动。
@@ -170,7 +170,7 @@ POST /v1/chat/completions
 | 后端 | `openai-compatible` |
 | 模型 | 中转站提供的模型 ID |
 | 服务地址 | `https://relay.example.com/v1` |
-| 密钥变量 | `AGENTCP_RELAY_API_KEY` |
+| 密钥变量 | `SORNE_RELAY_API_KEY` |
 | 沙箱 | `read-only` |
 | 并发 | `1` |
 | 优先级 | `0` |
@@ -189,7 +189,7 @@ POST /v1/chat/completions
 鉴权头为：
 
 ```text
-Authorization: Bearer ${AGENTCP_RELAY_API_KEY}
+Authorization: Bearer ${SORNE_RELAY_API_KEY}
 ```
 
 中转站必须满足：
@@ -223,17 +223,17 @@ Reviewer  → openai-compatible 中转站
 | 后端 | `codex` |
 | 模型 | 中转站提供的模型 ID |
 | 服务地址 | `https://relay.example.com/v1` |
-| 密钥变量 | `AGENTCP_RELAY_API_KEY` |
+| 密钥变量 | `SORNE_RELAY_API_KEY` |
 | 沙箱 | `workspace-write` |
 | 并发 | `1` |
 | 优先级 | `1` |
 
-AgentCP 会给 Codex CLI 注入一个自定义 Provider：
+Sorne 会给 Codex CLI 注入一个自定义 Provider：
 
 ```text
 wire_api = responses
 base_url = https://relay.example.com/v1
-env_key = AGENTCP_RELAY_API_KEY
+env_key = SORNE_RELAY_API_KEY
 ```
 
 中转站必须真实兼容 Responses API，而不只是把 Chat Completions 包装成相似格式。如果中转站只支持 `/chat/completions`，这种配置通常会失败，应改用方案 A。
@@ -248,7 +248,7 @@ reason-main
   后端: openai-compatible
   模型: 中转站模型 ID
   服务地址: https://relay.example.com/v1
-  密钥变量: AGENTCP_RELAY_API_KEY
+  密钥变量: SORNE_RELAY_API_KEY
   沙箱: read-only
   并发: 1
   优先级: 0
@@ -258,7 +258,7 @@ metacog-main
   后端: openai-compatible
   模型: 中转站模型 ID
   服务地址: https://relay.example.com/v1
-  密钥变量: AGENTCP_RELAY_API_KEY
+  密钥变量: SORNE_RELAY_API_KEY
   沙箱: read-only
   并发: 1
   优先级: 1
@@ -278,7 +278,7 @@ reviewer-main
   后端: openai-compatible
   模型: 中转站模型 ID
   服务地址: https://relay.example.com/v1
-  密钥变量: AGENTCP_RELAY_API_KEY
+  密钥变量: SORNE_RELAY_API_KEY
   沙箱: read-only
   并发: 1
   优先级: 2
@@ -303,10 +303,10 @@ reviewer-main
 
 ```bash
 export RELAY_BASE_URL="https://relay.example.com/v1"
-export AGENTCP_RELAY_API_KEY="你的中转站密钥"
+export SORNE_RELAY_API_KEY="你的中转站密钥"
 
 curl "$RELAY_BASE_URL/chat/completions" \
-  -H "Authorization: Bearer $AGENTCP_RELAY_API_KEY" \
+  -H "Authorization: Bearer $SORNE_RELAY_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{
     "model": "your-model-id",
@@ -320,7 +320,7 @@ curl "$RELAY_BASE_URL/chat/completions" \
 随后可预览团队 Prompt，不产生真实模型请求：
 
 ```bash
-python3 agentcp run-team 项目名 --team default --max-workers 3 --dry-run
+python3 sorne run-team 项目名 --team default --max-workers 3 --dry-run
 ```
 
 ## 9. 常见错误
@@ -330,10 +330,10 @@ python3 agentcp run-team 项目名 --team default --max-workers 3 --dry-run
 错误：
 
 ```text
-缺少环境变量: AGENTCP_RELAY_API_KEY
+缺少环境变量: SORNE_RELAY_API_KEY
 ```
 
-原因是 Key 没有进入 AgentCP 服务进程。停止服务，在设置环境变量的同一个终端重新启动。
+原因是 Key 没有进入 Sorne 服务进程。停止服务，在设置环境变量的同一个终端重新启动。
 
 ### 404
 
@@ -406,4 +406,4 @@ Executor 沙箱：workspace-write
 
 保存后，后端会立即持有该会话密钥。下一次启动自动化时，Driver 使用上述地址、模型、鉴权和权限配置调用 Claude Code。页面刷新不会丢失会话密钥；macOS 服务重启后会自动恢复，其他系统重启后需要重新输入。
 
-AgentCP 启动的所有 Claude 子进程都会排除 Claude 的 `user` / `local` 设置，并清理继承的 Anthropic、Bedrock、Vertex 与 Foundry 路由及模型变量；角色配置了中转站时，再仅注入当前角色在前端保存的地址、模型和会话 Key。因此 AgentCP 不会读取、修改或切换 CCSwitch 的配置；CCSwitch 中正在运行的其他任务也不属于 AgentCP 的进程管理范围。
+Sorne 启动的所有 Claude 子进程都会排除 Claude 的 `user` / `local` 设置，并清理继承的 Anthropic、Bedrock、Vertex 与 Foundry 路由及模型变量；角色配置了中转站时，再仅注入当前角色在前端保存的地址、模型和会话 Key。因此 Sorne 不会读取、修改或切换 CCSwitch 的配置；CCSwitch 中正在运行的其他任务也不属于 Sorne 的进程管理范围。

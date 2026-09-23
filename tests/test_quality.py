@@ -3,10 +3,10 @@ from pathlib import Path
 
 import pytest
 
-from src.agent_control_plane import store as store_module
-from src.agent_control_plane.quality import QualityLedger
-from src.agent_control_plane.store import ProjectStore
-from src.agent_control_plane.worker import apply_worker_output
+from src.sorne import store as store_module
+from src.sorne.quality import QualityLedger
+from src.sorne.store import ProjectStore
+from src.sorne.worker import apply_worker_output
 
 
 def _verified_vulnerability(store: ProjectStore, name: str) -> str:

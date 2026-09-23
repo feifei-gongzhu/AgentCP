@@ -3,10 +3,10 @@ from pathlib import Path
 
 import pytest
 
-from src.agent_control_plane import store as store_module
-from src.agent_control_plane import team as team_module
-from src.agent_control_plane.store import ProjectStore
-from src.agent_control_plane.runtime_secrets import RuntimeSecretStore
+from src.sorne import store as store_module
+from src.sorne import team as team_module
+from src.sorne.store import ProjectStore
+from src.sorne.runtime_secrets import RuntimeSecretStore
 
 
 def test_parallel_batch_commits_then_waits_for_approval(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -29,7 +29,7 @@ def test_parallel_batch_commits_then_waits_for_approval(tmp_path: Path, monkeypa
     assert "reason done" in output
     assert "metacog done" in output
     assert "reviewer done" in output
-    # V3.3 显式门禁：并发批次完成不再默认暂停等待批准（人工复核异步进行）。
+    # Sorne 0.0.3 显式门禁：并发批次完成不再默认暂停等待批准（人工复核异步进行）。
     assert store.load_state().gate_status == "running"
     assert len(store.read_jsonl("team_runs.jsonl")) == 1
 
@@ -90,8 +90,8 @@ def test_runtime_secret_from_frontend_reaches_driver_without_persistence(
         RuntimeSecretStore.clear(store.vendor)
 
     config = captured["config"]
-    assert config.api_key_env == "AGENTCP_RUNTIME_API_KEY"
-    assert config.env["AGENTCP_RUNTIME_API_KEY"] == "session-only-secret"
+    assert config.api_key_env == "SORNE_RUNTIME_API_KEY"
+    assert config.env["SORNE_RUNTIME_API_KEY"] == "session-only-secret"
     assert config.extra["runtime_mode"] == "local-docker"
     assert "项目所有者为当前 Agent 配置的专属提示词" in captured["prompt"]
     assert "只输出能够被 Executor 直接执行的方向，禁止重复枚举。" in captured["prompt"]

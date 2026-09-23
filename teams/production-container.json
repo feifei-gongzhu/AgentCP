@@ -27,8 +27,8 @@
       "max_running": 3,
       "env": {},
       "extra": {
-        "image": "agentcp-worker:latest",
-        "worker_command": ["python3", "/opt/agentcp/entrypoint.py"],
+        "image": "sorne-worker:latest",
+        "worker_command": ["python3", "/opt/sorne/entrypoint.py"],
         "network": "bridge",
         "cpus": "2",
         "memory": "3g",

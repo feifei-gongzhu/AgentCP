@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import pytest
 
-from src.agent_control_plane import runtime_secrets as secrets_module
-from src.agent_control_plane.runtime_secrets import RuntimeSecretStore, SecretStoreError
+from src.sorne import runtime_secrets as secrets_module
+from src.sorne.runtime_secrets import RuntimeSecretStore, SecretStoreError
 
 
 @pytest.fixture(autouse=True)

@@ -2,12 +2,12 @@ from pathlib import Path
 
 import pytest
 
-from src.agent_control_plane import store as store_module
-from src.agent_control_plane.scheduler import Scheduler
-from src.agent_control_plane.schemas import GateStatus, Hint
-from src.agent_control_plane.directives import authoritative_directives
-from src.agent_control_plane.store import ProjectStore
-from src.agent_control_plane.worker import WorkerError, apply_worker_output, build_worker_prompt
+from src.sorne import store as store_module
+from src.sorne.scheduler import Scheduler
+from src.sorne.schemas import GateStatus, Hint
+from src.sorne.directives import authoritative_directives
+from src.sorne.store import ProjectStore
+from src.sorne.worker import WorkerError, apply_worker_output, build_worker_prompt
 
 
 @pytest.fixture()
@@ -65,7 +65,7 @@ def test_human_controller_intervention_is_injected_by_priority(project: ProjectS
 
     prompt = build_worker_prompt(project, "reason")
 
-    assert "项目所有者指令（AgentCP 内部最高控制优先级）" in prompt
+    assert "项目所有者指令（Sorne 内部最高控制优先级）" in prompt
     assert prompt.index("停止重复枚举") < prompt.index("普通补充")
     assert '"intervention_type": "redirect"' in prompt
 
@@ -100,7 +100,7 @@ def test_human_dismissed_direction_is_removed_from_worker_context(project: Proje
         "success_criteria": "错误成功条件",
     }
     project.append_jsonl("intents.jsonl", intent)
-    from src.agent_control_plane.database import ControlDatabase
+    from src.sorne.database import ControlDatabase
     database = ControlDatabase(project.path / "control_plane.db")
     database.register_direction(intent)
     database.dismiss_direction("I-wrong", "人工确认方向错误")

@@ -1,4 +1,4 @@
-# ==== 上游 AgentCP 仓库 .gitignore（V3.2）====
+# ==== 上游 Sorne 仓库 .gitignore（V3.2）====
 .DS_Store
 .pytest_cache/
 .venv/
@@ -36,8 +36,8 @@ build/
 
 # ==== Windows 本地运行时（V3.3 备份补充）====
 .venv-windows/
-.agentcp-windows/
-.agentcp-runtime/
-.agentcp-work/
+.sorne-windows/
+.sorne-runtime/
+.sorne-work/
 *.db-wal
 *.db-shm

@@ -4,13 +4,13 @@ import hashlib
 
 import pytest
 
-from src.agent_control_plane import store as store_module
-from src.agent_control_plane import webapp as webapp_module
-from src.agent_control_plane.store import ProjectStore
-from src.agent_control_plane.automation import AutomationEngine
-from src.agent_control_plane.scheduler import Scheduler
-from src.agent_control_plane.lifecycle import ProjectLifecycleMissing, require_executable_target
-from src.agent_control_plane.metrics import project_asset_inventory
+from src.sorne import store as store_module
+from src.sorne import webapp as webapp_module
+from src.sorne.store import ProjectStore
+from src.sorne.automation import AutomationEngine
+from src.sorne.scheduler import Scheduler
+from src.sorne.lifecycle import ProjectLifecycleMissing, require_executable_target
+from src.sorne.metrics import project_asset_inventory
 
 
 def test_project_listing_only_returns_initialized_projects(
@@ -137,12 +137,12 @@ def test_frontend_assets_are_wired_to_control_api() -> None:
     index = (root / "frontend" / "index.html").read_text(encoding="utf-8")
     script = (root / "frontend" / "app.js").read_text(encoding="utf-8")
 
-    assert "AgentCP" in index
+    assert "Sorne" in index
     assert "/api/automation/launch" in script
     assert "/api/projects" in script
     assert "project.run_status" in script
     assert "/api/evidence" in script
-    # V3.3 前端：角色编辑器为 memberList/memberPanel（旧 roleConfigBody 已重写）。
+    # Sorne 0.0.3 前端：角色编辑器为 memberList/memberPanel（旧 roleConfigBody 已重写）。
     assert 'id="memberList"' in index
     assert 'id="memberPanel"' in index
     assert 'id="mCustomPrompt"' in index
@@ -167,14 +167,14 @@ def test_frontend_assets_are_wired_to_control_api() -> None:
     assert "location.reload()" not in script
     assert 'data-view="hub"' in index
     assert index.count('data-view="config"') == 1
-    # V3.3 三视图顺序：任务中心 → 项目配置 → 执行与结果。
+    # Sorne 0.0.3 三视图顺序：任务中心 → 项目配置 → 执行与结果。
     assert index.index('data-view="hub"') < index.index('data-view="config"')
     assert index.index('data-view="config"') < index.index('data-view="run"')
     assert index.count('data-view="run"') == 1
     assert 'data-route-link="hub"' in index
     assert 'data-route-link="config"' in index
     assert 'data-route-link="run"' in index
-    # V3.3 任务中心：projectList 表格（旧 projectCards 卡片布局已重写）。
+    # Sorne 0.0.3 任务中心：projectList 表格（旧 projectCards 卡片布局已重写）。
     assert 'id="projectList"' in index
     assert 'id="hubFalsePositiveRate"' in index
     assert "超过 24 小时标记为积压" in index
@@ -190,14 +190,14 @@ def test_frontend_assets_are_wired_to_control_api() -> None:
     assert 'id="interventionType"' in index
     assert "项目所有者指令" in index
     assert 'scope: "project"' in script
-    assert "controller_intervention_added" in (root / "src" / "agent_control_plane" / "webapp.py").read_text(encoding="utf-8")
+    assert "controller_intervention_added" in (root / "src" / "sorne" / "webapp.py").read_text(encoding="utf-8")
     assert 'id="viewRunButton"' in index
-    # V3.3 路由收敛到独立模块（hub/config/run 三视图）。
+    # Sorne 0.0.3 路由收敛到独立模块（hub/config/run 三视图）。
     assert "./modules/router.js" in script
     assert "renderProjectList" in script
     assert "launchAudit" in script
     assert "当前任务" in index
-    assert "AgentCP 调度心跳" in script
+    assert "Sorne 调度心跳" in script
     assert "等待 Claude CLI 返回" in script
     assert "model_tool_started" in script
     assert "正在执行工具" in script
@@ -233,9 +233,9 @@ def test_static_handler_only_serves_frontend_assets() -> None:
 
 
 def test_remote_bind_requires_server_token(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv("AGENTCP_SERVER_TOKEN", raising=False)
+    monkeypatch.delenv("SORNE_SERVER_TOKEN", raising=False)
 
-    with pytest.raises(webapp_module.WebAppError, match="AGENTCP_SERVER_TOKEN"):
+    with pytest.raises(webapp_module.WebAppError, match="SORNE_SERVER_TOKEN"):
         webapp_module.serve("0.0.0.0", 8765)
 
 
@@ -604,7 +604,7 @@ def test_web_team_config_saves_and_reloads_project_roles(
                     "priority": 20,
                     "env": {},
                     "extra": {
-                        "image": "agentcp-worker:test",
+                        "image": "sorne-worker:test",
                         "worker_command": ["python3", "/app/entrypoint.py"],
                     },
                     "dangerously_bypass_sandbox": False,

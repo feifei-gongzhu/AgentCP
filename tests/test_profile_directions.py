@@ -4,12 +4,12 @@ from pathlib import Path
 
 import pytest
 
-from src.agent_control_plane import store as store_module
-from src.agent_control_plane.context_compiler import compile_worker_context
-from src.agent_control_plane.database import ControlDatabase
-from src.agent_control_plane.schemas import now_iso
-from src.agent_control_plane.store import ProjectStore
-from src.agent_control_plane.target_profile import (
+from src.sorne import store as store_module
+from src.sorne.context_compiler import compile_worker_context
+from src.sorne.database import ControlDatabase
+from src.sorne.schemas import now_iso
+from src.sorne.store import ProjectStore
+from src.sorne.target_profile import (
     assessment_coverage,
     mark_needs_review_queued,
     needs_review_exhausted_urls,
@@ -258,7 +258,7 @@ def test_recommended_tests_change_is_recorded_and_supersedes(
     assert second["recommended_tests"] == ["authorization_validation"]
     assert second["supersedes"] == first["id"]
     # 最新评估生效。
-    from src.agent_control_plane.target_profile import target_assessments
+    from src.sorne.target_profile import target_assessments
     latest = target_assessments(store)
     assert latest[0]["recommended_tests"] == ["authorization_validation"]
 
@@ -446,7 +446,7 @@ def test_needs_review_is_distinct_from_unassessed(
 def test_enriched_profile_keeps_unassessed_distinct(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from src.agent_control_plane.technologies import enriched_target_profile
+    from src.sorne.technologies import enriched_target_profile
 
     store = _project(tmp_path, monkeypatch)
     reviewed = "https://example.com/reviewed"
@@ -467,7 +467,7 @@ def test_enriched_profile_keeps_unassessed_distinct(
 # ---------------------------------------------------------------------------
 
 def test_mrecon_observation_kind_distinguishes_sources() -> None:
-    from src.agent_control_plane.mrecon import _observation_kind
+    from src.sorne.mrecon import _observation_kind
 
     assert _observation_kind("http_crawl", 200) == "requested"
     assert _observation_kind("browser_xhr", 200) == "requested"
@@ -494,7 +494,7 @@ def test_compact_mrecon_rows_expose_observation_kind(
                 "id": f"MR-{index}", "method": "GET", "function": "功能", **row,
             })
 
-    from src.agent_control_plane.mrecon import compact_mrecon_rows
+    from src.sorne.mrecon import compact_mrecon_rows
 
     compact = {item["url"]: item for item in compact_mrecon_rows(store)}
     assert compact["https://example.com/page"]["observation_kind"] == "requested"
@@ -589,7 +589,7 @@ def test_second_pass_advances_after_first_rows_assessed(
 def test_worker_output_replay_does_not_duplicate_assessments_or_directions(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from src.agent_control_plane.worker import apply_worker_output
+    from src.sorne.worker import apply_worker_output
 
     store = _project(tmp_path, monkeypatch)
     database = ControlDatabase(store.path / "control_plane.db")
@@ -717,7 +717,7 @@ def test_counterexample_assessment_can_revert_to_historical_content(
     # 与第一次 A 完全相同的内容：这是“新的判断恢复旧结论”，不是同一次提交重放。
     _assess(store, url, "priority_target", score=80)
 
-    from src.agent_control_plane.target_profile import target_assessments
+    from src.sorne.target_profile import target_assessments
     latest = target_assessments(store)
     assert latest[0]["profile_class"] == "priority_target"
     assert latest[0]["target_score"] == 80
@@ -776,14 +776,14 @@ def test_counterexample_needs_review_counts_only_scheduled_urls(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """已有 100+ 其他待画像 URL 时，复核 URL 未进入 Job 不得消耗复核次数。"""
-    from src.agent_control_plane.automation import AutomationEngine
-    from src.agent_control_plane.target_profile import queue_incremental_profile_urls, load_profile_state
+    from src.sorne.automation import AutomationEngine
+    from src.sorne.target_profile import queue_incremental_profile_urls, load_profile_state
 
     store = _project(tmp_path, monkeypatch, vendor="review-counting")
     target = store.read_json("target.json")
     target["targets"] = ["https://example.com"]
     store.write_json("target.json", target)
-    from src.agent_control_plane.asset_inventory import AssetInventory
+    from src.sorne.asset_inventory import AssetInventory
     AssetInventory(store).sync_declared_targets()  # 提供 example.com 资产分派底座
     queue_incremental_profile_urls(
         store, [f"https://example.com/legacy/{index}" for index in range(105)]
@@ -1085,7 +1085,7 @@ def test_counterexample_restoring_superseded_direction_keeps_single_claimable(
     assert open_items[0]["intent"]["target_score"] == 95, "最新版本胜出"
 
     # 恢复入口的前置校验：有有效后继时必须拒绝恢复过期版本。
-    from src.agent_control_plane.target_profile import ensure_profile_direction_restorable
+    from src.sorne.target_profile import ensure_profile_direction_restorable
     latest_open = open_items[0]
     database.dismiss_direction(old_direction["id"], "再次停止历史方向")
     with pytest.raises(ValueError, match="已有更新的有效方向"):
@@ -1132,7 +1132,7 @@ def test_counterexample_legacy_job_cannot_modify_restored_claim(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """[P1] 缺少 claim_version 的升级前任务，不得修改被重新认领的方向。"""
-    from src.agent_control_plane.automation import AutomationEngine
+    from src.sorne.automation import AutomationEngine
 
     store = _project(tmp_path, monkeypatch, vendor="legacy-bound")
     engine = AutomationEngine(store)
@@ -1239,7 +1239,7 @@ def test_counterexample_legacy_window_between_check_and_write(
     用伪造的 V0 快照注入检查时刻的状态（真实库中方向已是 V2），
     确定性模拟并发窗口。
     """
-    from src.agent_control_plane.automation import AutomationEngine
+    from src.sorne.automation import AutomationEngine
 
     store = _project(tmp_path, monkeypatch, vendor="legacy-window")
     engine = AutomationEngine(store)
@@ -1378,7 +1378,7 @@ def test_counterexample_jsonl_failure_backfills_via_projection(
     # 恢复写入后：由既有投影机制自动补齐（不需要重新评估或手工修复）。
     # 投影失败按指数退避重试；把退避拨到期，模拟 ProjectorManager 周期
     # 轮询兜底（生产中该补写无需任何人工动作）。
-    from src.agent_control_plane.projector import Projector
+    from src.sorne.projector import Projector
     with database.connect() as db:
         db.execute(
             "UPDATE commit_events SET available_at='2000-01-01T00:00:00+00:00' "
@@ -1442,7 +1442,7 @@ def test_counterexample_rescore_does_not_clear_policy_cooldown(
 # ===========================================================================
 
 def _methodology_project(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, vendor: str):
-    from src.agent_control_plane.methodology import method_pack_for_target
+    from src.sorne.methodology import method_pack_for_target
     store = _project(tmp_path, monkeypatch, vendor)
     target = store.read_json("target.json")
     target["targets"] = ["https://example.com"]
@@ -1463,8 +1463,8 @@ def test_counterexample_methodology_seed_survives_jsonl_failure(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """[P1] Method Pack 播种：JSONL 写失败不得静默丢失攻击面维度。"""
-    from src.agent_control_plane.methodology import seed_portfolio
-    from src.agent_control_plane.projector import Projector
+    from src.sorne.methodology import seed_portfolio
+    from src.sorne.projector import Projector
 
     store, database, pack = _methodology_project(tmp_path, monkeypatch, "method-recover")
     original_append = store.append_jsonl
@@ -1498,9 +1498,9 @@ def test_counterexample_follow_up_survives_jsonl_failure(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """[P1] 相邻边界假设（derive_bounded_follow_up）同样不得因文件失败丢方向。"""
-    from src.agent_control_plane.methodology import derive_bounded_follow_up, ensure_methodology
-    from src.agent_control_plane.projector import Projector
-    from src.agent_control_plane.schemas import Fact
+    from src.sorne.methodology import derive_bounded_follow_up, ensure_methodology
+    from src.sorne.projector import Projector
+    from src.sorne.schemas import Fact
 
     store, database, _pack = _methodology_project(tmp_path, monkeypatch, "followup-recover")
     ensure_methodology(store, database, seed=False)
@@ -1542,8 +1542,8 @@ def test_drain_classifies_projection_failures(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """[P2] drain 静默吞 OSError（磁盘），但非 OSError 异常必须留下排障事件。"""
-    from src.agent_control_plane import target_profile as target_profile_module
-    from src.agent_control_plane.projector import Projector
+    from src.sorne import target_profile as target_profile_module
+    from src.sorne.projector import Projector
 
     store, database, _pack = _methodology_project(tmp_path, monkeypatch, "drain-audit")
     drain = target_profile_module._drain_direction_intent_projection

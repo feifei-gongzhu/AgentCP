@@ -4,14 +4,14 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <meta name="color-scheme" content="light">
-  <title>AgentCP · 安全研究控制平面</title>
+  <title>Sorne · 安全研究控制平面</title>
   <link rel="stylesheet" href="/frontend/styles.css?v=4.0">
   <link rel="stylesheet" href="/frontend/extras.css?v=4.0">
 </head>
 <body>
   <div class="app">
     <aside class="sidebar">
-      <div class="brand"><span class="brand-mark">A</span><div><strong>AgentCP</strong><small>安全研究控制平面</small></div></div>
+      <div class="brand"><span class="brand-mark">A</span><div><strong>Sorne</strong><small>安全研究控制平面</small></div></div>
       <nav aria-label="控制台导航">
         <a class="nav-item active" data-route-link="hub" href="#hub">任务中心</a>
         <a class="nav-item" data-route-link="config" href="#config">项目配置</a>
@@ -161,7 +161,7 @@
 
         <div class="panel">
           <div class="panel-head">
-            <div><h2>Agent 团队</h2><p class="subtle">按角色独立选择运行模式。真实 Key 只填入“会话 API Key”，留空表示保留已保存密钥；AgentCP 不读取或改动 CCSwitch。</p></div>
+            <div><h2>Agent 团队</h2><p class="subtle">按角色独立选择运行模式。真实 Key 只填入“会话 API Key”，留空表示保留已保存密钥；Sorne 不读取或改动 CCSwitch。</p></div>
             <button id="addRoleButton" class="button ghost small" type="button">+ 添加角色</button>
           </div>
           <div class="team-preset-bar">
@@ -282,11 +282,11 @@
                   <p class="subtle">由本地 Docker 启动指定镜像。仅编辑镜像与启动命令，其余 extra 字段（网络、资源限制、环境透传等）会原样保留。</p>
                   <div class="field-row">
                     <label class="field">Worker 镜像
-                      <input id="mContainerImage" placeholder="agentcp-worker:latest">
+                      <input id="mContainerImage" placeholder="sorne-worker:latest">
                       <small class="field-error" id="eContainerImage" hidden></small>
                     </label>
                     <label class="field">启动命令（worker_command）
-                      <textarea id="mContainerCommand" rows="3" placeholder="python3&#10;/opt/agentcp/entrypoint.py"></textarea>
+                      <textarea id="mContainerCommand" rows="3" placeholder="python3&#10;/opt/sorne/entrypoint.py"></textarea>
                       <small class="field-note">每行一个参数，或一个 JSON 数组；保存时会转换为字符串数组。</small>
                       <small class="field-error" id="eContainerCommand" hidden></small>
                     </label>

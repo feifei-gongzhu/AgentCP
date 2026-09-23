@@ -1,8 +1,8 @@
-from src.agent_control_plane.guardian import Guardian
-from src.agent_control_plane.schemas import Fact, FactClassification
-from src.agent_control_plane.store import ProjectStore
-from src.agent_control_plane import store as store_module
-from src.agent_control_plane.worker import apply_worker_output
+from src.sorne.guardian import Guardian
+from src.sorne.schemas import Fact, FactClassification
+from src.sorne.store import ProjectStore
+from src.sorne import store as store_module
+from src.sorne.worker import apply_worker_output
 
 import pytest
 from pathlib import Path

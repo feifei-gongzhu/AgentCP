@@ -2,11 +2,11 @@ from pathlib import Path
 
 import pytest
 
-from src.agent_control_plane import store as store_module
-from src.agent_control_plane.store import ProjectStore
-from src.agent_control_plane.memory import matching_negative_evidence, relevant_lessons
-from src.agent_control_plane.worker import apply_worker_output
-from src.agent_control_plane.waf import WAFManager
+from src.sorne import store as store_module
+from src.sorne.store import ProjectStore
+from src.sorne.memory import matching_negative_evidence, relevant_lessons
+from src.sorne.worker import apply_worker_output
+from src.sorne.waf import WAFManager
 
 
 def test_natural_language_method_does_not_resurrect_rejected_direction() -> None:
