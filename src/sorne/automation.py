@@ -24,7 +24,8 @@ from .methodology import ensure_methodology, seed_methodology_portfolio
 from .schemas import GateStatus, normalize_role
 from .scheduler import Scheduler
 from .store import ProjectStore
-from .team import TeamMember, _run_member, load_team
+from .execution import run_member as _run_member
+from .team import TeamMember, load_team
 from .runtime_secrets import RuntimeSecretStore
 from .worker import WorkerError, apply_worker_output
 from .waf import WAFManager

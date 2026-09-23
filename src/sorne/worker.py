@@ -9,8 +9,7 @@ from typing import Any
 
 from .dashboard import render_dashboard
 from .database import ControlDatabase
-from .directives import authoritative_directives, directive_ids, missing_directive_ids
-from .drivers import DriverConfig, run_driver
+from .directives import authoritative_directives, missing_directive_ids
 from .guardian import Guardian
 from .metrics import project_asset_inventory
 from .planning import intents_for_selected, normalize_plan_batch
@@ -598,27 +597,38 @@ def _run_worker_locked(
     if target.get("authorization") != "authorized" or not target.get("scope"):
         raise WorkerError("项目尚未确认授权范围，禁止启动真实 Worker。")
 
-    payload = run_driver(DriverConfig(
+    # 走共享执行服务（execution.run_member）：CLI 通道由此获得与 run-team/
+    # 自动化一致的脱敏 Prompt 快照、RuntimeSecret 注入与运行目录约定。
+    # CLI 默认 runtime 显式固定为 local-docker（与原 run_driver 兜底一致，
+    # 不因复用 TeamMember 而改变默认执行环境）。
+    from .execution import run_member
+    from .team import TeamMember
+
+    context_suffix = (
+        json.dumps(task_context, ensure_ascii=False, indent=2)
+        if task_context else ""
+    )
+    member = TeamMember(
+        name=role,
         type=backend,
+        backend=backend,
+        role=role,
+        runtime_mode="local-docker",
         model=model,
-        profile=profile,
-        sandbox=sandbox,
         base_url=base_url,
         api_key_env=api_key_env,
         auth_mode=auth_mode,
-        env=env or {},
-        extra={
-            "project_path": str(store.path.resolve()),
-            "member_name": role,
-            **(
-                {"target_path": str(target.get("target_path")).strip()}
-                if str(target.get("target_path") or "").strip()
-                else {}
-            ),
-        },
+        profile=profile,
+        sandbox=sandbox,
         dangerously_bypass_sandbox=dangerously_bypass_sandbox,
-    ), prompt, timeout=timeout)
-    missing = missing_directive_ids(store, directive_ids(owner_directives))
+        env=env or {},
+    )
+    result = run_member(store, member, timeout=timeout, dry_run=False,
+                        context_suffix=context_suffix)
+    payload = result["payload"]
+    missing = missing_directive_ids(
+        store, result["control_context"]["human_directive_ids"],
+    )
     if missing:
         raise WorkerError(
             "模型执行期间收到新的项目所有者指令，旧上下文输出已拒绝写入: "

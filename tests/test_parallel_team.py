@@ -70,7 +70,8 @@ def test_runtime_secret_from_frontend_reaches_driver_without_persistence(
         captured["prompt"] = prompt
         return {"kind": "none", "reason": "ok"}
 
-    monkeypatch.setattr(team_module, "run_driver", fake_driver)
+    from src.sorne import execution as execution_module
+    monkeypatch.setattr(execution_module, "run_driver", fake_driver)
     RuntimeSecretStore.clear(store.vendor)
     RuntimeSecretStore.set_many(store.vendor, {"reason-claude": "session-only-secret"}, {"reason-claude"})
     try:
