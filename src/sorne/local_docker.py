@@ -21,6 +21,7 @@ from .agent_compose import (
     find_docker_binary,
     profile_from_driver_config,
 )
+from .provider_auth import anthropic_secret_env_var, normalize_base_url, resolve_anthropic_auth_mode
 from .schemas import VALID_WORKER_KINDS
 from .platform_process import process_group_options, terminate_process_tree
 
@@ -595,23 +596,21 @@ class LocalDockerRuntime:
         if self.profile.model:
             values["LLM_MODEL"] = self.profile.model
         if self.profile.base_url:
-            values["LLM_API_ENDPOINT"] = self.profile.base_url.rstrip("/")
+            values["LLM_API_ENDPOINT"] = normalize_base_url(self.profile.base_url)
         if self.profile.provider == "claude":
             if self.profile.base_url:
-                values["ANTHROPIC_BASE_URL"] = self.profile.base_url.rstrip("/")
-            auth_mode = self.profile.auth_mode
-            if auth_mode == "auto":
-                auth_mode = "x-api-key" if "api.anthropic.com" in (self.profile.base_url or "").lower() else "bearer"
-            if auth_mode == "bearer":
-                values["ANTHROPIC_AUTH_TOKEN"] = secret
-            elif auth_mode == "x-api-key":
-                values["ANTHROPIC_API_KEY"] = secret
-            else:
-                raise LocalDockerError(f"不支持的 Claude 鉴权方式: {auth_mode}")
+                values["ANTHROPIC_BASE_URL"] = normalize_base_url(self.profile.base_url)
+            try:
+                auth_mode = resolve_anthropic_auth_mode(
+                    self.profile.auth_mode, self.profile.base_url
+                )
+            except ValueError as exc:
+                raise LocalDockerError(str(exc)) from exc
+            values[anthropic_secret_env_var(auth_mode)] = secret
         else:
             values["OPENAI_API_KEY"] = secret
             if self.profile.base_url:
-                values["OPENAI_BASE_URL"] = self.profile.base_url.rstrip("/")
+                values["OPENAI_BASE_URL"] = normalize_base_url(self.profile.base_url)
         return values
 
     def _execute(self, command: list[str], environment: dict[str, str], prompt: str) -> dict[str, Any]:

@@ -22,6 +22,7 @@ from .agent_compose import (
     profile_from_driver_config,
 )
 from .local_docker import LocalDockerError, LocalDockerRuntime
+from .provider_auth import normalize_base_url, resolve_anthropic_auth_mode
 from .schemas import VALID_WORKER_KINDS
 from .store import ROOT
 from .platform_process import process_group_options, terminate_process_tree
@@ -238,6 +239,14 @@ def _claude_stream_events(message: dict[str, Any], secret: str | None) -> tuple[
     return events, final_result
 
 
+def _resolved_claude_auth(auth_mode: str, base_url: str | None) -> str:
+    """Shared Anthropic auth resolution, keeping this module's error type."""
+    try:
+        return resolve_anthropic_auth_mode(auth_mode, base_url)
+    except ValueError as exc:
+        raise DriverError(str(exc)) from exc
+
+
 class BaseDriver:
     def __init__(
         self,
@@ -443,23 +452,18 @@ class ClaudeCliDriver(BaseDriver):
         ):
             env.pop(name, None)
         if self.config.base_url:
-            env["ANTHROPIC_BASE_URL"] = self.config.base_url.rstrip("/")
+            env["ANTHROPIC_BASE_URL"] = normalize_base_url(self.config.base_url)
         if self.config.api_key_env:
             secret = source_secret
             if not secret:
                 raise DriverError(f"缺少环境变量: {self.config.api_key_env}")
-            auth_mode = self.config.auth_mode
-            if auth_mode == "auto":
-                endpoint = (self.config.base_url or "").lower()
-                auth_mode = "x-api-key" if "api.anthropic.com" in endpoint else "bearer"
+            auth_mode = _resolved_claude_auth(self.config.auth_mode, self.config.base_url)
             if auth_mode == "bearer":
                 env["ANTHROPIC_AUTH_TOKEN"] = secret
                 env.pop("ANTHROPIC_API_KEY", None)
-            elif auth_mode == "x-api-key":
+            else:
                 env["ANTHROPIC_API_KEY"] = secret
                 env.pop("ANTHROPIC_AUTH_TOKEN", None)
-            else:
-                raise DriverError(f"不支持的 Claude 鉴权方式: {auth_mode}")
             if self.config.api_key_env not in {"ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"}:
                 env.pop(self.config.api_key_env, None)
 

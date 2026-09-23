@@ -16,6 +16,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
+from .provider_auth import normalize_base_url, resolve_anthropic_auth_mode
 from .schemas import VALID_WORKER_KINDS
 from .platform_process import (
     process_group_options,
@@ -675,7 +676,7 @@ class AgentComposeRuntime:
         secret = self.profile.api_key or ""
         if self.profile.provider == "claude":
             if self.profile.base_url:
-                env["ANTHROPIC_BASE_URL"] = self.profile.base_url.rstrip("/")
+                env["ANTHROPIC_BASE_URL"] = normalize_base_url(self.profile.base_url)
             auth_mode = _resolved_anthropic_auth_mode(
                 self.profile.auth_mode,
                 self.profile.base_url,
@@ -689,7 +690,7 @@ class AgentComposeRuntime:
                 env["CLAUDE_MODEL"] = self.profile.model
         else:
             if self.profile.base_url:
-                env["LLM_API_ENDPOINT"] = self.profile.base_url.rstrip("/")
+                env["LLM_API_ENDPOINT"] = normalize_base_url(self.profile.base_url)
             env["LLM_API_KEY"] = secret
             env["OPENAI_API_KEY"] = secret
             env["LLM_API_PROTOCOL"] = "responses"
@@ -921,16 +922,13 @@ def _agent_compose_log_fragment(raw: str, secret: str | None) -> str:
 
 
 def _resolved_anthropic_auth_mode(auth_mode: str, base_url: str | None) -> str:
-    normalized = str(auth_mode or "auto").strip().lower()
-    if normalized in {"bearer", "x-api-key"}:
-        return normalized
-    if normalized != "auto":
-        raise AgentComposeError(f"不支持的 Claude 鉴权方式: {auth_mode}")
-    # Anthropic's official endpoint uses x-api-key. Most Anthropic-compatible
-    # relays use Authorization: Bearer; the frontend can still explicitly
-    # override either mode for a non-standard relay.
-    endpoint = str(base_url or "https://api.anthropic.com").strip().lower()
-    return "x-api-key" if "api.anthropic.com" in endpoint else "bearer"
+    # 共享解析规则（provider_auth）；本包装只保留 agent-compose 的异常类型。
+    # 旧实现用 substring 判断官方域名，且空 base_url 默认官方端点——新规则
+    # 与 drivers/local_docker 完全一致（hostname 精确匹配 + 空地址→官方）。
+    try:
+        return resolve_anthropic_auth_mode(auth_mode, base_url)
+    except ValueError as exc:
+        raise AgentComposeError(str(exc)) from exc
 
 
 def shutdown_project_runtimes(project_path: Path) -> int:
