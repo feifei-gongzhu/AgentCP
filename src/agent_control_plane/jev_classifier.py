@@ -205,6 +205,22 @@ def state_fingerprint(state_text: str) -> str:
     return "sha256:" + hashlib.sha256(material.encode("utf-8")).hexdigest()
 
 
+def _is_loopback_endpoint(base: str) -> bool:
+    import ipaddress
+    from urllib.parse import urlsplit
+
+    try:
+        host = urlsplit(base if "://" in base else f"https://{base}").hostname or ""
+    except ValueError:
+        return False
+    if host in {"localhost", "*.local"}:
+        return True
+    try:
+        return bool(host) and ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
 def default_transport(state_text: str, questions: dict[str, Any]) -> dict[str, Any]:
     """官方 REST 契约（POST /v1/systemone）。仅在测试外、配置端点后使用。"""
     base = os.environ.get("AGENTCP_JEV_ENDPOINT", "").strip()
@@ -222,8 +238,14 @@ def default_transport(state_text: str, questions: dict[str, Any]) -> dict[str, A
         },
         method="POST",
     )
+    # 回环端点（本地网关/测试 mock）必须绕过系统代理：macOS 全局代理会
+    # 拦截 127.0.0.1 请求并返回 502，JEV 影子调用不应受用户代理软件影响。
+    if _is_loopback_endpoint(base):
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    else:
+        opener = urllib.request.build_opener()
     try:
-        with urllib.request.urlopen(request, timeout=30) as response:
+        with opener.open(request, timeout=30) as response:
             payload = json.loads(response.read().decode("utf-8"))
     except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
         raise JEVError(f"JEV transport 失败: {exc}") from exc
