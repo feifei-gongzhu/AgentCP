@@ -253,7 +253,7 @@ teams/default.json
 |---|---|
 | `name` | Worker 的唯一名称 |
 | `type` | `codex` / `claude-cli` / `openai-compatible` / `ollama` / `container` / `mock` |
-| `role` | `reason` / `metacog` / `reviewer` / `pentester` |
+| `role` | `reason` / `metacog` / `executor` / `reviewer` / `waf_analyst` / `profile_mapper`（`pentester` 为 `executor` 兼容别名） |
 | `model` | 模型名；`null` 表示使用 CLI 默认模型 |
 | `base_url` | 第三方 OpenAI-compatible 地址 |
 | `api_key_env` | 密钥所在的环境变量名 |
@@ -447,7 +447,7 @@ teams/client-security.example.json
 {
   "name": "container-static-analysis",
   "type": "container",
-  "role": "pentester",
+  "role": "executor",
   "max_running": 2,
   "extra": {
     "image": "your-worker-image:latest",
@@ -487,6 +487,8 @@ python3 sorne run-team vendor-name \
   --max-workers 3 \
   --timeout 300
 ```
+
+`run-team` 是一次性兼容批次入口：批次结束即终止，没有 automate 的持久化队列、租约与恢复能力；正式持续运行请使用 `automate` / `automation-daemon`。
 
 `run-team` 适合：
 

@@ -401,7 +401,10 @@ def build_parser() -> argparse.ArgumentParser:
     worker.add_argument("--apply-output", help="不调用 Codex，直接应用一个 Worker JSON 输出文件")
     worker.set_defaults(func=cmd_run_worker)
 
-    team = sub.add_parser("run-team", help="并发运行多角色 Worker，批次结束后触发强制门禁")
+    team = sub.add_parser(
+        "run-team",
+        help="一次性兼容批次入口：并发运行多角色 Worker，批次后触发门禁（无持久化队列恢复；正式持续运行用 automate）",
+    )
     team.add_argument("vendor")
     team.add_argument("--team", default="default")
     team.add_argument("--timeout", type=int, default=3600)

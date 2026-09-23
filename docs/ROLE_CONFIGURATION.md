@@ -25,7 +25,7 @@ projects/{项目名}/team_config.json
 | `metacog` | 查盲点、纠偏、止损、补充反事实假设 | `codex` 或 `openai-compatible` | `read-only` | 1 |
 | `executor` | 认领 Intent，实际执行并把原始证据写入 `evidence/` | `codex` 或 `container` | `workspace-write` | 1–3 |
 | `reviewer` | 审核候选结果、证据质量和业务影响 | `codex` 或 `openai-compatible` | `read-only` | 1 |
-| `pentester` | 与 `executor` 使用相同的 Intent 认领与执行调度 | `codex` 或 `container` | `workspace-write` | 1–3 |
+
 
 `openai-compatible` 只发送一次 HTTP 模型请求，没有本地工具循环，适合 Reason、Metacog 和 Reviewer。它不能代替需要运行命令、读取目标源码、访问测试目标和落盘证据的 Executor。
 
@@ -46,7 +46,7 @@ reviewer-quality
 
 ### 职责
 
-选择 `reason`、`metacog`、`executor`、`reviewer` 或 `pentester`。职责决定加载哪个角色 Prompt，也决定自动化调度阶段。
+选择 `reason`、`metacog`、`executor`、`reviewer`、`waf_analyst` 或 `profile_mapper`。职责决定加载哪个角色 Prompt，也决定自动化调度阶段。旧配置中的 `pentester` 是 `executor` 的兼容别名：读取时自动规范化为 `executor`，正常保存后写回规范角色。
 
 ### 后端
 

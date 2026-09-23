@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 
 from .database import ControlDatabase
+from .schemas import now_iso
 from .lifecycle import project_execution_lock, require_initialized_project
 from .metrics import collect_metrics
 from .store import BLACKBOARD_FILE, ProjectStore
@@ -102,7 +103,7 @@ def _render_dashboard_locked(store: ProjectStore) -> Path:
 </head>
 <body><main>
   <header>
-    <div><div class="eyebrow">parallel workers / two-tier blackboard / v2.0</div><h1>{_escape(store.vendor)}</h1><div class="muted">授权模式：{_escape(target.get('authorization_mode'))} · scope: {_escape(json.dumps(target.get('scope'), ensure_ascii=False))}</div></div>
+    <div><div class="eyebrow">parallel workers / two-tier blackboard / offline snapshot</div><h1>{_escape(store.vendor)}</h1><div class="muted">离线只读快照（非实时） · 生成于 {_escape(now_iso())} · 授权模式：{_escape(target.get('authorization_mode'))} · scope: {_escape(json.dumps(target.get('scope'), ensure_ascii=False))}</div></div>
     <div class="gate {gate_class}">{gate_label}</div>
   </header>
   <section class="metrics">
@@ -121,11 +122,12 @@ def _render_dashboard_locked(store: ProjectStore) -> Path:
     <section class="panel"><h2>十维攻击面覆盖</h2><div class="commands">{coverage_html}</div></section>
     <section class="panel"><h2>自动化运行</h2><div class="commands"><div class="command"><strong>{_escape(run_view.get('id', '暂无运行'))}</strong><br><span class="muted">{_escape(run_view.get('status', 'idle'))} / {_escape(run_view.get('stage', '-'))}</span></div></div><table><thead><tr>{''.join(f'<th>{label}</th>' for _,label in job_columns)}</tr></thead><tbody>{_rows(automation_jobs,job_columns)}</tbody></table></section>
     <section class="panel"><h2>控制器决策日志</h2><table><thead><tr>{''.join(f'<th>{label}</th>' for _,label in decision_columns)}</tr></thead><tbody>{_rows(decisions[-20:],decision_columns)}</tbody></table></section>
-    <section class="panel"><h2>并发 Worker 操作</h2><div class="commands">
-      <div class="command"><code>python3 sorne run-team {_escape(store.vendor)} --team default --max-workers 4 --dry-run</code></div>
-      <div class="command"><code>python3 sorne run-team {_escape(store.vendor)} --team default --max-workers 4</code></div>
-      <div class="command"><code>python3 sorne tick {_escape(store.vendor)} --minutes 15</code></div>
+    <section class="panel"><h2>运行入口</h2><div class="commands">
+      <div class="command"><code>python3 sorne automate {_escape(store.vendor)} --team default --max-workers 4</code>（正式可恢复运行）</div>
+      <div class="command"><code>python3 sorne automation-daemon {_escape(store.vendor)} --team default --max-workers 4</code>（持续守护模式）</div>
+      <div class="command"><code>python3 sorne automation-status {_escape(store.vendor)}</code></div>
       <div class="command"><code>python3 sorne approve-gate {_escape(store.vendor)} --action continue --reason "用户批准继续"</code></div>
+      <div class="command muted">run-team 为一次性兼容批次入口（无持久化队列恢复）；正式持续运行使用 automate。</div>
     </div></section>
     <section class="panel wide"><h2>双层项目黑板</h2><pre>{_escape(blackboard)}</pre></section>
   </div>
