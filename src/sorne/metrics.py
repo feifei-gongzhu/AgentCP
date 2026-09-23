@@ -106,12 +106,20 @@ def _collect_metrics_locked(store: ProjectStore) -> dict[str, Any]:
     jobs: list[dict] = []
     duplicate_directions = 0
     directions: list[dict] = []
+    inventory_summary: dict[str, int] = {}
     if database_path.exists():
         database = ControlDatabase(database_path)
         runs = database.list_runs()
         jobs = database.list_all_jobs()
         directions = database.list_directions()
         duplicate_directions = database.event_count("direction_duplicate")
+        from .asset_inventory import AssetInventory
+
+        inventory_summary = AssetInventory(store).summary()
+    local_artifact_count = (
+        (1 if isinstance(artifact, dict) and artifact.get("path") else 0)
+        + (1 if str(target.get("target_path") or "").strip() else 0)
+    )
 
     completed_jobs = sum(item.get("status") == "completed" for item in jobs)
     failed_jobs = sum(item.get("status") == "failed" for item in jobs)
@@ -136,10 +144,21 @@ def _collect_metrics_locked(store: ProjectStore) -> dict[str, Any]:
     return {
         "project": store.vendor,
         "assets": {
+            # 兼容字段（保持原义）：total = 合并清单（声明+发现+底座）规模，
+            # declared/discovered = 声明目标与新增发现，items = 合并清单。
+            # state.asset_count 仍由 project_asset_inventory 同一函数维护。
             "total": len(assets),
             "declared": len(declared_assets),
             "discovered": len(set(assets) - declared_assets),
             "items": assets,
+            # 分口径新指标（实施规格 5.4）：每个数字有明确单位与过滤条件。
+            "declared_target_count": len(declared_assets),
+            "inventory_record_count": int(inventory_summary.get("inventory_record_count", 0)),
+            "active_scope_endpoint_count": int(inventory_summary.get("active_scope_endpoint_count", 0)),
+            "stale_asset_count": int(inventory_summary.get("stale_asset_count", 0)),
+            "out_of_scope_asset_count": int(inventory_summary.get("out_of_scope_asset_count", 0)),
+            "profile_pending_work_count": int(inventory_summary.get("profile_pending_work_count", 0)),
+            "local_artifact_count": local_artifact_count,
         },
         "coverage": {
             "dimensions": len(coverage),

@@ -378,43 +378,8 @@ function evidenceForFact(fact, indexedEvidence) {
     item.fact_id === fact.id || Boolean(configured && (item.path === configured || String(item.path || "").startsWith(`${configured}/`)))
   );
 }
-function riskLeadFromDirection(direction) {
-  const intent = direction.intent || {};
-  const risk = String(intent.risk_level || "unknown").toLowerCase();
-  const active = ["open", "claimed", "released", "completed"].includes(direction.status);
-  const meaningful = ["critical", "high", "medium"].includes(risk) || intent.requires_human_confirmation;
-  if (!active || !meaningful) return null;
-  return {
-    id: direction.id,
-    title: intent.hypothesis || intent.target || "未指定目标",
-    severity: risk,
-    classification: "risk_lead",
-    business_impact: intent.expected_business_impact || intent.success_criteria || "需要验证是否能形成具体业务危害闭环",
-    impact_score: risk === "critical" ? 0.9 : risk === "high" ? 0.75 : 0.55,
-    confidence: direction.status === "claimed" ? 0.45 : 0.35,
-    __direction: true,
-    intent_id: direction.id,
-    hypothesis_id: intent.hypothesis_id || null,
-    source_fact_ids: Array.isArray(intent.source_fact_ids) ? intent.source_fact_ids : [],
-    direction_status: direction.status,
-    terminal_reason: direction.terminal_reason,
-    created_at: direction.created_at,
-    updated_at: direction.updated_at,
-  };
-}
 function riskLeadLifecycle(item) {
   if (item.__pending) return { key: "pending_commit", label: "待收敛", detail: "模型结果尚未写入黑板" };
-  if (item.__direction) {
-    if (item.direction_status === "completed") return { key: "completed", label: "验证已完成", detail: item.__confirmedVulnerabilities?.length ? "该方向已转化为漏洞" : "该方向已结束，但未形成已验证漏洞" };
-    if (item.direction_status === "claimed") return { key: "validating", label: "验证中", detail: "执行器已认领" };
-    const cooldown = String(item.terminal_reason || "").match(/^policy_blocked_until:(.+)$/);
-    if (cooldown && new Date(cooldown[1]).getTime() > Date.now()) return { key: "blocked", label: "模型策略冷却", detail: `${formatEventTime(cooldown[1])} 后可重新调度` };
-    const createdAt = new Date(item.created_at || item.updated_at || 0).getTime();
-    const stale = Number.isFinite(createdAt) && createdAt > 0 && Date.now() - createdAt >= 24 * 60 * 60 * 1000;
-    if (stale) return { key: "stale", label: "已积压", detail: "等待超过 24 小时，需调度或人工处理" };
-    if (item.direction_status === "released") return { key: "queued", label: "已释放重排", detail: "前次未闭环，等待重新认领" };
-    return { key: "queued", label: "排队验证", detail: "等待执行器认领" };
-  }
   if (item.intent_id) return { key: "queued", label: "待关联验证", detail: `已关联方向 ${item.intent_id}` };
   return { key: "unscheduled", label: "待转验证", detail: "尚未生成可执行验证方向" };
 }
@@ -483,25 +448,45 @@ function buildDerived(project, automation, evidenceResult) {
     .filter(job => job.status === "completed" && !job.committed_at && job.result?.payload?.kind === "fact")
     .map(job => ({ ...job.result.payload, __pending: true, __member: job.member_name }));
   const factRows = [...project.facts, ...pendingFactRows];
-  const directionRiskLeads = (project.directions || []).map(riskLeadFromDirection).filter(Boolean);
   const attackIntel = factRows.filter(fact => factClassification(fact) === "attack_surface");
   const vulnerabilities = factRows.filter(fact => factClassification(fact) === "vulnerability");
   const directionById = new Map((project.directions || []).map(direction => [direction.id, direction]));
   const hypothesisById = new Map((project.hypotheses || []).map(hypothesis => [hypothesis.id, hypothesis]));
-  const rawRiskLeads = [...factRows.filter(fact => factClassification(fact) === "risk_lead"), ...directionRiskLeads]
+  // 风险线索只来自已提交（或明确标注候选）的 risk_lead Fact；
+  // Direction 不再伪装成线索，各实体分别保留身份并通过关联展示。
+  const rawRiskLeads = factRows.filter(fact => factClassification(fact) === "risk_lead")
     .map(lead => ({ ...lead, __confirmedVulnerabilities: vulnerabilityLinksForLead(lead, vulnerabilities, directionById, hypothesisById) }));
   const riskLeads = deduplicateRiskLeads(rawRiskLeads);
   const sourceLeadsByVulnerability = new Map(vulnerabilities.map(vulnerability => [
     vulnerability.id,
     riskLeads.filter(lead => (lead.__confirmedVulnerabilities || []).some(item => item.id === vulnerability.id)),
   ]));
-  const directionRows = (project.directions || []).map(direction => ({
-    ...direction.intent,
-    direction_id: direction.id,
-    direction_status: direction.status,
-    terminal_reason: direction.terminal_reason,
-    confirmed_vulnerabilities: vulnerabilities.filter(vulnerability => vulnerabilityReferenceSet(vulnerability, directionById, hypothesisById).has(direction.id)),
-  }));
+  const negativeEvidence = project.negative_evidence || [];
+  const directionRows = (project.directions || []).map(direction => {
+    const intent = direction.intent || {};
+    // 漏洞关联按既有优先级：intent_id → hypothesis_id/来源关系 → 链路。
+    const confirmed = vulnerabilities.filter(vulnerability => vulnerabilityReferenceSet(vulnerability, directionById, hypothesisById).has(direction.id));
+    // 负向结论：negative_evidence 记录无 intent_id/hypothesis_id，同 target
+    // 只作候选关联（同一登录地址的认证绕过与限流检查不是同一个结论）。
+    const directionTarget = String(intent.target || "").toLowerCase();
+    const directionHypothesis = String(intent.hypothesis || "");
+    const candidateNegatives = negativeEvidence.filter(item => {
+      const target = String(item.target || "").toLowerCase();
+      if (!target || !directionTarget || target !== directionTarget) return false;
+      const hypothesis = String(item.hypothesis || "");
+      return !hypothesis || !directionHypothesis || hypothesis.includes(directionHypothesis) || directionHypothesis.includes(hypothesis);
+    });
+    return {
+      ...intent,
+      direction_id: direction.id,
+      direction_status: direction.status,
+      terminal_reason: direction.terminal_reason,
+      claimed_by: direction.claimed_by || "",
+      source_hypothesis: hypothesisById.get(intent.hypothesis_id) || null,
+      confirmed_vulnerabilities: confirmed,
+      candidate_negative_evidence: candidateNegatives,
+    };
+  });
   return {
     pendingFactRows, factRows, attackIntel, vulnerabilities, riskLeads, rawRiskLeads,
     directionRows, directionById, hypothesisById, sourceLeadsByVulnerability,
@@ -596,11 +581,13 @@ function renderRunStatus(data, automation, metrics) {
 }
 function renderMetrics(project, data, metrics, automation) {
   const jobs = automation.jobs || [];
-  const declaredAssets = new Set((project.target.targets || []).map(value => String(value).trim().toLowerCase()).filter(Boolean)).size;
-  const assetTotal = metrics.assets?.total ?? Math.max(data.asset_count ?? 0, declaredAssets);
+  const assetsBlock = metrics.assets || {};
+  const assetTotal = assetsBlock.active_scope_endpoint_count ?? data.asset_count ?? 0;
   const pendingFacts = metrics.quality.pending_facts ?? state.derived.pendingFactRows.length;
   $("assetMetric").textContent = assetTotal;
-  $("assetMetricNote").textContent = metrics.assets ? `${metrics.assets.declared} 个目标 · ${metrics.assets.discovered} 个新发现` : `${declaredAssets} 个已配置目标`;
+  $("assetMetricNote").textContent = metrics.assets
+    ? `目标 ${assetsBlock.declared_target_count ?? metrics.assets.declared} · 底座记录 ${assetsBlock.inventory_record_count ?? 0} · 待画像 ${assetsBlock.profile_pending_work_count ?? 0}`
+    : `${new Set((project.target.targets || []).map(value => String(value).trim().toLowerCase()).filter(Boolean)).size} 个已配置目标`;
   $("factMetric").textContent = metrics.quality.facts;
   $("factMetricNote").textContent = pendingFacts ? `${metrics.quality.facts} 已入库 · ${pendingFacts} 待提交` : `${metrics.quality.facts} 条已提交到黑板`;
   $("vulnMetric").textContent = metrics.quality.vulnerabilities;
@@ -873,10 +860,15 @@ function renderDirectionDetail() {
   const status = directionStatusInfo(intent);
   const nodes = [el("div", "detail-title", `${verbLabel(intent.verb)} · ${intent.target || "未指定目标"}`)];
   const chips = el("div", "detail-chips");
-  [intent.direction_id, status.label, `潜在风险 ${intent.risk_level || "未知"}`, `操作风险 ${intent.action_safety_risk || "low"}`]
+  [intent.direction_id, status.label, `潜在风险 ${intent.risk_level || "未知"}`, `操作风险 ${intent.action_safety_risk || "low"}`,
+   intent.claimed_by ? `认领 ${intent.claimed_by}` : "未认领"]
     .forEach(text => chips.append(el("span", "chip", text)));
   nodes.push(chips);
   nodes.push(detailSection("成功标准", el("p", "", intent.success_criteria || "未指定")));
+  if (intent.source_hypothesis) {
+    nodes.push(detailSection("来源假设", el("p", "",
+      `${intent.source_hypothesis.id} · ${truncateText(intent.source_hypothesis.statement || intent.source_hypothesis.title || "", 220)}`)));
+  }
   if (intent.expected_business_impact) nodes.push(detailSection("预期业务影响", el("p", "", intent.expected_business_impact)));
   if (intent.terminal_reason) {
     nodes.push(detailSection("终止原因", el("p", "mono", status.humanDismissed ? intent.terminal_reason.replace(/^human_dismissed:/, "") : intent.terminal_reason)));
@@ -892,7 +884,20 @@ function renderDirectionDetail() {
     });
     nodes.push(detailSection(`论证结果（${confirmed.length} 个已验证漏洞）`, wrap));
   } else {
-    nodes.push(detailSection("论证结果", el("p", "", "该方向尚未产生已验证漏洞。")));
+    const negatives = intent.candidate_negative_evidence || [];
+    nodes.push(detailSection("论证结果", el("p", "",
+      negatives.length
+        ? "尚未形成已验证漏洞；下方为按相同目标匹配到的候选负向结论（同目标不等于该方向的结论）。"
+        : "该方向尚未产生已验证漏洞。")));
+  }
+  const candidateNegatives = intent.candidate_negative_evidence || [];
+  if (candidateNegatives.length) {
+    const wrap = el("div", "detail-links");
+    candidateNegatives.forEach(item => {
+      wrap.append(el("span", "chip mono",
+        `${item.id || "负向"} · ${item.evidence_type || "未知类型"} · ${truncateText(item.reason || item.hypothesis || "", 90)}`));
+    });
+    nodes.push(detailSection(`候选负向结论（${candidateNegatives.length} 条 · 按 target 匹配）`, wrap));
   }
   const action = el("div", "detail-section");
   if (status.humanDismissed) {

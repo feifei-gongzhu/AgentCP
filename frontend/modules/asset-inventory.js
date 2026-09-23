@@ -10,7 +10,7 @@ export function renderAssetInventory(payload) {
   state.assetInventory = payload || null;
   state.assetOffset = Number(pagination.offset || 0);
   $("assetInventoryBadge").textContent = `${summary.total || 0} assets`;
-  $("assetInventoryTotal").textContent = String(summary.total || 0);
+  $("assetInventoryTotal").textContent = String(summary.inventory_record_count ?? summary.total ?? 0);
   $("assetInventoryPending").textContent = String((tasks.pending || 0) + (tasks.failed || 0));
   $("assetInventoryProfiled").textContent = String((tasks.profiled || 0) + (tasks.partial || 0));
   $("assetInventoryOutOfScope").textContent = String(statuses.out_of_scope || 0);
@@ -80,7 +80,7 @@ export async function uploadAssetInventoryFile(refresh) {
     $("assetInventoryFile").value = "";
     showToast(payload.import?.duplicate
       ? "该来源的相同文件已经导入，无需重复处理"
-      : `资产导入完成：${payload.import?.asset_count || 0} 个统一资产`);
+      : `资产导入完成：${payload.import?.asset_count || 0} 条底座记录`);
     state.assetOffset = 0;
     await refresh();
   } catch (error) {

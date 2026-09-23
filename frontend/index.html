@@ -140,7 +140,7 @@
             <button id="importAssetInventoryButton" class="button secondary" type="button">导入并归一化</button>
           </div>
           <div class="metric-strip asset-metrics" aria-label="资产接入状态">
-            <div class="metric"><span>统一资产</span><strong id="assetInventoryTotal">0</strong><small>按服务入口去重</small></div>
+            <div class="metric"><span>资产底座记录</span><strong id="assetInventoryTotal">0</strong><small>端点记录（含越界/过期）</small></div>
             <div class="metric"><span>待画像</span><strong id="assetInventoryPending">0</strong><small>下一轮前置处理</small></div>
             <div class="metric"><span>已画像</span><strong id="assetInventoryProfiled">0</strong><small>包含部分画像</small></div>
             <div class="metric"><span>范围外</span><strong id="assetInventoryOutOfScope">0</strong><small>仅记录，不主动访问</small></div>
@@ -381,7 +381,7 @@
             <div id="runFailure" class="run-failure" role="alert" hidden></div>
           </div>
           <div class="metric-strip" aria-label="核心指标">
-            <div class="metric"><span>资产</span><strong id="assetMetric">0</strong><small id="assetMetricNote">目标与已发现资产去重</small></div>
+            <div class="metric"><span>活跃授权资产</span><strong id="assetMetric">0</strong><small id="assetMetricNote">范围内未失效端点</small></div>
             <div class="metric"><span>事实</span><strong id="factMetric">0</strong><small id="factMetricNote">已提交到黑板</small></div>
             <div class="metric"><span>漏洞</span><strong id="vulnMetric">0</strong><small id="vulnMetricNote">Guardian 已验证</small></div>
             <div class="metric"><span>攻击面覆盖</span><strong id="coverageMetric">0%</strong><small id="coverageMetricNote">0/10 已观察</small></div>

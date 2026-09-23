@@ -932,8 +932,30 @@ class AssetInventory:
                   (SELECT count(*) FROM commit_events WHERE status='committed') AS commit_events
                 """
             ).fetchone()
+            # 分口径指标：每个数字有明确单位与过滤条件（实施规格 5.4）。
+            scope_counts = db.execute(
+                """
+                SELECT
+                  (SELECT count(*) FROM enterprise_assets
+                   WHERE status NOT IN ('out_of_scope','invalid','stale','duplicate')
+                  ) AS active_scope,
+                  (SELECT count(*) FROM profile_work_items wi
+                   JOIN enterprise_assets a ON a.id=wi.asset_id
+                   WHERE wi.status IN ('pending','partial')
+                     AND a.status NOT IN ('out_of_scope','invalid','stale','duplicate')
+                  ) AS pending_work
+                """
+            ).fetchone()
         return {
             "total": int(totals["assets"]),
+            # 底座资产记录数（含各状态）——与 total 同值但语义显式命名。
+            "inventory_record_count": int(totals["assets"]),
+            # 范围内且未失效的有效端点数。
+            "active_scope_endpoint_count": int(scope_counts["active_scope"]),
+            "stale_asset_count": int(counts.get("stale", 0)),
+            "out_of_scope_asset_count": int(counts.get("out_of_scope", 0)),
+            # 待画像工作项数（URL 级），不等于资产数。
+            "profile_pending_work_count": int(scope_counts["pending_work"]),
             "active_candidates": int(totals["candidates"]),
             "imports": int(totals["imports"]),
             "relations": int(totals["relations"]),
