@@ -1396,6 +1396,9 @@ function applyMemberFieldVisibility() {
   const type = $("mType").value;
   const ollama = type === "ollama";
   const container = type === "container";
+  const claude = type === "claude-cli";
+  // claude-cli 只有配置了中转站地址才需要密钥；本机登录态无需任何密钥字段。
+  const claudeRelay = claude && Boolean($("mBaseUrl").value.trim());
   // 后端约束：ollama 只能跑本地 CLI，container 只能跑本地 Docker，均锁定运行模式
   if (ollama) $("mRuntimeMode").value = "local-cli";
   if (container) $("mRuntimeMode").value = "local-docker";
@@ -1405,9 +1408,16 @@ function applyMemberFieldVisibility() {
   // Container 不需要模型连接与会话密钥，只编辑 extra.image / extra.worker_command
   $("fModel").hidden = container;
   $("fBaseUrl").hidden = container;
-  $("fApiKeyEnv").hidden = ollama || container;
-  $("fAuthMode").hidden = ollama || container;
-  $("fSecret").hidden = ollama || container;
+  // 密钥三件套按“后端是否真的会用到”显隐：
+  //   container/ollama 不用；claude-cli 本机登录态不用（无服务地址）；
+  //   鉴权方式只有 claude 中转站会用到（codex 走 env_key，openai-compatible 固定 Bearer）。
+  const needsKey = !container && !ollama && !(claude && !claudeRelay);
+  $("fApiKeyEnv").hidden = !needsKey;
+  $("fAuthMode").hidden = !claudeRelay;
+  $("fSecret").hidden = !needsKey;
+  $("mApiKeyEnv").placeholder = claudeRelay
+    ? "ANTHROPIC_AUTH_TOKEN（一般留空，自动注入）"
+    : "OPENAI_API_KEY";
   $("containerGroup").hidden = !container;
   // 依赖提示按后端类型分别说明，避免误导（例如 openai-compatible 不是本地可执行文件）
   const note = $("localCliNote");
@@ -1420,7 +1430,9 @@ function applyMemberFieldVisibility() {
   } else if ($("mRuntimeMode").value === "local-cli") {
     const localCliHints = {
       "codex": "本地 CLI 模式会直接调用宿主机上的 codex CLI，请确保它已安装并在启动 AgentCP 服务的进程 PATH 中，否则会报“未找到可执行文件”。",
-      "claude-cli": "本地 CLI 模式会直接调用宿主机上的 claude CLI，请确保它已安装并在启动 AgentCP 服务的进程 PATH 中，否则会报“未找到可执行文件”。",
+      "claude-cli": relay
+        ? "claude 中转站模式：请在下方填入会话 API Key（保存到系统钥匙串），密钥会自动注入子进程，无需手动设置环境变量。"
+        : "本机 Claude 登录态：直接使用 claude CLI 已登录的账号，无需配置任何密钥；只有填写服务地址（中转站）时才需要密钥。",
       "openai-compatible": "openai-compatible 通过 HTTP 请求服务地址指向的模型 API，不依赖本地可执行文件，无需安装 CLI。",
     };
     note.textContent = localCliHints[type] || `本地 CLI 模式会直接调用宿主机上的 ${type}，请确保它已安装并在启动 AgentCP 服务的进程 PATH 中。`;
@@ -1481,6 +1493,10 @@ function syncMemberFromForm(member) {
   member.model = $("mModel").value.trim() || null;
   member.base_url = $("mBaseUrl").value.trim() || null;
   member.api_key_env = $("mApiKeyEnv").value.trim() || null;
+  if (member.type === "claude-cli" && !member.base_url) {
+    // 本机登录态不需要密钥变量；清除从其他后端残留的默认值（如 OPENAI_API_KEY）。
+    member.api_key_env = null;
+  }
   member.auth_mode = $("mAuthMode").value;
   member.runtime_mode = $("mRuntimeMode").value;
   member.sandbox = $("mSandbox").value;
@@ -2063,6 +2079,9 @@ $("memberPanel").addEventListener("input", event => {
   state.teamDirty = true;
   if (event.target.id === "mName") { $("memberPanelTitle").textContent = member.name || "未命名角色"; renderMemberList(); }
   if (event.target.id === "mCustomPrompt") $("mPromptCount").textContent = `${$("mCustomPrompt").value.length}/30000`;
+  if (event.target.id === "mBaseUrl" && $("mType").value === "claude-cli") {
+    applyMemberFieldVisibility();
+  }
   if (["mName", "mModel", "mBaseUrl", "mApiKeyEnv", "mContainerImage", "mContainerCommand"].includes(event.target.id)) {
     event.target.classList.remove("invalid");
     const errorMap = { mName: "eName", mModel: "eModel", mBaseUrl: "eBaseUrl", mApiKeyEnv: "eApiKeyEnv", mContainerImage: "eContainerImage", mContainerCommand: "eContainerCommand" };
