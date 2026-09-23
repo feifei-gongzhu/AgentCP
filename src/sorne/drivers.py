@@ -426,7 +426,10 @@ class OpenAICompatibleDriver(BaseDriver):
         if not api_key:
             raise DriverError(f"缺少环境变量: {api_key_env}")
 
-        url = openai_chat_completions_url(self.config.base_url)
+        # 历史语义（api_root）：base_url 含自定义路径前缀，原样拼
+        # /chat/completions；显式 extra["openai_url_style"] 可切换。
+        style = str(self.config.extra.get("openai_url_style") or "api_root").strip()
+        url = openai_chat_completions_url(self.config.base_url, style=style)
         body = {
             "model": self.config.model,
             "messages": [{"role": "user", "content": prompt}],

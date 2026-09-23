@@ -1,4 +1,12 @@
-"""公共 Runtime 抽取 6c：OpenAI endpoint 契约统一（本地 HTTP 服务断言实际请求路径）。"""
+"""OpenAI endpoint 契约（修订版）：保留两种调用场景的旧配置含义。
+
+6c 曾把两种场景隐式统一为“未以 /v1 结尾自动加 /v1”，破坏自定义路径
+前缀（如 https://relay.example/api）的 local-cli 旧配置。修订后：
+- 默认各按历史语义（drivers=api_root、local_docker=service_root）；
+- 互通只通过显式 ``extra["openai_url_style"]``。
+完整参数化契约见 test_openai_url_compat.py；本文件用本地 HTTP 服务断言
+两个 driver 的实际请求路径。
+"""
 
 from __future__ import annotations
 
@@ -11,27 +19,27 @@ import pytest
 from src.sorne.openai_urls import openai_chat_completions_url
 
 
-@pytest.mark.parametrize(
-    ("base_url", "expected"),
-    [
-        ("https://relay.example.com", "https://relay.example.com/v1/chat/completions"),
-        ("https://relay.example.com/", "https://relay.example.com/v1/chat/completions"),
-        ("https://relay.example.com/v1", "https://relay.example.com/v1/chat/completions"),
-        ("https://relay.example.com/v1/", "https://relay.example.com/v1/chat/completions"),
-        ("https://api.deepseek.com", "https://api.deepseek.com/v1/chat/completions"),
-        ("http://127.0.0.1:8000", "http://127.0.0.1:8000/v1/chat/completions"),
-        ("  https://relay.example.com  ", "https://relay.example.com/v1/chat/completions"),
-    ],
-)
-def test_openai_url_contract(base_url: str, expected: str) -> None:
-    assert openai_chat_completions_url(base_url) == expected
+def test_helper_requires_explicit_style() -> None:
+    with pytest.raises(TypeError):
+        openai_chat_completions_url("https://relay.example.com")  # type: ignore[arg-type]
 
 
-def test_openai_url_rejects_empty() -> None:
-    with pytest.raises(ValueError):
-        openai_chat_completions_url("")
-    with pytest.raises(ValueError):
-        openai_chat_completions_url(None)
+def test_helper_service_root_is_idempotent_for_v1() -> None:
+    assert (
+        openai_chat_completions_url("https://api.openai.com/v1", style="service_root")
+        == "https://api.openai.com/v1/chat/completions"
+    )
+    assert (
+        openai_chat_completions_url("https://api.openai.com", style="service_root")
+        == "https://api.openai.com/v1/chat/completions"
+    )
+
+
+def test_helper_api_root_keeps_custom_prefix() -> None:
+    assert (
+        openai_chat_completions_url("https://relay.example/api", style="api_root")
+        == "https://relay.example/api/chat/completions"
+    )
 
 
 class _CapturingHandler(BaseHTTPRequestHandler):
@@ -67,41 +75,35 @@ def local_openai_server():
         thread.join(timeout=2)
 
 
-@pytest.mark.parametrize("base_style", ["service_root", "api_root"])
-def test_openai_driver_hits_contracted_path(
-    local_openai_server, base_style: str, monkeypatch: pytest.MonkeyPatch,
+def test_openai_driver_default_path_and_auth(
+    local_openai_server, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     root, captured = local_openai_server
-    base = root if base_style == "service_root" else f"{root}/v1"
     monkeypatch.setenv("SORNE_TEST_OAI_KEY", "test-key")
     from src.sorne.drivers import DriverConfig, OpenAICompatibleDriver
 
     driver = OpenAICompatibleDriver(DriverConfig(
         type="openai-compatible",
         model="test-model",
-        base_url=base,
+        base_url=root,
         api_key_env="SORNE_TEST_OAI_KEY",
     ), timeout=10)
     payload = driver.run("prompt")
     assert payload["kind"] == "none"
-    # 统一契约：两种配置风格打到同一条实际路径。
-    assert captured["path"] == "/v1/chat/completions"
+    # local-cli 默认 api_root：base 原样拼 /chat/completions。
+    assert captured["path"] == "/chat/completions"
     assert captured["auth"] == "Bearer test-key"
 
 
-@pytest.mark.parametrize("base_style", ["service_root", "api_root"])
-def test_local_docker_compatibility_hits_contracted_path(
-    local_openai_server, base_style: str, tmp_path,
-) -> None:
+def test_local_docker_default_hits_v1_path(local_openai_server, tmp_path) -> None:
     root, captured = local_openai_server
-    base = root if base_style == "service_root" else f"{root}/v1"
     from src.sorne.drivers import DriverConfig
     from src.sorne.local_docker import LocalDockerRuntime
 
     runtime = LocalDockerRuntime(
         DriverConfig(
             type="claude-cli",
-            base_url=base,
+            base_url=root,
             extra={
                 "project_path": str(tmp_path),
                 "member_name": "m1",
@@ -112,22 +114,10 @@ def test_local_docker_compatibility_hits_contracted_path(
         cancel_check=lambda: False,
         progress_callback=lambda _event: None,
     )
-    runtime.profile = type(runtime.profile)(
-        project_path=runtime.profile.project_path,
-        member_name=runtime.profile.member_name,
-        provider=runtime.profile.provider,
-        model=runtime.profile.model,
-        base_url=base,
-        auth_mode=runtime.profile.auth_mode,
-        api_key="test-key",
-        sandbox=runtime.profile.sandbox,
-        target_path=runtime.profile.target_path,
-        guest_image=runtime.profile.guest_image,
-        external_host=runtime.profile.external_host,
-    )
+    object.__setattr__(runtime.profile, "api_key", "test-key")
     response = runtime._openai_chat_completion(
         [{"role": "user", "content": "hi"}], [], timeout=5,
     )
     assert isinstance(response, dict)
-    # 统一契约：两种配置风格打到同一条实际路径。
+    # local-docker 默认 service_root：base 拼出 /v1/chat/completions。
     assert captured["path"] == "/v1/chat/completions"

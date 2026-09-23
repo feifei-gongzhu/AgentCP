@@ -314,7 +314,10 @@ class LocalDockerRuntime:
         timeout: float,
     ) -> dict[str, Any]:
         assert self.profile.base_url is not None
-        url = openai_chat_completions_url(self.profile.base_url)
+        # 历史语义（service_root）：base 为服务根，拼 /v1/chat/completions
+        # （base 已含 /v1 时不叠加）；显式 extra["openai_url_style"] 可切换。
+        style = str(self.config.extra.get("openai_url_style") or "service_root").strip()
+        url = openai_chat_completions_url(self.profile.base_url, style=style)
         body = {
             "model": self.profile.model,
             "messages": messages,
