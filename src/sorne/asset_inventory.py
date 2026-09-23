@@ -191,6 +191,26 @@ def _safe_candidate_value(candidate: NormalizedCandidate) -> str:
     return candidate.canonical_url or candidate.endpoint_key
 
 
+def _seed_url(host: object, port: object) -> str:
+    """Bare-IP/host → accessible HTTPS seed URL（保留原资产身份，不要求用户
+    改填成 HTTPS URL）。IPv6 加方括号；显式端口保留。"""
+    raw = str(host or "").strip()
+    display = f"[{raw}]" if ":" in raw and not raw.startswith("[") else raw
+    port_value = int(port or 0)
+    suffix = f":{port_value}" if port_value else ""
+    return f"https://{display}{suffix}/"
+
+
+def _candidate_seed_url(candidate: NormalizedCandidate) -> str | None:
+    """调度 seed：canonical URL 优先；裸 IP/主机名构造 HTTPS seed。"""
+    if candidate.canonical_url:
+        return candidate.canonical_url
+    host = candidate.hostname or candidate.ip_address
+    if not host:
+        return None
+    return _seed_url(host, candidate.port)
+
+
 def _minimal_source_row(candidates: list[NormalizedCandidate]) -> str:
     return json.dumps(
         {
@@ -800,13 +820,15 @@ class AssetInventory:
                                 """,
                                 (_id("APT"), asset_id, now, now),
                             )
-                            if candidate.canonical_url:
-                                # 每个 URL 采集工作项与端点任务同事务创建；
-                                # 同 URL 多来源只保留一份同用途待办。
+                            # 每个 URL 采集工作项与端点任务同事务创建；同 URL
+                            # 多来源只保留一份同用途待办。裸 IP/主机名资产
+                            # 构造可访问 seed（canonical_url 为 None 的候选）。
+                            seed_url = _candidate_seed_url(candidate)
+                            if seed_url:
                                 self._ensure_work_item(
                                     db,
                                     asset_id=asset_id,
-                                    canonical_url=candidate.canonical_url,
+                                    canonical_url=seed_url,
                                     purpose="collect",
                                     source_reason=(
                                         "baseline"
@@ -1529,22 +1551,38 @@ class AssetInventory:
         return value if isinstance(value, dict) else {}
 
     def migrate_legacy_profile_state(self) -> dict[str, Any]:
-        """Import the legacy JSON queue into URL work items (idempotent).
+        """Import the legacy JSON queue **and** V6 SQLite pending tasks into URL
+        work items (idempotent).
 
-        应用层迁移：读 profile_state.json，走现有 URL 规范化与范围判定后写入
-        SQLite；数据与完成标记在同一事务原子提交（事务回滚即整体未发生，
-        重跑安全）。冲突规则见各分支注释；全部处置计入迁移报告。
+        应用层迁移：读 profile_state.json 与 profile_tasks 待办，走现有 URL
+        规范化与范围判定后写入 SQLite；数据与完成标记在同一事务原子提交
+        （事务回滚即整体未发生，重跑安全）。冲突规则见各分支注释；全部处置
+        计入迁移报告。
+        - 文件不存在 → 空导入（仍写标记）；**文件存在但损坏/结构非法 →
+          抛错中止，不写完成标记**，避免静默吞掉旧队列后被标记挡住。
+        - 只存在于 V6 profile_tasks 的 pending/partial 端点任务同样回填为
+          工作项（不依赖重新导入来源文件——来源文件重复导入会直接返回）。
         """
         from .target_profile import profile_policy, target_profile
 
         json_path = self.store.path / "profile_state.json"
         raw = json_path.read_text(encoding="utf-8") if json_path.exists() else None
-        try:
-            state = json.loads(raw) if raw else {}
-        except json.JSONDecodeError:
-            state = {}
-        if not isinstance(state, dict):
-            state = {}
+        state: dict[str, Any] = {}
+        if raw is not None:
+            try:
+                parsed = json.loads(raw)
+            except json.JSONDecodeError as exc:
+                raise RuntimeError(
+                    f"项目 {self.store.vendor} 的 profile_state.json 已损坏"
+                    f"（{exc}）：中止画像队列迁移且不写完成标记；"
+                    "请修复或移除该文件后重试迁移"
+                ) from exc
+            if not isinstance(parsed, dict):
+                raise RuntimeError(
+                    f"项目 {self.store.vendor} 的 profile_state.json 结构非法"
+                    "（顶层必须是对象）：中止画像队列迁移且不写完成标记"
+                )
+            state = parsed
         pending_urls = [str(item) for item in state.get("pending_seed_urls") or [] if str(item).strip()]
         completed_urls = [str(item) for item in state.get("completed_seed_urls") or [] if str(item).strip()]
         review_attempts = {
@@ -1558,12 +1596,28 @@ class AssetInventory:
         # 已有画像结果（JSONL 采集记录 + SQLite profile_urls）用于判定旧
         # completed 是否有结果佐证。
         profiled_urls = {str(item.get("url") or "") for item in target_profile(self.store)}
+        # V6 SQLite 待办：端点任务 pending/partial 且资产未失效。裸 IP 资产
+        # 构造 seed URL（保留资产身份，不要求重填 HTTPS URL）。
+        with self.database.connect() as db:
+            legacy_task_rows = db.execute(
+                """
+                SELECT pt.id AS task_id, pt.status AS task_status,
+                       a.id AS asset_id, a.canonical_url, a.hostname, a.ip_address,
+                       a.port, a.status AS asset_status
+                FROM profile_tasks pt
+                JOIN enterprise_assets a ON a.id=pt.asset_id
+                WHERE pt.status IN ('pending','partial')
+                  AND a.status NOT IN ('out_of_scope','invalid','stale','duplicate')
+                ORDER BY a.official_source DESC, a.first_seen_at, a.endpoint_key
+                """
+            ).fetchall()
 
         report: dict[str, Any] = {
             "imported_pending": 0,
             "imported_completed": 0,
             "imported_consumed": 0,
             "imported_review": 0,
+            "imported_sqlite_pending": 0,
             "merged": 0,
             "skipped_invalid": 0,
             "skipped_out_of_scope": 0,
@@ -1734,6 +1788,37 @@ class AssetInventory:
                     )
                     report["imported_review"] += 1
 
+                # V6 SQLite 待办回填：只存在于 profile_tasks 的端点任务在
+                # 新调度器中获得 URL 工作项（source_reason=baseline；端点级
+                # attempts 不复制到 URL 项，避免预算放大）。已有同 URL 项
+                # 不重建不降级。
+                for task_row in legacy_task_rows:
+                    seed = str(task_row["canonical_url"] or "") or (
+                        _seed_url(
+                            task_row["hostname"] or task_row["ip_address"],
+                            task_row["port"],
+                        )
+                        if (task_row["hostname"] or task_row["ip_address"])
+                        else ""
+                    )
+                    if not seed:
+                        report["skipped_invalid"] += 1
+                        continue
+                    item, created = self._ensure_work_item(
+                        db,
+                        asset_id=str(task_row["asset_id"]),
+                        canonical_url=seed,
+                        purpose="collect",
+                        source_reason="baseline",
+                        now=now,
+                    )
+                    if created:
+                        report["imported_sqlite_pending"] += 1
+                    elif str(item["status"]) in {"completed", "consumed"}:
+                        # 已有成功结果不被旧端点待办降级。
+                        report["merged"] += 1
+                    # 已存在的 pending/partial 项保持现状（避免重复计数）。
+
                 db.execute(
                     """
                     INSERT INTO profile_migration_meta(
@@ -1745,7 +1830,8 @@ class AssetInventory:
                         self._MIGRATION_NAME, now,
                         hashlib.sha256(raw.encode("utf-8")).hexdigest() if raw else None,
                         report["imported_pending"] + report["imported_completed"]
-                        + report["imported_consumed"] + report["imported_review"],
+                        + report["imported_consumed"] + report["imported_review"]
+                        + report["imported_sqlite_pending"],
                         report["merged"],
                         report["skipped_invalid"] + report["skipped_out_of_scope"],
                         len(report["conflicts"]),
@@ -1935,7 +2021,8 @@ class AssetInventory:
                 for value in values:
                     url = str(value or "").strip()
                     candidate = normalize_asset_candidate(url)
-                    if candidate is None or not candidate.canonical_url:
+                    seed = _candidate_seed_url(candidate) if candidate else None
+                    if seed is None:
                         continue
                     if not asset_value_in_scope(self.store, url):
                         continue
@@ -1943,13 +2030,13 @@ class AssetInventory:
                     item, created = self._ensure_work_item(
                         db,
                         asset_id=asset_id,
-                        canonical_url=candidate.canonical_url,
+                        canonical_url=seed,
                         purpose=purpose,
                         source_reason=source_reason,
                         now=now,
                     )
                     if created:
-                        added.append(candidate.canonical_url)
+                        added.append(seed)
                         continue
                     status = str(item["status"])
                     if status == "completed":
