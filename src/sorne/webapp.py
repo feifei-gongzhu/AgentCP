@@ -40,6 +40,7 @@ from .profile_workbook import build_profile_workbook
 from .platform_paths import valid_project_name
 from .projector import PROJECTOR_MANAGER
 from .team import run_team
+from .runtime_config import canonical_runtime_mode, effective_backend
 from .runtime_secrets import RuntimeSecretStore
 from .asset_inventory import (
     AssetInventory,
@@ -599,18 +600,16 @@ def _load_config(store: ProjectStore) -> dict:
         fallback = ROOT / "teams" / "default.json"
         config = json.loads(fallback.read_text(encoding="utf-8"))
     for member in config.get("members", []):
-        # Older project files used ``backend``. Always expose an explicit
-        # ``type`` so a frontend round-trip cannot silently fall back to codex.
-        member["type"] = member.get("type") or member.get("backend") or "codex"
-        member.pop("backend", None)
         # 读取旧配置时把 pentester 规范化为 executor（仅内存，不重写文件；
         # 写回规范角色发生在用户正常保存配置时）。
         member["role"] = normalize_role(member.get("role"))
-        runtime_mode = str(member.get("runtime_mode") or "local-docker")
-        member["runtime_mode"] = {
-            "host-native": "local-cli",
-            "ct-agent-compose": "agent-compose",
-        }.get(runtime_mode, runtime_mode)
+        # 旧 backend 迁移与 runtime_mode 别名走共享规则（非空 type 优先）。
+        member["type"] = effective_backend(member.get("type"), member.get("backend"))
+        member.pop("backend", None)
+        try:
+            member["runtime_mode"] = canonical_runtime_mode(member.get("runtime_mode"))
+        except ValueError as exc:
+            raise WebAppError(str(exc)) from exc
     return config
 
 
@@ -661,9 +660,8 @@ def _normalize_team_config(config: dict) -> dict:
     for member in config["members"]:
         if not isinstance(member, dict):
             raise WebAppError("成员配置必须是对象")
-        # Preserve the effective backend of legacy backend-only configurations.
-        # Removing ``backend`` is safe only after its value has been migrated.
-        member_type = str(member.get("type") or member.get("backend") or "codex")
+        # 非空 type 优先、缺失回退 backend（共享规则），移除 backend 前先迁移。
+        member_type = effective_backend(member.get("type"), member.get("backend"))
         member["type"] = member_type
         member.pop("backend", None)
         # 保存入口接受旧别名（pentester），写回文件的一律是规范角色。
@@ -681,8 +679,10 @@ def _normalize_team_config(config: dict) -> dict:
             raise WebAppError(f"不支持的角色: {member.get('role')}")
         if member.get("sandbox", "read-only") not in allowed_sandboxes:
             raise WebAppError(f"不支持的沙箱模式: {member.get('sandbox')}")
-        runtime_mode = str(member.get("runtime_mode", "local-docker") or "local-docker")
-        runtime_mode = {"host-native": "local-cli", "ct-agent-compose": "agent-compose"}.get(runtime_mode, runtime_mode)
+        try:
+            runtime_mode = canonical_runtime_mode(member.get("runtime_mode"))
+        except ValueError as exc:
+            raise WebAppError(str(exc)) from exc
         if runtime_mode not in allowed_runtime_modes:
             raise WebAppError(f"不支持的运行模式: {runtime_mode}")
         if runtime_mode == "local-cli" and member_type == "container":

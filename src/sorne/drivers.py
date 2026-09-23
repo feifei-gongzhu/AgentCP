@@ -23,6 +23,7 @@ from .agent_compose import (
 )
 from .local_docker import LocalDockerError, LocalDockerRuntime
 from .provider_auth import normalize_base_url, resolve_anthropic_auth_mode
+from .runtime_config import canonical_runtime_mode
 from .schemas import VALID_WORKER_KINDS
 from .store import ROOT
 from .platform_process import process_group_options, terminate_process_tree
@@ -756,10 +757,10 @@ def run_driver(
     cancel_check: Callable[[], bool] | None = None,
     progress_callback: ProgressCallback | None = None,
 ) -> dict[str, Any]:
-    runtime_mode = str(config.extra.get("runtime_mode") or "local-docker").strip().lower()
-    runtime_mode = {"host-native": "local-cli", "ct-agent-compose": "agent-compose"}.get(runtime_mode, runtime_mode)
-    if runtime_mode not in {"local-docker", "agent-compose", "local-cli"}:
-        raise DriverError(f"未知运行模式: {runtime_mode}")
+    try:
+        runtime_mode = canonical_runtime_mode(config.extra.get("runtime_mode"))
+    except ValueError as exc:
+        raise DriverError(str(exc)) from exc
     if config.type == "mock":
         driver_cls = MockDriver
     elif runtime_mode == "local-cli":

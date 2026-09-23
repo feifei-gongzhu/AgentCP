@@ -11,6 +11,7 @@ from .directives import authoritative_directives, directive_ids, missing_directi
 from .drivers import DriverConfig, run_driver
 from .lifecycle import project_execution_lock, require_executable_target, require_initialized_project
 from .schemas import now_iso, normalize_role
+from .runtime_config import canonical_runtime_mode, effective_backend
 from .scheduler import Scheduler
 from .store import ROOT, ProjectStore
 from .worker import WorkerError, apply_worker_output, compile_worker_prompt
@@ -56,15 +57,18 @@ def load_team(name: str, store: ProjectStore | None = None) -> list[TeamMember]:
     members = []
     for item in data.get("members", []):
         item = dict(item)
-        if "type" in item and "backend" not in item:
-            item["backend"] = item["type"]
         # 旧配置里的 pentester 读取时即规范化为 executor；写回发生在
         # 用户正常保存配置时，不在读取路径自动重写文件。
         item["role"] = normalize_role(item.get("role"))
-        item["runtime_mode"] = {
-            "host-native": "local-cli",
-            "ct-agent-compose": "agent-compose",
-        }.get(str(item.get("runtime_mode") or "local-docker"), str(item.get("runtime_mode") or "local-docker"))
+        try:
+            item["runtime_mode"] = canonical_runtime_mode(item.get("runtime_mode"))
+        except ValueError as exc:
+            raise WorkerError(str(exc)) from exc
+        # type/backend 并存时非空 type 优先（与使用点 member.type or member.backend
+        # 的历史有效行为一致），两字段同步为同一有效值。
+        effective = effective_backend(item.get("type"), item.get("backend"))
+        item["type"] = effective
+        item["backend"] = effective
         members.append(TeamMember(**item))
     return sorted(members, key=lambda item: item.priority)
 
