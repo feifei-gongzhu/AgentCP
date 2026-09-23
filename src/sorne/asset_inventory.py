@@ -2145,9 +2145,15 @@ class AssetInventory:
                         candidate.canonical_url
                         or str(record.get("url") or "").strip()
                     )
-                from .target_profile import profile_policy
+                from .target_profile import profile_policy, target_assessments
 
                 review_cap = max(0, int(profile_policy(self.store)["needs_review_max_attempts"]))
+                # 复核完成条件依据**有效评估结果**：最新评估仍是 needs_review
+                # 说明复核未收敛，exploration_complete 不能单独代表评估收敛。
+                latest_review_class = {
+                    str(assessment.get("url") or ""): str(assessment.get("profile_class") or "")
+                    for assessment in target_assessments(self.store)
+                }
                 dispatched = db.execute(
                     """
                     SELECT wi.* FROM profile_work_items wi
@@ -2158,22 +2164,24 @@ class AssetInventory:
                 ).fetchall()
                 finalized = 0
                 for item in dispatched:
-                    cap = (
-                        MAX_PROFILE_ATTEMPTS
-                        if str(item["purpose"]) == "collect"
-                        else review_cap
-                    )
+                    is_review = str(item["purpose"]) == "review"
+                    cap = review_cap if is_review else MAX_PROFILE_ATTEMPTS
                     matched = str(item["canonical_url"]) in accepted_urls
                     if error:
                         new_status = (
                             "exhausted" if int(item["attempts"] or 0) >= cap else "partial"
                         )
-                    elif matched:
-                        # URL 粒度：该 URL 已有采集记录即完成——不依赖批次级
-                        # exploration_complete（批次未探索完只影响剩余 URL）。
+                    elif matched and not is_review:
+                        # 采集工作项：URL 粒度，有采集记录即完成。
+                        new_status = "completed"
+                    elif matched and is_review and latest_review_class.get(
+                        str(item["canonical_url"]), ""
+                    ) != "needs_review":
+                        # 复核工作项：只有最新评估已离开 needs_review 才完成。
                         new_status = "completed"
                     else:
-                        # kind=none / 无匹配记录：不能当作成功画像。
+                        # 无匹配记录，或复核后评估仍为 needs_review：
+                        # 按剩余预算进入可重试或 exhausted。
                         new_status = (
                             "exhausted" if int(item["attempts"] or 0) >= cap else "partial"
                         )
