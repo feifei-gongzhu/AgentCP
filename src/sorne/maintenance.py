@@ -138,8 +138,10 @@ def _safe_archive_path(value: str) -> PurePosixPath:
 def _verify_sqlite(path: Path, *, allow_migration: bool = False) -> int:
     if allow_migration:
         ControlDatabase(path)
-    uri = f"file:{path.resolve().as_posix()}?mode=ro"
-    connection = sqlite3.connect(uri, uri=True)
+    # 本机 Python 3.9 自带的 sqlite3 无法用 file:?mode=ro URI 打开备份副本
+    # （OperationalError: unable to open database file）。校验对象是备份
+    # 流程写入的私有暂存副本，直接普通打开即可实现只读校验意图。
+    connection = sqlite3.connect(str(path.resolve()))
     try:
         quick = connection.execute("PRAGMA quick_check").fetchone()
         if quick is None or quick[0] != "ok":
