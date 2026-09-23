@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -50,6 +51,10 @@ def test_shadow_attaches_in_commit_path_and_freezes_into_payload(
     from src.agent_control_plane.automation import AutomationEngine
 
     store = _project(tmp_path, monkeypatch)
+    record_target_profile(store, [{
+        "url": "https://example.com/admin/upload", "function": "后台文件上传接口",
+        "technology_stack": [],
+    }], proposed_by="test")
     engine = AutomationEngine(store)
     run_id = engine.db.create_run(store.vendor, "default", 600, 3)
     job_id = engine.db.enqueue_job(run_id, "swarm", "profile-mapper", "profile_mapper", {"member": {}})
@@ -57,11 +62,11 @@ def test_shadow_attaches_in_commit_path_and_freezes_into_payload(
     engine.db.complete_job(job_id, "w-1", {"payload": _payload()})
     calls: list[dict] = []
 
-    def transport(state, questions):
-        calls.append(state)
+    def transport(state_text, questions):
+        calls.append(state_text)
         answers = {}
-        for index in range(len(state["targets"])):
-            answers[f"t{index}_entry_type"] = {"choice": "file_upload", "confidence": 0.88}
+        for index in range(len(json.loads(state_text)["targets"])):
+            answers[f"t{index}_entry_type"] = {"type": "choice", "choice": "file_upload", "confidence": 0.88}
             answers[f"t{index}_has_privilege_boundary"] = {"noul": 0.93}
             answers[f"t{index}_information_sufficient"] = {"noul": 0.85}
             answers[f"t{index}_needs_more_evidence"] = {"noul": 0.05}
@@ -96,9 +101,14 @@ def test_shadow_attaches_in_commit_path_and_freezes_into_payload(
 def test_projection_replay_never_reinvokes_transport(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """核心时序保证：投影重放只读冻结载荷，零模型调用。"""
+    """真实重放保证：回执写入前注入失败 → 事件实际重试 → 记录不重复、零重调。
+
+    注入点在"文件追加成功之后、projection_receipt 写入之前"：事件进入
+    retry_wait，恢复写入后由 Projector.recover() 领取重放；JSONL 幂等
+    标记保证记录不重复，transport 调用数不得增加。
+    """
     from src.agent_control_plane.automation import AutomationEngine
-    from src.agent_control_plane.jev_classifier import classify_targets as real_classify
+    from src.agent_control_plane.database import ControlDatabase
     from src.agent_control_plane.projector import Projector
 
     store = _project(tmp_path, monkeypatch)
@@ -107,14 +117,22 @@ def test_projection_replay_never_reinvokes_transport(
     job_id = engine.db.enqueue_job(run_id, "swarm", "profile-mapper", "profile_mapper", {"member": {}})
     assert engine.db.claim_job(run_id, "swarm", "w-1", wave=1) is not None
     engine.db.complete_job(job_id, "w-1", {"payload": _payload()})
+    record_target_profile(store, [{
+        "url": "https://example.com/admin/upload", "function": "后台文件上传接口",
+        "technology_stack": [],
+    }], proposed_by="test")
 
-    call_count = {"n": 0}
+    transport_calls = {"n": 0}
 
-    def counting_transport(state, questions):
-        call_count["n"] += 1
-        return {"answers": {
-            "t0_entry_type": {"choice": "admin_console", "confidence": 0.7},
-        }, "model": "jev-1.13"}
+    def counting_transport(state_text, questions):
+        transport_calls["n"] += 1
+        return {
+            "answers": {
+                "t0_entry_type": {"type": "choice", "choice": "admin_console", "confidence": 0.7},
+                "t0_has_privilege_boundary": {"noul": 0.9},
+            },
+            "model": "jev-1.13",
+        }
 
     monkeypatch.setattr(
         "src.agent_control_plane.jev_classifier.jev_configured", lambda: True,
@@ -122,25 +140,62 @@ def test_projection_replay_never_reinvokes_transport(
     monkeypatch.setattr(
         "src.agent_control_plane.jev_classifier.default_transport", counting_transport,
     )
-    # 补一条画像记录使评估可入账
-    record_target_profile(store, [{
-        "url": "https://example.com/admin/upload", "function": "后台文件上传接口",
-        "technology_stack": [],
-    }], proposed_by="test")
+
+    # 回执写入前注入失败（第一次调用抛 OSError，之后恢复正常）。
+    original_receipt = ControlDatabase.record_projection_receipt
+    receipt_calls = {"n": 0}
+
+    def flaky_receipt(self, **kwargs):
+        receipt_calls["n"] += 1
+        if receipt_calls["n"] == 1:
+            raise OSError("receipt disk boom")
+        return original_receipt(self, **kwargs)
+
+    monkeypatch.setattr(ControlDatabase, "record_projection_receipt", flaky_receipt)
     engine._commit_candidates(run_id)
-    assert call_count["n"] == 1, "提交路径恰好调用一次"
-    before_replay = call_count["n"]
 
-    # 丢弃 intents/target_assessments 投影痕迹后强制重放：
-    # 直接再次运行提交收敛不会重调（事件已 committed）；这里验证 Projector
-    # 层面重放同样零调用——清空 receipts 会走幂等重投影，但不触发 transport。
+    event_id = next(
+        row["event_id"]
+        for row in store.read_jsonl("target_assessments.jsonl")[-1:]  # 触发读取即可
+    ) if False else None
     with engine.db.connect() as db:
-        db.execute("DELETE FROM projection_receipts")
-    Projector(store, engine.db).recover()
-    assert call_count["n"] == before_replay, "投影重放不得重新调用 JEV"
+        status_row = db.execute(
+            "SELECT status,attempts FROM commit_events "
+            "WHERE event_type='worker_output.target_profile_batch' ORDER BY sequence DESC LIMIT 1"
+        ).fetchone()
+    assert status_row is not None
+    assert status_row["status"] == "retry_wait", "回执失败后事件必须进入重试"
+    assert status_row["attempts"] == 1
+    first_count = len([
+        item for item in store.read_jsonl("target_assessments.jsonl")
+        if item["url"] == "https://example.com/admin/upload"
+    ])
+    assert first_count == 1
+    assert transport_calls["n"] == 1
 
-    # 直接调用 classify_targets 的真实实现未受 monkeypatch 影响的健全性检查。
-    assert real_classify([{"url": "https://x"}], transport=counting_transport) is not None
+    # 恢复：撤除注入、退避拨到期，由 Projector 真实领取并重放。
+    monkeypatch.setattr(ControlDatabase, "record_projection_receipt", original_receipt)
+    with engine.db.connect() as db:
+        db.execute(
+            "UPDATE commit_events SET available_at='2000-01-01T00:00:00+00:00' "
+            "WHERE status='retry_wait'"
+        )
+    Projector(store, engine.db).recover()
+
+    with engine.db.connect() as db:
+        status_row = db.execute(
+            "SELECT status FROM commit_events "
+            "WHERE event_type='worker_output.target_profile_batch' ORDER BY sequence DESC LIMIT 1"
+        ).fetchone()
+    assert status_row["status"] == "committed", "恢复后事件必须真实重试至 committed"
+    final_count = len([
+        item for item in store.read_jsonl("target_assessments.jsonl")
+        if item["url"] == "https://example.com/admin/upload"
+    ])
+    assert final_count == 1, "重放后记录不得重复（JSONL 幂等标记）"
+    assert transport_calls["n"] == 1, "投影重放不得重新调用 JEV"
+    latest = target_assessments(store)
+    assert latest[0]["classification_provenance"]["jev_shadow"]["model"] == "jev-1.13"
 
 
 def test_transport_failure_does_not_block_candidate(

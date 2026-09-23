@@ -21,7 +21,7 @@
 - Web 与客户端 Method Pack 各自提供十维攻击面、动态检查清单和初始假设组合。Reason/Metacog 以 PlanBatch 一次提交多条正交假设，由确定性评分选择。
 - Reason 产生的新方向会在同一 Run 下一波立即交给 Executor，不再等下次人工启动。
 - 模型只能提出漏洞候选，不能决定漏洞成立。Guardian 只降不升：必须同时满足安全边界突破（因子 A）与可复核证据（因子 B），才能进入“系统漏洞池”。
-- JEV（TypeSafe jev-1.13 System One 判断模型）只作为目标分类的影子旁路：四个原子问题（入口类型、权限边界、信息充分性、是否需补证据）在候选提交冻结前调用，答案随载荷冻结并写入评估记录的 `classification_provenance.jev_shadow`（`influences_scheduling=false`），投影重放零模型调用。功能解释、技术提取、自由文本理由与专项规划仍由 Agent 承担；JEV 不作为团队角色、不复用 Chat Completions 驱动。未配置 `AGENTCP_JEV_ENDPOINT` 时完全禁用、零足迹；影子的 confidence 阈值未校准，仅用于旁路对比评测，暂不影响任何调度决策。
+- JEV（TypeSafe jev-1.13 System One 判断模型）只作为目标分类的影子旁路：四个原子问题（入口类型、权限边界、信息充分性、是否需补证据）在候选提交冻结前调用，答案随载荷冻结并写入评估记录的 `classification_provenance.jev_shadow`（`influences_scheduling=false`），投影重放零模型调用。功能解释、技术提取、自由文本理由与专项规划仍由 Agent 承担；JEV 不作为团队角色、不复用 Chat Completions 驱动。REST 契约按官方 Quick start 实现（`POST {端点}/v1/systemone`，`state` 为字符串、问题 `type`+Choice `criteria`），并经本地 HTTP mock 全量验证；未配置 `AGENTCP_JEV_ENDPOINT` 时完全禁用、零足迹。影子调用是提交收敛路径上的有界同步网络请求（candidate 锁内）；confidence 阈值未校准，影子输入只含采集证据（不含 Agent 结论字段），仅用于旁路对比评测，暂不影响任何调度决策。
 - 进入系统漏洞池后仍须人工认可、调级、驳斥、降级或要求复测；人工驳斥不会篡改系统原判，而是形成独立的长期质量账本和反例记忆。
 - `stop_loss` 是 Run 级终结态。控制版本（fencing token）会拒绝停止前 Worker 的迟到写回，避免已止损运行被自动续期复活。模型只能提出止损建议（自动降级为控制建议），无权终止 Run；运行终止仅接受项目所有者或确定性控制器指令。
 - 超时、认证失败、WAF 阻断等结果作为有作用域、有时效的负向证据保存；有效期内自动剪枝，失效或环境变化后允许重新验证。
