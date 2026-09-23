@@ -16,6 +16,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
+from . import worker_payload
 from .provider_auth import normalize_base_url, resolve_anthropic_auth_mode
 from .schemas import VALID_WORKER_KINDS
 from .platform_process import (
@@ -825,21 +826,11 @@ def _terminate_process(process: subprocess.Popen[str]) -> None:
 
 
 def _extract_json(text: str) -> dict[str, Any]:
-    stripped = text.strip()
+    # 共享严格提取；本包装保留 AgentComposeError 错误类型。
     try:
-        value = json.loads(stripped)
-    except json.JSONDecodeError:
-        start = stripped.find("{")
-        end = stripped.rfind("}")
-        if start < 0 or end <= start:
-            raise AgentComposeError("模型返回不是合法 JSON") from None
-        try:
-            value = json.loads(stripped[start:end + 1])
-        except json.JSONDecodeError as exc:
-            raise AgentComposeError(f"模型返回不是合法 JSON: {exc}") from exc
-    if not isinstance(value, dict):
-        raise AgentComposeError("模型 JSON 返回值必须是对象")
-    return value
+        return worker_payload.extract_worker_json(text)
+    except worker_payload.WorkerPayloadError as exc:
+        raise AgentComposeError(str(exc)) from exc
 
 
 def _extract_worker_result(detail: dict[str, Any]) -> dict[str, Any]:
@@ -883,19 +874,7 @@ def _extract_worker_result(detail: dict[str, Any]) -> dict[str, Any]:
 
 
 def _model_api_error(text: str) -> str | None:
-    if not text:
-        return None
-    match = re.search(
-        r"API\s+Error:\s*(?:(\d{3})\s*)?([^\r\n]+)",
-        text,
-        flags=re.IGNORECASE,
-    )
-    if not match:
-        return None
-    status = match.group(1)
-    message = match.group(2).strip() or "模型服务返回错误"
-    status_text = f"HTTP {status} " if status else ""
-    return f"模型 API 调用失败: {status_text}{message}".strip()
+    return worker_payload.parse_api_error(text)
 
 
 def _redact_runtime_text(value: str, secret: str | None) -> str:

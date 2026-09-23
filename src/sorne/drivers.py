@@ -21,6 +21,9 @@ from .agent_compose import (
     find_docker_binary,
     profile_from_driver_config,
 )
+from . import claude_events
+from . import secret_redact
+from . import worker_payload
 from .local_docker import LocalDockerError, LocalDockerRuntime
 from .provider_auth import normalize_base_url, resolve_anthropic_auth_mode
 from .runtime_config import canonical_runtime_mode
@@ -131,31 +134,23 @@ def _is_relative_to(path: Path, root: Path) -> bool:
 
 
 def _extract_json(text: str) -> dict[str, Any]:
-    stripped = text.strip()
-    if not stripped:
-        raise DriverError("模型输出为空")
+    # 共享严格提取（对象 + 合法 kind）；本包装保留 DriverError 错误类型。
     try:
-        return json.loads(stripped)
-    except json.JSONDecodeError:
-        start = stripped.find("{")
-        end = stripped.rfind("}")
-        if start >= 0 and end > start:
-            return json.loads(stripped[start : end + 1])
-        raise DriverError(f"模型输出不是合法 JSON: {stripped}")
+        return worker_payload.extract_worker_json(text)
+    except worker_payload.WorkerPayloadError as exc:
+        raise DriverError(str(exc)) from exc
 
 
 def _validate_worker_payload(payload: Any) -> dict[str, Any]:
-    if not isinstance(payload, dict):
-        raise DriverError("Model Worker 返回值必须是 JSON 对象")
-    if payload.get("kind") not in VALID_WORKER_KINDS:
-        raise DriverError("模型未返回带合法 kind 的 Sorne Worker JSON")
-    return payload
+    try:
+        return worker_payload.require_worker_kind(payload)
+    except worker_payload.WorkerPayloadError as exc:
+        raise DriverError(str(exc)) from exc
 
 
 def _redact_secret(text: str, secret: str | None, limit: int | None = None) -> str:
     """Keep provider credentials out of driver errors and persisted events."""
-    redacted = text.replace(secret, "[REDACTED]") if secret else text
-    return redacted[:limit] if limit is not None else redacted
+    return secret_redact.redact_secret(text, secret, limit=limit)
 
 
 def _terminate_process_tree(process: subprocess.Popen[str]) -> None:
@@ -164,80 +159,11 @@ def _terminate_process_tree(process: subprocess.Popen[str]) -> None:
 
 
 def _safe_stream_value(value: Any, secret: str | None, limit: int = 1200) -> str:
-    sensitive_markers = ("key", "token", "secret", "password", "authorization", "cookie")
-
-    def scrub(item: Any, key: str = "") -> Any:
-        if any(marker in key.casefold() for marker in sensitive_markers):
-            return "[REDACTED]"
-        if isinstance(item, dict):
-            return {str(name): scrub(child, str(name)) for name, child in item.items()}
-        if isinstance(item, list):
-            return [scrub(child) for child in item[:30]]
-        if isinstance(item, str):
-            return _redact_secret(item, secret)
-        return item
-
-    if isinstance(value, str):
-        text = _redact_secret(value, secret)
-    else:
-        text = json.dumps(scrub(value), ensure_ascii=False, separators=(",", ":"))
-    return text[:limit]
+    return secret_redact.safe_stream_value(value, secret, limit=limit)
 
 
 def _claude_stream_events(message: dict[str, Any], secret: str | None) -> tuple[list[dict[str, Any]], str | None]:
-    events: list[dict[str, Any]] = []
-    final_result: str | None = None
-    message_type = str(message.get("type", ""))
-    if message_type == "system" and message.get("subtype") == "init":
-        tools = [str(item) for item in (message.get("tools") or [])[:80]]
-        events.append({
-            "event": "stream_started",
-            "session_id": str(message.get("session_id", ""))[:200],
-            "tools": tools,
-        })
-    elif message_type in {"assistant", "user"}:
-        envelope = message.get("message") or {}
-        content = envelope.get("content") or []
-        if isinstance(content, str):
-            content = [{"type": "text", "text": content}]
-        for block in content if isinstance(content, list) else []:
-            if not isinstance(block, dict):
-                continue
-            block_type = block.get("type")
-            if block_type == "tool_use":
-                events.append({
-                    "event": "tool_started",
-                    "tool_use_id": str(block.get("id", ""))[:200],
-                    "tool_name": str(block.get("name", "unknown"))[:120],
-                    "input_summary": _safe_stream_value(block.get("input") or {}, secret),
-                })
-            elif block_type == "tool_result":
-                events.append({
-                    "event": "tool_completed",
-                    "tool_use_id": str(block.get("tool_use_id", ""))[:200],
-                    "is_error": bool(block.get("is_error", False)),
-                    "output_summary": _safe_stream_value(block.get("content", ""), secret),
-                })
-            elif block_type == "text" and message_type == "assistant":
-                text = _safe_stream_value(block.get("text", ""), secret, limit=1000).strip()
-                if text:
-                    events.append({"event": "assistant_update", "text": text})
-    elif message_type == "result":
-        raw_result = message.get("result")
-        if isinstance(raw_result, str):
-            final_result = raw_result
-        events.append({
-            "event": "stream_result",
-            "subtype": str(message.get("subtype", ""))[:80],
-            "is_error": bool(message.get("is_error", False)),
-            "api_error_status": message.get("api_error_status"),
-            "terminal_reason": str(message.get("terminal_reason", ""))[:120],
-            "duration_ms": message.get("duration_ms"),
-            "duration_api_ms": message.get("duration_api_ms"),
-            "num_turns": message.get("num_turns"),
-            "total_cost_usd": message.get("total_cost_usd"),
-        })
-    return events, final_result
+    return claude_events.claude_message_events(message, secret)
 
 
 def _resolved_claude_auth(auth_mode: str, base_url: str | None) -> str:

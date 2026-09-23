@@ -13,6 +13,7 @@ from typing import Any
 from urllib.parse import urlparse
 from uuid import uuid4
 
+from . import diagnostics
 from .database import ControlDatabase
 from .dashboard import render_dashboard
 from .evidence import freeze_worker_result_evidence
@@ -149,12 +150,7 @@ def _stage_call_budget_seconds(run: dict[str, Any], gate_interval_minutes: int) 
 
 def _compact_error(error: str, limit: int = 4000) -> str:
     """Bound persisted errors without discarding the actionable final cause."""
-    if len(error) <= limit:
-        return error
-    marker = f"\n... [省略 {len(error) - limit} 个诊断字符] ...\n"
-    head_size = min(900, max(0, limit - len(marker)))
-    tail_size = max(0, limit - len(marker) - head_size)
-    return error[:head_size] + marker + error[-tail_size:]
+    return diagnostics.compact_diagnostic(error, limit=limit)
 
 
 def _compact_status_job(job: dict[str, Any]) -> dict[str, Any]:

@@ -21,6 +21,9 @@ from .agent_compose import (
     find_docker_binary,
     profile_from_driver_config,
 )
+from . import diagnostics
+from . import secret_redact
+from . import worker_payload
 from .provider_auth import anthropic_secret_env_var, normalize_base_url, resolve_anthropic_auth_mode
 from .schemas import VALID_WORKER_KINDS
 from .platform_process import process_group_options, terminate_process_tree
@@ -1145,53 +1148,15 @@ def _extract_claude_worker_payload(
 
 
 def _extract_final_text(final_text: str) -> dict[str, Any]:
+    # 共享严格提取（分层见 worker_payload）；本包装保留 LocalDockerError。
     try:
-        payload = json.loads(final_text)
-    except json.JSONDecodeError as original_error:
-        # Compatible providers sometimes wrap the object in prose or emit more
-        # than one JSON fragment. Scan complete objects instead of slicing from
-        # the first "{" to the last "}", which incorrectly joins fragments.
-        decoder = json.JSONDecoder()
-        decoded_objects: list[Any] = []
-        for index, character in enumerate(final_text):
-            if character != "{":
-                continue
-            try:
-                value, _end = decoder.raw_decode(final_text, index)
-            except json.JSONDecodeError:
-                continue
-            decoded_objects.append(value)
-            if isinstance(value, dict) and value.get("kind") in VALID_WORKER_KINDS:
-                return value
-        if not decoded_objects:
-            raise LocalDockerError("模型未返回合法的 Sorne Worker JSON") from original_error
-        payload = decoded_objects[-1]
-    if isinstance(payload, str):
-        try:
-            payload = json.loads(payload)
-        except json.JSONDecodeError as exc:
-            raise LocalDockerError("模型未返回合法的 Sorne Worker JSON") from exc
-    if not isinstance(payload, dict) or payload.get("kind") not in VALID_WORKER_KINDS:
-        raise LocalDockerError("模型未返回带合法 kind 的 Sorne Worker JSON")
-    return payload
+        return worker_payload.extract_worker_json(final_text)
+    except worker_payload.WorkerPayloadError as exc:
+        raise LocalDockerError(str(exc)) from exc
 
 
 def _safe_value(value: Any, secret: str | None) -> str:
-    sensitive_markers = ("key", "token", "secret", "password", "authorization", "cookie")
-
-    def scrub(item: Any, key: str = "") -> Any:
-        if any(marker in key.casefold() for marker in sensitive_markers):
-            return "[REDACTED]"
-        if isinstance(item, dict):
-            return {str(name): scrub(child, str(name)) for name, child in item.items()}
-        if isinstance(item, list):
-            return [scrub(child) for child in item[:30]]
-        if isinstance(item, str):
-            return item.replace(secret, "[REDACTED]") if secret else item
-        return item
-
-    text = value if isinstance(value, str) else json.dumps(scrub(value), ensure_ascii=False, separators=(",", ":"))
-    return _redact(str(text), secret)[:1200]
+    return secret_redact.safe_stream_value(value, secret)[:1200]
 
 
 def _safe_name(value: str) -> str:
@@ -1200,23 +1165,14 @@ def _safe_name(value: str) -> str:
 
 
 def _redact(text: str, secret: str | None) -> str:
-    redacted = text.replace(secret, "[REDACTED]") if secret else text
-    return _compact_diagnostic(redacted)
+    return diagnostics.compact_diagnostic(
+        secret_redact.redact_secret(text, secret),
+    )
 
 
 def _compact_diagnostic(text: str, limit: int = 4000) -> str:
-    """Keep the command context and, crucially, the process failure tail.
-
-    Model CLIs often print a long tool transcript before the actual transport or
-    runtime error. Keeping only the first N characters hid the actionable cause
-    and made every failure look like the last Bash command had failed.
-    """
-    if len(text) <= limit:
-        return text
-    marker = f"\n... [omitted {len(text) - limit} diagnostic characters] ...\n"
-    head_size = min(900, max(0, limit - len(marker)))
-    tail_size = max(0, limit - len(marker) - head_size)
-    return text[:head_size] + marker + text[-tail_size:]
+    """Keep the command context and, crucially, the process failure tail."""
+    return diagnostics.compact_diagnostic(text, limit=limit)
 
 
 def _terminate(process: subprocess.Popen[str]) -> None:
