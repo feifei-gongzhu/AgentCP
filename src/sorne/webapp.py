@@ -253,9 +253,13 @@ def _has_active_job_lease(engine: AutomationEngine) -> bool:
 
 
 def _validate_vendor(value: object) -> str:
-    vendor = str(value or "").strip()
+    # 用原始输入校验：尾空格、尾点等非法名称直接拒绝，不做静默 strip 改名。
+    vendor = str(value or "")
     if not valid_project_name(vendor):
-        raise WebAppError("项目名只能包含中文、字母、数字、点、短横线和下划线")
+        raise WebAppError(
+            "项目名只能包含中文、字母、数字、点、短横线和下划线；"
+            "不能含首尾空格或尾点，且不可使用 Windows 保留名"
+        )
     return vendor
 
 

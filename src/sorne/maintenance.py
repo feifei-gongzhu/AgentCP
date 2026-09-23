@@ -18,6 +18,7 @@ from uuid import uuid4
 from . import store as store_module
 from .database import ControlDatabase, SCHEMA_VERSION
 from .lifecycle import project_deletion_lock, require_initialized_project
+from .platform_paths import valid_project_name
 from .projector import Projector
 from .store import ProjectStore
 
@@ -56,13 +57,15 @@ def maintenance_status() -> list[str]:
 class ProjectLocator:
     @staticmethod
     def validate_vendor(value: object) -> str:
-        vendor = str(value or "").strip()
-        if (
-            not vendor or len(vendor) > 80 or vendor in {".", ".."}
-            or vendor.startswith(".") or any(char in vendor for char in ("/", "\\", "\0"))
-            or not all(char.isalnum() or char in {"-", "_", "."} for char in vendor)
-        ):
-            raise MaintenanceError("非法项目名称")
+        # 统一调用 platform_paths.valid_project_name，用原始输入校验（不做
+        # 预先 strip，避免尾空格等非法名称被静默改成另一个名称）；错误信息
+        # 带上原名称与限制来源，不假装项目不存在。
+        vendor = str(value or "")
+        if not valid_project_name(vendor):
+            raise MaintenanceError(
+                f"非法项目名称: {vendor!r}（仅允许中文/字母/数字/点/短横线/"
+                "下划线，不可含首尾空格、尾点、路径分隔符或 Windows 保留名）"
+            )
         return vendor
 
     @classmethod
