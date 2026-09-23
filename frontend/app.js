@@ -322,7 +322,7 @@ const coverageLabels = {
 const coverageStatusLabels = { unverified: "未验证", observed: "已观察", verified: "已验证" };
 const roleLabels = {
   reason: "推理规划", metacog: "盲点检查", executor: "执行验证",
-  pentester: "执行验证", reviewer: "质量复核", waf_analyst: "WAF 对抗分析",
+  reviewer: "质量复核", waf_analyst: "WAF 对抗分析",
   profile_mapper: "目标画像采集",
 };
 const stageLabels = {
@@ -1029,7 +1029,7 @@ function workerLabel(job) {
   const role = job.role || "";
   const slotMatch = raw.match(/#(\d+)$/);
   const slot = slotMatch ? ` ${slotMatch[1]}` : "";
-  const base = { reason: "推理员", metacog: "盲点检查员", executor: "执行器", pentester: "执行器", reviewer: "复核员", waf_analyst: "WAF 分析员" }[role] || "工作线程";
+  const base = { reason: "推理员", metacog: "盲点检查员", executor: "执行器", reviewer: "复核员", waf_analyst: "WAF 分析员" }[role] || "工作线程";
   return `${base}${slot}`;
 }
 function modelInfoForJob(job) {

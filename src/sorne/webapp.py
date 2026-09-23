@@ -21,7 +21,7 @@ from .automation import AutomationEngine
 from .database import ControlDatabase
 from .lifecycle import ProjectLifecycleBusy, project_deletion_lock
 from .scheduler import Scheduler
-from .schemas import GateStatus, Hint, coverage_template_for_project_type, now_iso
+from .schemas import GateStatus, Hint, coverage_template_for_project_type, now_iso, normalize_role
 from .methodology import ensure_methodology
 from .agent_compose import shutdown_project_runtimes
 from .metrics import collect_metrics, refresh_asset_count
@@ -599,6 +599,9 @@ def _load_config(store: ProjectStore) -> dict:
         # ``type`` so a frontend round-trip cannot silently fall back to codex.
         member["type"] = member.get("type") or member.get("backend") or "codex"
         member.pop("backend", None)
+        # 读取旧配置时把 pentester 规范化为 executor（仅内存，不重写文件；
+        # 写回规范角色发生在用户正常保存配置时）。
+        member["role"] = normalize_role(member.get("role"))
         runtime_mode = str(member.get("runtime_mode") or "local-docker")
         member["runtime_mode"] = {
             "host-native": "local-cli",
@@ -644,7 +647,7 @@ def _normalize_team_config(config: dict) -> dict:
         raise WebAppError("至少需要一个角色")
     allowed_types = {"codex", "claude-cli", "openai-compatible", "ollama", "container"}
     allowed_roles = {
-        "reason", "metacog", "executor", "pentester", "reviewer",
+        "reason", "metacog", "executor", "reviewer",
         "waf_analyst", "profile_mapper",
     }
     allowed_sandboxes = {"read-only", "workspace-write", "danger-full-access"}
@@ -659,6 +662,11 @@ def _normalize_team_config(config: dict) -> dict:
         member_type = str(member.get("type") or member.get("backend") or "codex")
         member["type"] = member_type
         member.pop("backend", None)
+        # 保存入口接受旧别名（pentester），写回文件的一律是规范角色。
+        try:
+            member["role"] = normalize_role(member.get("role"))
+        except ValueError as exc:
+            raise WebAppError(str(exc)) from exc
         name = str(member.get("name", "")).strip()
         if not name or name in names:
             raise WebAppError("角色名称不能为空且不能重复")

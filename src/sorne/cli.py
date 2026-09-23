@@ -131,6 +131,7 @@ def cmd_run_worker(args: argparse.Namespace) -> None:
         dangerously_bypass_sandbox=args.codex_dangerously_bypass_sandbox,
         dry_run=args.dry_run,
         apply_output=Path(args.apply_output) if args.apply_output else None,
+        task=args.task,
     )
     print(output)
 
@@ -142,6 +143,7 @@ def cmd_run_team(args: argparse.Namespace) -> None:
         timeout=args.timeout,
         dry_run=args.dry_run,
         max_workers=args.max_workers,
+        task=args.task,
     )
     print(output)
 
@@ -371,10 +373,18 @@ def build_parser() -> argparse.ArgumentParser:
     metrics.add_argument("--server")
     metrics.set_defaults(func=cmd_metrics)
 
-    worker = sub.add_parser("run-worker", help="运行 Codex CLI Worker 并把结构化输出写回控制平面")
+    worker = sub.add_parser("run-worker", help="运行单个 Worker 并把结构化输出写回控制平面")
     worker.add_argument("vendor")
     worker.add_argument("--backend", default="codex", choices=["codex", "claude-cli", "openai-compatible", "ollama", "container", "mock"])
-    worker.add_argument("--role", default="pentester", choices=["pentester", "reason", "metacog", "reviewer"])
+    worker.add_argument(
+        "--role", default="executor",
+        choices=["executor", "pentester", "reason", "metacog", "reviewer", "waf_analyst", "profile_mapper"],
+        help="pentester 是 executor 的兼容别名，执行前自动规范化",
+    )
+    worker.add_argument(
+        "--task",
+        help="单次执行任务说明（目标、动作与成功标准）；executor 角色真实执行时必填",
+    )
     worker.add_argument("--model")
     worker.add_argument("--base-url")
     worker.add_argument("--api-key-env")
@@ -396,6 +406,7 @@ def build_parser() -> argparse.ArgumentParser:
     team.add_argument("--team", default="default")
     team.add_argument("--timeout", type=int, default=3600)
     team.add_argument("--max-workers", type=int, default=5)
+    team.add_argument("--task", help="本次批次的任务说明；团队含 executor 角色时必填（或为该成员配置专属提示词）")
     team.add_argument("--dry-run", action="store_true")
     team.set_defaults(func=cmd_run_team)
 

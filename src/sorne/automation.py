@@ -20,7 +20,7 @@ from .directives import authoritative_directives, missing_directive_ids
 from .lifecycle import project_execution_lock, require_executable_target, require_initialized_project
 from .memory import active_negative_evidence, matching_negative_evidence
 from .methodology import ensure_methodology, seed_methodology_portfolio
-from .schemas import GateStatus
+from .schemas import GateStatus, normalize_role
 from .scheduler import Scheduler
 from .store import ProjectStore
 from .team import TeamMember, _run_member, load_team
@@ -847,11 +847,11 @@ class AutomationEngine:
         metacog_members = [item for item in members if item.role == "metacog"]
         reviewer_members = [item for item in members if item.role == "reviewer"]
         waf_members = [item for item in members if item.role == "waf_analyst"]
-        executor_members = [item for item in members if item.role in {"executor", "pentester"}]
+        executor_members = [item for item in members if item.role == "executor"]
         other_members = [
             item for item in members
             if item.role not in {
-                "reason", "metacog", "reviewer", "executor", "pentester",
+                "reason", "metacog", "reviewer", "executor",
                 "waf_analyst", "profile_mapper",
             }
         ]
@@ -892,7 +892,7 @@ class AutomationEngine:
                         ensure_ascii=False,
                         indent=2,
                     )
-                if member.role in {"executor", "pentester"}:
+                if member.role == "executor":
                     direction_worker = f"{run_id}:{job_member_name}"
                     direction = self.db.claim_direction(
                         direction_worker,
@@ -1494,6 +1494,9 @@ class AutomationEngine:
             payload = job["payload"]
             direction = payload.get("direction")
             member = TeamMember(**payload["member"])
+            # 旧 Job 恢复：历史 payload 可能仍写 pentester，执行前规范化；
+            # 磁盘上的历史 Payload 与 CommitPlan 保持原样不改写。
+            member.role = normalize_role(member.role)
             activity = _model_activity(member, direction)
             timeout_limits = [
                 int(run["timeout_seconds"]),

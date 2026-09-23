@@ -28,6 +28,7 @@ from .schemas import (
     WAFAssessment,
     new_id,
     now_iso,
+    normalize_role,
 )
 from .store import ProjectStore
 from .technologies import record_technology_observations
@@ -77,6 +78,7 @@ def compile_worker_prompt(
     task_context: dict[str, Any] | None = None,
     retry_delta: str = "",
 ) -> tuple[str, dict[str, Any]]:
+    role = normalize_role(role)
     prompt_file = PROMPT_DIR / f"{role}.md"
     if not prompt_file.exists():
         raise WorkerError(f"未知 Worker 角色: {role}")
@@ -532,6 +534,7 @@ def run_worker(
     env: dict[str, str] | None = None,
     dry_run: bool = False,
     apply_output: Path | None = None,
+    task: str | None = None,
 ) -> str:
     with project_execution_lock(store):
         require_initialized_project(store)
@@ -550,6 +553,7 @@ def run_worker(
             env=env,
             dry_run=dry_run,
             apply_output=apply_output,
+            task=task,
         )
 
 
@@ -568,15 +572,27 @@ def _run_worker_locked(
     env: dict[str, str] | None = None,
     dry_run: bool = False,
     apply_output: Path | None = None,
+    task: str | None = None,
 ) -> str:
+    role = normalize_role(role)
+    task_text = str(task or "").strip()
+    task_context = {"调度任务": task_text} if task_text else None
     owner_directives = authoritative_directives(store)
-    prompt = build_worker_prompt(store, role, owner_directives)
+    prompt = build_worker_prompt(store, role, owner_directives, task_context=task_context)
     if dry_run:
         return prompt
 
     if apply_output:
         payload = json.loads(apply_output.read_text(encoding="utf-8"))
         return apply_worker_output(store, payload)
+
+    if role == "executor" and not task_context:
+        # executor 要求明确任务：单次入口必须由 --task 提供（或改用 automate
+        # 由调度器认领 Direction），不得让模型自行补选目标。
+        raise WorkerError(
+            "executor 角色需要明确任务：请用 --task 提供本次执行的任务说明"
+            "（目标、动作与成功标准），或改用 automate 由调度器分配已认领 Intent。"
+        )
 
     target = store.read_json("target.json")
     if target.get("authorization") != "authorized" or not target.get("scope"):

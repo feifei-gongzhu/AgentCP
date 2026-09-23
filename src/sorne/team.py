@@ -10,7 +10,7 @@ from .dashboard import render_dashboard
 from .directives import authoritative_directives, directive_ids, missing_directive_ids
 from .drivers import DriverConfig, run_driver
 from .lifecycle import project_execution_lock, require_executable_target, require_initialized_project
-from .schemas import now_iso
+from .schemas import now_iso, normalize_role
 from .scheduler import Scheduler
 from .store import ROOT, ProjectStore
 from .worker import WorkerError, apply_worker_output, compile_worker_prompt
@@ -58,6 +58,9 @@ def load_team(name: str, store: ProjectStore | None = None) -> list[TeamMember]:
         item = dict(item)
         if "type" in item and "backend" not in item:
             item["backend"] = item["type"]
+        # 旧配置里的 pentester 读取时即规范化为 executor；写回发生在
+        # 用户正常保存配置时，不在读取路径自动重写文件。
+        item["role"] = normalize_role(item.get("role"))
         item["runtime_mode"] = {
             "host-native": "local-cli",
             "ct-agent-compose": "agent-compose",
@@ -188,12 +191,13 @@ def run_team(
     timeout: int = 300,
     dry_run: bool = False,
     max_workers: int | None = None,
+    task: str | None = None,
 ) -> str:
     with project_execution_lock(store):
         require_initialized_project(store)
         if not dry_run:
             require_executable_target(store)
-        return _run_team_locked(store, team_name, timeout, dry_run, max_workers)
+        return _run_team_locked(store, team_name, timeout, dry_run, max_workers, task)
 
 
 def _run_team_locked(
@@ -202,6 +206,7 @@ def _run_team_locked(
     timeout: int = 300,
     dry_run: bool = False,
     max_workers: int | None = None,
+    task: str | None = None,
 ) -> str:
     state = store.load_state()
     if state.gate_status == "awaiting_approval" and not dry_run:
@@ -210,13 +215,37 @@ def _run_team_locked(
     if not members:
         raise WorkerError(f"团队 {team_name} 没有成员")
 
+    task_text = str(task or "").strip()
+    # executor 要求明确任务：一次性批次没有调度器分配的 Direction，必须由
+    # 入口 --task 或成员 custom_prompt 提供；否则拒绝启动而不是让模型自选目标。
+    executor_members = [item for item in members if item.role == "executor"]
+    if (
+        executor_members
+        and not task_text
+        and not any(item.custom_prompt for item in executor_members)
+    ):
+        raise WorkerError(
+            "团队包含 executor 角色但未提供明确任务：请用 --task 提供本次批次的"
+            "任务说明，或在该成员配置中填写专属提示词；持续运行请改用 automate。"
+        )
+    context_suffix = (
+        json.dumps({"调度任务": task_text}, ensure_ascii=False, indent=2)
+        if task_text else ""
+    )
+
     results: list[dict[str, Any]] = []
     if max_workers is not None and max_workers < 1:
         raise WorkerError("max_workers 必须大于 0")
     concurrency = min(len(members), max_workers or 8)
     effective_timeout = min(timeout, max(1, state.gate_interval_minutes) * 60)
     with ThreadPoolExecutor(max_workers=concurrency) as executor:
-        futures = {executor.submit(_run_member, store, member, effective_timeout, dry_run): member for member in members}
+        futures = {
+            executor.submit(
+                _run_member, store, member, effective_timeout, dry_run,
+                context_suffix=context_suffix,
+            ): member
+            for member in members
+        }
         for future in as_completed(futures):
             member = futures[future]
             try:

@@ -13,13 +13,16 @@
     {
       "name": "container-static-analysis",
       "type": "container",
-      "role": "pentester",
+      "role": "executor",
       "priority": 0,
       "max_running": 2,
       "env": {},
       "extra": {
         "image": "replace-with-your-worker-image:latest",
-        "worker_command": ["worker-agent", "--json"],
+        "worker_command": [
+          "worker-agent",
+          "--json"
+        ],
         "network": "none",
         "cpus": "2",
         "memory": "2g",

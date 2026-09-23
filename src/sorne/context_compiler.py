@@ -20,7 +20,6 @@ from .waf import WAFManager
 
 ROLE_CONTEXT_BUDGETS = {
     "executor": 12_000,
-    "pentester": 12_000,
     "waf_analyst": 12_000,
     "reason": 18_000,
     "metacog": 18_000,
@@ -77,11 +76,13 @@ def compile_worker_context(
     The blackboard remains complete on disk.  This function creates a bounded
     model input and never truncates the current task or owner directives.
     """
+    from .schemas import normalize_role
 
+    role = normalize_role(role)
     raw_task = task_context or {}
     task = (
         raw_task
-        if role in {"executor", "pentester", "waf_analyst"}
+        if role in {"executor", "waf_analyst"}
         else _compact(raw_task, max_string=4_000, max_items=30, depth=6)
     )
     budget = max(4_000, int(budget_chars or ROLE_CONTEXT_BUDGETS.get(role, DEFAULT_CONTEXT_BUDGET)))
@@ -178,7 +179,7 @@ def compile_worker_context(
         )
         add_records("recent_facts", facts, limit=6)
         add_records("recent_negative_evidence", negative, limit=4)
-    elif role in {"executor", "pentester"}:
+    elif role == "executor":
         add_records("related_facts", _related(facts, identity), limit=8)
         add_records("related_negative_evidence", _related(negative, identity), limit=6)
         add_records(

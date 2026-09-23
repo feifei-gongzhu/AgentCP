@@ -55,6 +55,26 @@ VALID_WORKER_KINDS = frozenset({
     "none",
 })
 
+# 规范角色及其输入别名。pentester 是旧配置/旧 Job 的兼容输入，任何入口
+# 读取后都应立即规范化为 executor；新配置只保存规范角色。
+ROLE_ALIASES = {"pentester": "executor"}
+SUPPORTED_ROLES = frozenset({
+    "reason", "metacog", "executor", "reviewer", "waf_analyst", "profile_mapper",
+})
+
+
+def normalize_role(role: object) -> str:
+    """唯一角色规范化函数：别名映射 + 未知角色明确报错。"""
+    value = str(role or "").strip()
+    value = ROLE_ALIASES.get(value, value)
+    if value not in SUPPORTED_ROLES:
+        raise ValueError(
+            f"未知 Worker 角色: {role}；支持的角色为 "
+            + "、".join(sorted(SUPPORTED_ROLES))
+            + "（pentester 作为 executor 的兼容别名自动接受）"
+        )
+    return value
+
 
 class Phase(str, Enum):
     INTAKE = "intake"
