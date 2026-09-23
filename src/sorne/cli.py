@@ -5,9 +5,11 @@ import json
 import time
 from pathlib import Path
 
-from .guardian import Guardian
 from .automation import AutomationEngine
-from .lifecycle import project_execution_lock, require_initialized_project
+from .lifecycle import (
+    project_execution_lock,
+    require_initialized_project,
+)
 from .protocol import AutomationHttpClient
 from .metrics import collect_metrics
 from .maintenance import (
@@ -16,11 +18,11 @@ from .maintenance import (
 )
 from .dashboard import render_dashboard
 from .scheduler import Scheduler
-from .schemas import Fact, Hint, Lesson
+from .schemas import GateStatus, Hint, Lesson
 from .store import ProjectStore
 from .team import run_team
 from .webapp import serve
-from .worker import run_worker
+from .worker import run_worker, submit_payload
 
 
 def cmd_init(args: argparse.Namespace) -> None:
@@ -33,40 +35,44 @@ def cmd_init(args: argparse.Namespace) -> None:
 
 def cmd_add_fact(args: argparse.Namespace) -> None:
     store = ProjectStore(args.vendor)
-    fact = Fact(
-        title=args.title,
-        category=args.category,
-        evidence=args.evidence,
-        business_impact=args.business_impact,
-        reproduction_steps=args.reproduction_step,
-        evidence_path=args.evidence_path,
-    )
-    fact = Guardian().review(fact)
-    store.append_jsonl("facts.jsonl", fact)
-    store.append_fact_to_blackboard(fact)
-
-    state = store.load_state()
-    state.fact_count += 1
-    if fact.status == "vulnerability":
-        state.vulnerability_count += 1
-    state.last_discovery_at = fact.created_at
-    store.save_state(state)
-
-    print(f"已写入 Fact: {fact.id} | 状态: {fact.status}")
-    for note in fact.quality_notes:
-        print(f"- {note}")
+    with project_execution_lock(store):
+        require_initialized_project(store)
+        payload = {
+            "kind": "fact",
+            "title": args.title,
+            "category": args.category,
+            "evidence": args.evidence,
+            "business_impact": args.business_impact,
+            "reproduction_steps": list(args.reproduction_step),
+            "evidence_path": args.evidence_path,
+            "proposed_by": "project_owner",
+        }
+        # 人工录入沿用原有权限语义：门禁等待期间仍可写入资料；质量校验、
+        # 证据索引、黑板与计数更新全部由既有投影执行，不做第二份实现。
+        message = submit_payload(
+            store,
+            payload,
+            source_type="manual_cli_fact",
+            gate_required=False,
+        )
+    print(message)
 
 
 def cmd_assess(args: argparse.Namespace) -> None:
     store = ProjectStore(args.vendor)
-    state = store.load_state()
-    facts = store.read_jsonl("facts.jsonl")
-    decision = Scheduler(store).controller.evaluate(state, facts, gate_due=True)
-    store.append_jsonl("decision_log.jsonl", decision)
-    state.gate_status = "awaiting_approval"
-    state.gate_reason = decision.reason
-    state.current_decision = decision.action
-    store.save_state(state)
+    with project_execution_lock(store):
+        require_initialized_project(store)
+        with store.locked():
+            scheduler = Scheduler(store)
+            state = store.load_state()
+            facts = store.read_jsonl("facts.jsonl")
+            decision = scheduler.controller.evaluate(state, facts, gate_due=True)
+            state.gate_status = GateStatus.AWAITING_APPROVAL.value
+            state.gate_reason = decision.reason
+            state.current_decision = decision.action
+            # 强制评估并等待批准的原有语义：scheduler_decision 投影会补写
+            # decision_log.jsonl 与 state，不在 CLI 侧直写任何文件。
+            scheduler.commit_decision(state, decision)
     print(f"ROI 判断: {decision.action}")
     print(f"理由: {decision.reason}")
 

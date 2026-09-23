@@ -14,7 +14,7 @@ class Scheduler:
         self.store = store
         self.controller = Controller()
 
-    def _commit_decision(self, state, decision) -> None:
+    def commit_decision(self, state, decision) -> None:
         plan = CommitPlanner().freeze_action(
             kind="scheduler_decision",
             payload={"state": asdict(state), "decision": asdict(decision)},
@@ -52,7 +52,7 @@ class Scheduler:
                 state.gate_status = GateStatus.AWAITING_APPROVAL.value
                 state.gate_reason = decision.reason
             state.current_decision = decision.action
-            self._commit_decision(state, decision)
+            self.commit_decision(state, decision)
             gate_status = "等待用户批准" if gate_due else f"运行中，距上次评估 {since_gate} min"
             return (
                 "[控制器评估]\n"
@@ -76,7 +76,7 @@ class Scheduler:
                     reason=f"子任务已完成：{summary}。候选结果已进入对应结果池，自动化不因待人工复核而暂停。",
                     phase=state.phase,
                 )
-                self._commit_decision(state, decision)
+                self.commit_decision(state, decision)
                 return self.controller_text(state, decision, next_action="继续自动化；人工复核异步进行")
             previous_reason = state.gate_reason if state.gate_status == GateStatus.AWAITING_APPROVAL.value else None
             state.gate_status = GateStatus.AWAITING_APPROVAL.value
@@ -84,7 +84,7 @@ class Scheduler:
             state.gate_reason = f"{previous_reason} | {completion_reason}" if previous_reason else completion_reason
             state.current_decision = ControllerAction.REQUEST_CONFIRMATION.value
             decision = Decision(action=state.current_decision, reason=state.gate_reason, phase=state.phase)
-            self._commit_decision(state, decision)
+            self.commit_decision(state, decision)
             return self.controller_text(state, decision)
 
     def approve(self, action: str, reason: str) -> str:
@@ -101,7 +101,7 @@ class Scheduler:
             state.last_gate_elapsed_minutes = state.elapsed_minutes
             state.task_started_elapsed_minutes = state.elapsed_minutes
             state.current_decision = action
-            self._commit_decision(state, decision)
+            self.commit_decision(state, decision)
             return f"已批准: {action} | {reason}"
 
     @staticmethod

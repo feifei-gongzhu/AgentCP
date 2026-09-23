@@ -128,18 +128,28 @@ def compile_worker_prompt(
     return prompt, manifest
 
 
-def apply_worker_output(
+def submit_payload(
     store: ProjectStore,
     payload: dict[str, Any],
     *,
-    source_type: str = "direct_worker",
+    source_type: str,
     source_id: str | None = None,
     idempotency_key: str | None = None,
     run_id: str | None = None,
     job_id: str | None = None,
     control_version: int | None = None,
+    gate_required: bool = True,
     fault_hook=None,
 ) -> str:
+    """Shared V6 submission service for every writer entry point.
+
+    入口权限（允许不允许提交）由调用方决定：自动 Worker 走
+    ``apply_worker_output`` 的门禁；人工入口（CLI）以 ``gate_required=False``
+    保留“门禁等待期间仍可人工录入”的原有语义。本函数只负责
+    “怎样提交和投影”：CommitPlanner 冻结 → CommitCoordinator 持久化 →
+    Projector 应用，全部复用既有投影实现，不新增第二份业务落盘逻辑。
+    ``source_type`` 由服务端调用路径赋予，绝不取自模型 Payload。
+    """
     from .commits import CommitCoordinator, CommitPlanner, new_source_id
 
     stable_source = source_id or new_source_id()
@@ -154,10 +164,37 @@ def apply_worker_output(
         control_version=control_version,
     )
     with store.locked():
-        state = store.load_state()
-        if state.gate_status == GateStatus.AWAITING_APPROVAL.value:
-            raise WorkerError("强制门禁正在等待用户批准，Worker 输出已拒绝写入。")
+        if gate_required:
+            state = store.load_state()
+            if state.gate_status == GateStatus.AWAITING_APPROVAL.value:
+                raise WorkerError("强制门禁正在等待用户批准，Worker 输出已拒绝写入。")
         return CommitCoordinator(store, fault_hook=fault_hook).submit(plan)
+
+
+def apply_worker_output(
+    store: ProjectStore,
+    payload: dict[str, Any],
+    *,
+    source_type: str = "direct_worker",
+    source_id: str | None = None,
+    idempotency_key: str | None = None,
+    run_id: str | None = None,
+    job_id: str | None = None,
+    control_version: int | None = None,
+    fault_hook=None,
+) -> str:
+    return submit_payload(
+        store,
+        payload,
+        source_type=source_type,
+        source_id=source_id,
+        idempotency_key=idempotency_key,
+        run_id=run_id,
+        job_id=job_id,
+        control_version=control_version,
+        gate_required=True,
+        fault_hook=fault_hook,
+    )
 
 
 def _apply_worker_output_legacy(store: ProjectStore, payload: dict[str, Any]) -> str:
