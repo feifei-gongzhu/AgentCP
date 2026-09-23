@@ -718,3 +718,65 @@ def test_project_runtime_shutdown_only_terminates_owned_daemons(
     assert terminated == [11]
     assert len(down_calls) == 1
     assert "http://127.0.0.1:7011" in down_calls[0]
+
+
+def test_docker_cli_process_env_keeps_host_home(tmp_path: Path) -> None:
+    """docker CLI 进程环境必须保留宿主 HOME（context 解析依赖它）。
+
+    之前的缺陷：provider_env 的 HOME=/agent-state/home 混入 docker 进程
+    环境，docker CLI 读不到 ~/.docker/config.json，回落 default context
+    连 /var/run/docker.sock（Mac 上不存在），全部 Worker 失败。
+    """
+    import os
+
+    from src.agent_control_plane.agent_compose import profile_from_driver_config
+    from src.agent_control_plane.drivers import DriverConfig
+    from src.agent_control_plane.local_docker import LocalDockerRuntime
+
+    config = DriverConfig(
+        type="claude-cli",
+        model="test-model",
+        base_url="https://relay.example",
+        api_key_env="LLM_API_KEY",
+        auth_mode="bearer",
+        sandbox="read-only",
+        env={"LLM_API_KEY": "sk-test-secret"},
+        extra={
+            "project_path": str(tmp_path),
+            "member_name": "executor-test",
+            "role": "executor",
+        },
+    )
+    profile = profile_from_driver_config(config)
+    runtime = LocalDockerRuntime(config, timeout=30, cancel_check=lambda: False,
+                                 progress_callback=lambda event: None)
+    runtime.profile = profile
+
+    input_root = tmp_path / "input"
+    input_root.mkdir()
+    (input_root / "prompt.txt").write_text("prompt", encoding="utf-8")
+    (input_root / "worker_output_schema.json").write_text("{}", encoding="utf-8")
+
+    command, environment = runtime._command(input_root, tmp_path / "runtime")
+
+    # 1) docker CLI 进程环境保留宿主 HOME（context/config 解析必需）。
+    host_home = os.environ.get("HOME", "")
+    assert host_home, "测试环境必须有 HOME"
+    assert environment.get("HOME") == host_home, (
+        f"docker 进程 HOME 被污染: {environment.get('HOME')!r}"
+    )
+    assert environment.get("LLM_API_KEY") is None, "密钥不应复制进 docker 进程环境"
+
+    # 2) 容器内变量改为显式 -e NAME=value：HOME=/agent-state/home 与密钥
+    #    都必须以显式值传入，不依赖 docker 进程环境取值。
+    def explicit_env_values(command_list):
+        pairs = {}
+        for index, item in enumerate(command_list):
+            if item == "-e" and "=" in command_list[index + 1]:
+                name, value = command_list[index + 1].split("=", 1)
+                pairs[name] = value
+        return pairs
+
+    env_pairs = explicit_env_values(command)
+    assert env_pairs.get("HOME") == "/agent-state/home"
+    assert env_pairs.get("LLM_API_KEY") == "sk-test-secret"

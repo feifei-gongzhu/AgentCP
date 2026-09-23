@@ -489,12 +489,17 @@ class LocalDockerRuntime:
         if self.profile.target_path is not None:
             command.extend(["-v", f"{self.profile.target_path}:/target:ro"])
 
+        # docker CLI 进程环境保持宿主机原样：~/.docker/config.json 的
+        # currentContext（desktop-linux → ~/.docker/run/docker.sock）依赖
+        # 宿主 HOME 解析。provider_env 混入进程环境会把 HOME 污染为
+        # /agent-state/home，docker CLI 回落 default context 连
+        # /var/run/docker.sock（Mac 上不存在），全部 Worker 失败。
         environment = os.environ.copy()
         provider_env = self._provider_environment()
         provider_env["HOME"] = "/agent-state/home"
-        environment.update(provider_env)
-        for name in provider_env:
-            command.extend(["-e", name])
+        # 容器内变量用显式 -e NAME=value 传入，不依赖 docker CLI 进程环境取值。
+        for name, value in provider_env.items():
+            command.extend(["-e", f"{name}={value}"])
         if self.profile.provider == "claude":
             role = str(self.config.extra.get("role") or "").strip()
             third_party_compatible = bool(
