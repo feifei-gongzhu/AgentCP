@@ -154,10 +154,6 @@ def test_projection_replay_never_reinvokes_transport(
     monkeypatch.setattr(ControlDatabase, "record_projection_receipt", flaky_receipt)
     engine._commit_candidates(run_id)
 
-    event_id = next(
-        row["event_id"]
-        for row in store.read_jsonl("target_assessments.jsonl")[-1:]  # 触发读取即可
-    ) if False else None
     with engine.db.connect() as db:
         status_row = db.execute(
             "SELECT status,attempts FROM commit_events "

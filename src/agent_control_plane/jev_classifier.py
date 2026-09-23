@@ -25,7 +25,19 @@ REST 契约（官方 Quick start，已按契约实现并用本地 HTTP mock 验�
 - 应答体 ``{"model": ..., "answers": {名: {"type": "choice", "choice": ...,
   "confidence": ..., "probabilities": {...}} | {"noul": 数值}}, "usage": ...}``。
 
-锯齿（jaggedness）规避：
+评测方案边界（重要）：
+- 入口类型六分类与 profile_mapper 的三分类回答的是不同问题，二者不可
+  直接计算一致率。比较前必须先定义并固化映射（例如 authentication /
+  file_upload / user_data / admin_console 归为“有明确测试价值的证据”、
+  public_content 归为常规信息、unknown 结合 information_sufficient 归为
+  待复核），且该映射本身需要人工标注样本检验——profile_mapper 的结论
+  只是对照对象，永远不能当作正确答案（ground truth）。
+- 三个 Noul 的 0-1 数值与 Choice 的 confidence 是不同度量（官方明确
+  P(noul) 与 1-P(not noul) 不可互推），统计分桶必须按问题名分开，
+  绝不混桶。
+- 一致率/校准结论只在人工标注子集上计算；影子样本仅提供对照分布。
+
+锯齿（jaggedness）规避：锯齿（jaggedness）规避：
 - 问题原子且字面化（无双重否定、无多跳推理），每道问题显式绑定目标
   下标与 URL，不依赖模型猜键名；
 - 状态字段白名单过滤、单批有界（context rot）；
@@ -44,10 +56,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import urllib.error
 import urllib.request
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Callable
 
 JEV_MODEL_DEFAULT = "jev-1.13"
@@ -228,6 +241,7 @@ class JEVBulkClassification:
     state_fingerprint: str
     answers_by_url: dict[str, dict[str, dict[str, Any]]]
     skipped: int = 0
+    parse_failures: list[dict[str, str]] = field(default_factory=list)
 
     def provenance_for(self, url: str) -> dict[str, Any] | None:
         answers = self.answers_by_url.get(url)
@@ -242,15 +256,56 @@ class JEVBulkClassification:
         }
 
 
-def _parse_answer(raw: Any) -> dict[str, Any] | None:
-    """按官方应答形态容错解析：choice/noul/score 三种。"""
+def _is_finite_unit(value: Any) -> bool:
+    return (
+        isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and math.isfinite(float(value))
+        and 0.0 <= float(value) <= 1.0
+    )
+
+
+def _parse_answer(raw: Any, question: dict[str, Any]) -> tuple[dict[str, Any] | None, str | None]:
+    """按官方应答形态与问题类型校验解析。
+
+    choice：选项必须在 criteria 标签内，confidence 必须是 [0,1] 有限数；
+    noul：必须是非布尔有限数值且落在 [0,1]。校验失败返回
+    ``(None, 原因)``，由调用方记入 parse_failures，不产生脏样本。
+    """
     if not isinstance(raw, dict):
-        return None
-    parsed: dict[str, Any] = {}
-    for key in ("type", "choice", "noul", "score", "confidence", "probabilities"):
-        if raw.get(key) is not None:
-            parsed[key] = raw[key]
-    return parsed or None
+        return None, "应答不是对象"
+    question_type = str(question.get("type") or "")
+    parsed: dict[str, Any] = {"type": question_type} if question_type else {}
+    if question_type == "choice":
+        criteria = question.get("criteria") or {}
+        labels = set(criteria) if isinstance(criteria, dict) else set()
+        choice = raw.get("choice")
+        if not isinstance(choice, str) or choice not in labels:
+            return None, f"choice 越界: {choice!r}"
+        parsed["choice"] = choice
+        confidence = raw.get("confidence")
+        if confidence is not None:
+            if not _is_finite_unit(confidence):
+                return None, f"confidence 超范围或非数值: {confidence!r}"
+            parsed["confidence"] = confidence
+        probabilities = raw.get("probabilities")
+        if probabilities is not None:
+            if not isinstance(probabilities, dict) or not all(
+                isinstance(k, str) and _is_finite_unit(v) for k, v in probabilities.items()
+            ):
+                return None, "probabilities 不是合法的数值映射"
+            parsed["probabilities"] = probabilities
+        return parsed, None
+    if question_type == "noul":
+        if not _is_finite_unit(raw.get("noul")):
+            return None, f"noul 超范围或非数值: {raw.get('noul')!r}"
+        parsed["noul"] = raw["noul"]
+        return parsed, None
+    # score 或未知类型：仅接受有限数值 score。
+    if _is_finite_unit(raw.get("score")):
+        parsed["score"] = raw["score"]
+        return parsed, None
+    return None, "未知应答类型"
 
 
 def classify_targets(
@@ -267,33 +322,52 @@ def classify_targets(
         if not jev_configured():
             return None
         transport = default_transport
-    batch = [build_state_entry(row) for row in rows[:JEV_MAX_TARGETS_PER_CALL]]
-    if not batch:
+    batch_rows = list(rows[:JEV_MAX_TARGETS_PER_CALL])
+    if not batch_rows:
         return None
-    state_text = build_state_text(batch)
+    # 身份与展示分离：完整原始 URL 是答案映射的唯一主键；送入模型的
+    # 展示文本按上限截断，批内截断冲突时追加序号消歧，避免串记录。
+    identities = [str(row.get("url") or "") for row in batch_rows]
+    entries: list[dict[str, Any]] = []
+    display_seen: dict[str, int] = {}
+    for row in batch_rows:
+        entry = build_state_entry(row)
+        display = str(entry.get("url") or "")
+        seen_count = display_seen.get(display, 0)
+        display_seen[display] = seen_count + 1
+        if seen_count:
+            entry["url"] = f"{display}…#{seen_count + 1}"
+        entries.append(entry)
+    state_text = build_state_text(entries)
     questions: dict[str, dict[str, Any]] = {}
-    for index, entry in enumerate(batch):
+    for index, entry in enumerate(entries):
         questions.update(build_questions(index, str(entry.get("url") or "")))
     result = transport(state_text, questions)
     model = str(result.get("model") or os.environ.get("AGENTCP_JEV_MODEL", "").strip() or JEV_MODEL_DEFAULT)
     answers_raw = result.get("answers") or {}
     answers_by_url: dict[str, dict[str, dict[str, Any]]] = {}
-    for index, entry in enumerate(batch):
-        url = str(entry.get("url") or "")
-        if not url:
+    parse_failures: list[dict[str, str]] = []
+    for index, identity in enumerate(identities):
+        if not identity:
             continue
         prefix = f"t{index}_"
         answers: dict[str, dict[str, Any]] = {}
         for logical in ("entry_type", "has_privilege_boundary", "information_sufficient", "needs_more_evidence"):
-            parsed = _parse_answer(answers_raw.get(f"{prefix}{logical}"))
-            if parsed:
+            question_name = f"{prefix}{logical}"
+            parsed, failure = _parse_answer(
+                answers_raw.get(question_name), questions.get(question_name) or {},
+            )
+            if parsed is not None:
                 answers[logical] = parsed
+            elif failure:
+                parse_failures.append({"question": question_name, "reason": failure})
         if answers:
-            answers_by_url[url] = answers
+            answers_by_url[identity] = answers
     return JEVBulkClassification(
         model=model,
         question_set_version=JEV_QUESTION_SET_VERSION,
         state_fingerprint=state_fingerprint(state_text),
         answers_by_url=answers_by_url,
         skipped=max(0, len(rows) - JEV_MAX_TARGETS_PER_CALL),
+        parse_failures=parse_failures,
     )

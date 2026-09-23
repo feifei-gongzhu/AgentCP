@@ -1764,6 +1764,7 @@ class AutomationEngine:
             "member": job.get("member_name"),
             "targets": len(shadow_by_url),
             "skipped": classification.skipped,
+            "parse_failures": len(classification.parse_failures),
         })
 
     @staticmethod

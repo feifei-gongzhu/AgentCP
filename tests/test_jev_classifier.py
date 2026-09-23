@@ -120,7 +120,7 @@ def test_official_rest_contract_with_local_http_mock(
         "type": "choice", "choice": "file_upload",
         "confidence": 0.9, "probabilities": {"file_upload": 0.9, "unknown": 0.1},
     }
-    assert answers["has_privilege_boundary"] == {"noul": 0.95}
+    assert answers["has_privilege_boundary"] == {"type": "noul", "noul": 0.95}
     assert result.model == "jev-1.13.0"  # 应答中的已解析版本优先
     assert result.question_set_version == JEV_QUESTION_SET_VERSION
     provenance = result.provenance_for("https://example.com/admin/upload")
@@ -218,3 +218,68 @@ def test_malformed_transport_answer_is_tolerated(monkeypatch: pytest.MonkeyPatch
     assert answers["entry_type"]["choice"] == "authentication"
     assert "has_privilege_boundary" not in answers
     assert "information_sufficient" not in answers
+
+
+# ===========================================================================
+# 第十轮反例：长 URL 身份保持与非法答案校验。
+# ===========================================================================
+
+def test_long_urls_keep_identity_and_do_not_cross(monkeypatch: pytest.MonkeyPatch) -> None:
+    """前 300 字符相同的长 URL：结果按完整 URL 归位，不得丢失或串记录。"""
+    monkeypatch.delenv("AGENTCP_JEV_ENDPOINT", raising=False)
+    prefix = "https://example.com/" + "a" * 285  # 305 字符的前缀，前 300 完全相同
+    url_one = prefix + "/one?x=1"
+    url_two = prefix + "/two?x=2"
+    assert len(url_one) > 300 and url_one[:300] == url_two[:300]
+
+    def transport(state_text, questions):
+        # 按下标给出不同答案：截断后展示文本本就无法从内容区分尾部差异
+        # （模型同样如此，消歧后缀保证其知道是两个条目）；本反例验证的
+        # 是"答案必须按原始完整 URL 身份归位，不因截断丢失或互换"。
+        targets = json.loads(state_text)["targets"]
+        assert len(targets) == 2
+        assert targets[0]["url"] != targets[1]["url"], "消歧后缀必须保证展示文本唯一"
+        answers = {}
+        for index in range(len(targets)):
+            choice = "file_upload" if index == 0 else "admin_console"
+            answers[f"t{index}_entry_type"] = {"type": "choice", "choice": choice, "confidence": 0.9}
+            answers[f"t{index}_has_privilege_boundary"] = {"noul": 0.9}
+        return {"answers": answers, "model": "jev-1.13"}
+
+    result = classify_targets([_row(url_one), _row(url_two)], transport=transport)
+
+    assert result is not None
+    assert set(result.answers_by_url) == {url_one, url_two}, "必须以完整原始 URL 为主键"
+    provenance_one = result.provenance_for(url_one)
+    provenance_two = result.provenance_for(url_two)
+    assert provenance_one is not None and provenance_two is not None, "不得因截断丢失任一目标"
+    assert provenance_one["answers"]["entry_type"]["choice"] == "file_upload"
+    assert provenance_two["answers"]["entry_type"]["choice"] == "admin_console", "截断冲突不得串记录"
+
+
+def test_invalid_answers_are_rejected_and_recorded(monkeypatch: pytest.MonkeyPatch) -> None:
+    """choice 选项越界、confidence/noul 超范围或非数值：拒绝并记录解析失败。"""
+    monkeypatch.delenv("AGENTCP_JEV_ENDPOINT", raising=False)
+
+    def transport(state_text, questions):
+        return {
+            "answers": {
+                "t0_entry_type": {"type": "choice", "choice": "INVALID", "confidence": 9},
+                "t0_has_privilege_boundary": {"noul": -4},
+                "t0_information_sufficient": {"noul": "high"},
+                "t0_needs_more_evidence": {"type": "noul", "noul": 0.7},
+            },
+            "model": "jev-1.13",
+        }
+
+    result = classify_targets([_row()], transport=transport)
+
+    assert result is not None
+    answers = result.answers_by_url["https://example.com/admin/upload"]
+    assert set(answers) == {"needs_more_evidence"}, "只有合法答案计入有效样本"
+    assert answers["needs_more_evidence"]["noul"] == 0.7
+    failed_questions = {item["question"] for item in result.parse_failures}
+    assert failed_questions == {
+        "t0_entry_type", "t0_has_privilege_boundary", "t0_information_sufficient",
+    }
+    assert all(item["reason"] for item in result.parse_failures)
