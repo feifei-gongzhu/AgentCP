@@ -28,6 +28,7 @@ from .cancellable_process import (
     run_cancellable_process,
 )
 from .docker_command import bind_mount, docker_base_args
+from .openai_urls import openai_chat_completions_url
 from .local_docker import LocalDockerError, LocalDockerRuntime
 from .provider_auth import normalize_base_url, resolve_anthropic_auth_mode
 from .runtime_config import canonical_runtime_mode
@@ -425,7 +426,7 @@ class OpenAICompatibleDriver(BaseDriver):
         if not api_key:
             raise DriverError(f"缺少环境变量: {api_key_env}")
 
-        url = self.config.base_url.rstrip("/") + "/chat/completions"
+        url = openai_chat_completions_url(self.config.base_url)
         body = {
             "model": self.config.model,
             "messages": [{"role": "user", "content": prompt}],

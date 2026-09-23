@@ -26,6 +26,7 @@ from . import secret_redact
 from . import worker_payload
 from .cancellable_process import ProcessCancelled, ProcessTimeout, run_cancellable_process
 from .docker_command import bind_mount, docker_base_args
+from .openai_urls import openai_chat_completions_url
 from .provider_auth import anthropic_secret_env_var, normalize_base_url, resolve_anthropic_auth_mode
 from .schemas import VALID_WORKER_KINDS
 from .platform_process import process_group_options, terminate_process_tree
@@ -313,7 +314,7 @@ class LocalDockerRuntime:
         timeout: float,
     ) -> dict[str, Any]:
         assert self.profile.base_url is not None
-        url = self.profile.base_url.rstrip("/") + "/v1/chat/completions"
+        url = openai_chat_completions_url(self.profile.base_url)
         body = {
             "model": self.profile.model,
             "messages": messages,
