@@ -455,8 +455,8 @@ def test_recover_profile_postprocess_backfills_missing_receipts(
     job_id = db.enqueue_profile_job_atomic(
         run_id, "profile", "m", "profile_mapper", {}, [item["id"]],
     )
-    job = next(j for j in db.list_jobs(run_id) if j["id"] == job_id)
-    # 模拟：Worker 认领并完成、候选已提交（committed_at 已写）但后处理未执行。
+    # 真实业务流：Worker 认领并完成 → 候选经提交链成功投影（产生 commit
+    # event）→ 后处理回执丢失（模拟“业务已投影、任务状态未更新”窗口）。
     claimed = db.claim_job(run_id, "profile", "local-0")
     assert claimed is not None and claimed["id"] == job_id
     db.complete_job(job_id, "local-0", {
@@ -466,6 +466,21 @@ def test_recover_profile_postprocess_backfills_missing_receipts(
             "exploration_complete": True,
         },
     })
+    from src.sorne.worker import submit_payload
+
+    run = db.get_run(run_id)
+    submit_payload(
+        project,
+        {
+            "kind": "target_profile_batch",
+            "records": [{"url": url, "function": "恢复补齐"}],
+            "exploration_complete": True,
+        },
+        source_type="automation_job", source_id=job_id,
+        idempotency_key=f"job:{job_id}:target_profile_batch",
+        run_id=run_id, job_id=job_id,
+        control_version=int(run["control_version"]), gate_required=True,
+    )
     db.mark_job_committed(job_id)
     with db.connect() as conn:
         conn.execute("DELETE FROM profile_postprocess_receipts WHERE job_id=?", (job_id,))

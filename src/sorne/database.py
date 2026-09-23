@@ -1153,14 +1153,20 @@ class ControlDatabase:
         work_item_ids: list[str],
         max_attempts: int = 3,
         wave: int | None = None,
+        run_fence: bool = False,
+        collect_cap: int = 3,
+        review_cap: int = 2,
     ) -> str:
         """Create one profile job and mark its work items dispatched atomically.
 
-        工作项置 dispatched、尝试次数 +1、派发回执与 Job 插入在同一事务：
-        不出现“记了派发但 Job 没建”，也不出现“Job 建了但工作项仍 pending
-        被第二个调度器再次分配”。尝试次数只在派发回执为新插入时递增——
-        同一派发的 Job 技术重试与结果重放不重复扣业务预算；进程重启后恢复
-        同一派发（同 job_id）也不会再次计数。
+        工作项置 dispatched、尝试次数 +1、派发回执与 Job 插入在同一事务。
+        事务内重新校验每个工作项在**当前时刻**仍可派发（状态 pending/partial
+        且 attempts 未达对应用途上限；``run_fence=True`` 时还要求未被本 Run
+        派发过）——调度器持旧查询结果重复派发同一工作项时整体回滚并抛错，
+        不会创建第二个 Job、也不会重复扣预算。``UNIQUE(job_id, work_item_id)``
+        只防同 Job 重复，跨 Job 的防重依赖这里的事务内条件校验。
+        尝试次数只在派发回执为新插入时递增；同一派发的技术重试与重放不重复
+        计数。Run 栅栏只应由增量/复核调度传入（基础画像允许多轮，传 False）。
         """
         job_id = f"J-{uuid4().hex[:12]}"
         now = _now()
@@ -1181,6 +1187,33 @@ class ControlDatabase:
                         "画像队列迁移未完成：请先完成 legacy JSON 导入"
                         "（AssetInventory.ensure_profile_migration）再派发画像任务"
                     )
+                # 事务内条件校验：快照失效（已被他方派发/预算耗尽/栅栏命中）
+                # 时整体回滚，不产生“半派发”。
+                for work_item_id in work_item_ids:
+                    row = db.execute(
+                        """
+                        SELECT purpose,status,attempts,last_dispatch_run_id
+                        FROM profile_work_items WHERE id=?
+                        """,
+                        (work_item_id,),
+                    ).fetchone()
+                    if row is None:
+                        raise RuntimeError(
+                            f"画像工作项不再可派发（不存在）: {work_item_id}"
+                        )
+                    cap = review_cap if str(row["purpose"]) == "review" else collect_cap
+                    if str(row["status"]) not in {"pending", "partial"}:
+                        raise RuntimeError(
+                            f"画像工作项不再可派发（状态 {row['status']}）: {work_item_id}"
+                        )
+                    if int(row["attempts"] or 0) >= int(cap):
+                        raise RuntimeError(
+                            f"画像工作项不再可派发（预算已耗尽）: {work_item_id}"
+                        )
+                    if run_fence and str(row["last_dispatch_run_id"] or "") == str(run_id):
+                        raise RuntimeError(
+                            f"画像工作项不再可派发（本 Run 已派发过）: {work_item_id}"
+                        )
                 db.execute(
                     """
                     INSERT INTO jobs(
@@ -1204,15 +1237,19 @@ class ControlDatabase:
                         (f"PD-{uuid4().hex[:12]}", work_item_id, run_id, job_id, now),
                     )
                     if inserted.rowcount == 1:
-                        db.execute(
+                        updated = db.execute(
                             """
                             UPDATE profile_work_items
                             SET status='dispatched',attempts=attempts+1,
                                 last_dispatch_run_id=?,last_dispatch_job_id=?,updated_at=?
-                            WHERE id=?
+                            WHERE id=? AND status IN ('pending','partial')
                             """,
                             (run_id, job_id, now, work_item_id),
                         )
+                        if updated.rowcount != 1:
+                            raise RuntimeError(
+                                f"画像工作项不再可派发（并发状态变化）: {work_item_id}"
+                            )
                 self._event(db, run_id, job_id, "job_queued", {"stage": stage, "member": member_name})
                 self._event(db, run_id, job_id, "profile_work_dispatched", {
                     "work_item_count": len(work_item_ids),

@@ -2128,7 +2128,15 @@ class AssetInventory:
                 raise
 
     def recover_profile_postprocess(self, database: Any = None) -> int:
-        """Re-run postprocess for committed profile jobs missing receipts."""
+        """Re-run postprocess for committed profile jobs missing receipts.
+
+        恢复依据是**成功投影**而非“候选已被消费”：只有存在 commit event 且
+        该事件 status='committed' 的 Job 才允许补跑后处理。被人工指令栅栏
+        拒绝、被 stop_run 丢弃或仍在投影中的候选（mark_job_committed 也会
+        写 committed_at，但没有提交事件）不得在恢复中重新生效。
+        记录来源是提交事件冻结的**已过滤载荷**（worker_payload），不是
+        Job 原始结果。
+        """
         db = database or self.database
         rows = db.list_all_jobs()
         recovered = 0
@@ -2137,17 +2145,38 @@ class AssetInventory:
                 continue
             if job.get("status") != "completed" or not job.get("committed_at"):
                 continue
-            job_id = str(job["id"])
+            commit_event_id = str(job.get("commit_event_id") or "")
+            if not commit_event_id:
+                # 无提交事件 = 候选被拒绝/丢弃，而不是成功投影。
+                continue
             with self.database.connect() as conn:
+                event_row = conn.execute(
+                    """
+                    SELECT payload_json,status FROM commit_events WHERE event_id=?
+                    """,
+                    (commit_event_id,),
+                ).fetchone()
                 done = conn.execute(
                     "SELECT 1 FROM profile_postprocess_receipts WHERE job_id=?",
-                    (job_id,),
+                    (str(job["id"]),),
                 ).fetchone()
             if done is not None:
                 continue
-            payload = (job.get("result") or {}).get("payload") or {}
-            records = payload.get("records") if isinstance(payload.get("records"), list) else []
-            complete = bool(payload.get("exploration_complete", False))
+            if event_row is None or str(event_row["status"]) != "committed":
+                # 事件被丢弃或尚未投影完成：等待投影路径处理，不在恢复中生效。
+                continue
+            try:
+                event_payload = json.loads(str(event_row["payload_json"]))
+            except json.JSONDecodeError:
+                continue
+            worker_payload = event_payload.get("worker_payload")
+            if not isinstance(worker_payload, dict):
+                continue
+            records = (
+                worker_payload.get("records")
+                if isinstance(worker_payload.get("records"), list) else []
+            )
+            complete = bool(worker_payload.get("exploration_complete", False))
             if self.record_job_profile_result(
                 job, records, complete=complete, error=None,
             ):

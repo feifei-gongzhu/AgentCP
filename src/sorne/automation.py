@@ -667,6 +667,9 @@ class AutomationEngine:
         """
         if not work_items:
             return False
+        from .target_profile import profile_policy
+
+        review_cap = int(profile_policy(self.store)["needs_review_max_attempts"])
         requested_workers = max(1, int(member.max_running))
         if mode == "baseline":
             state = begin_baseline_profile_pass(self.store)
@@ -752,6 +755,9 @@ class AutomationEngine:
                     "context_suffix": json.dumps(context, ensure_ascii=False, indent=2),
                 },
                 [str(item["id"]) for item in item_shard],
+                # Run 栅栏只约束增量/复核派发；基础画像允许同 Run 多轮补充。
+                run_fence=(mode != "baseline"),
+                review_cap=int(review_cap),
             )
         self.db.set_run_stage(run_id, stage)
         project_state = self.store.load_state()
