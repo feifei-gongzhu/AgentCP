@@ -473,6 +473,7 @@ class AssetInventory:
             source_type="target",
         )
         self.adopt_existing_profile()
+        self.ensure_profile_migration()
         return result
 
     def prepare_run(self) -> None:
@@ -482,7 +483,27 @@ class AssetInventory:
         loop, otherwise a persistently failing endpoint creates an unbounded
         incremental-profile cycle. A new user-started Run is the retry fence.
         """
+        # 迁移未完成时不允许任何画像调度派发（enqueue_profile_job_atomic
+        # 也会再次校验标记）。
+        self.ensure_profile_migration()
         now = now_iso()
+        # 回收派发残留：Job 已终结（含取消/崩溃）但工作项仍 dispatched 的，
+        # 退回 partial 参与下一轮重试，不留下永久占用。
+        with self.database.connect() as db:
+            db.execute(
+                """
+                UPDATE profile_work_items
+                SET status='partial',updated_at=?
+                WHERE status='dispatched' AND (
+                    last_dispatch_job_id IS NULL
+                    OR last_dispatch_job_id NOT IN (
+                        SELECT id FROM jobs
+                        WHERE status IN ('queued','running','cancelling')
+                    )
+                )
+                """,
+                (now,),
+            )
         with self.database.connect() as db:
             db.execute(
                 """
@@ -779,6 +800,21 @@ class AssetInventory:
                                 """,
                                 (_id("APT"), asset_id, now, now),
                             )
+                            if candidate.canonical_url:
+                                # 每个 URL 采集工作项与端点任务同事务创建；
+                                # 同 URL 多来源只保留一份同用途待办。
+                                self._ensure_work_item(
+                                    db,
+                                    asset_id=asset_id,
+                                    canonical_url=candidate.canonical_url,
+                                    purpose="collect",
+                                    source_reason=(
+                                        "baseline"
+                                        if source_type in _OFFICIAL_SOURCE_TYPES
+                                        else "discovered"
+                                    ),
+                                    now=now,
+                                )
                 db.execute(
                     """
                     UPDATE enterprise_assets SET status='stale'
@@ -1191,129 +1227,907 @@ class AssetInventory:
         with self.database.connect() as db:
             db.execute("BEGIN IMMEDIATE")
             try:
-                for value in assignments_or_seed_urls:
-                    assignment: dict[str, Any] | None = None
-                    asset = None
-                    task = None
-                    if isinstance(value, dict) and value.get("task_id"):
-                        assignment = dict(value)
-                        task = db.execute(
-                            "SELECT id,asset_id,status FROM profile_tasks WHERE id=?",
-                            (str(value["task_id"]),),
-                        ).fetchone()
-                        if task is not None:
-                            asset = db.execute(
-                                "SELECT * FROM enterprise_assets WHERE id=?",
-                                (str(task["asset_id"]),),
-                            ).fetchone()
-                    else:
-                        normalized = normalize_asset_candidate(value)
-                        if normalized is None:
-                            continue
-                        asset = db.execute(
-                            """
-                            SELECT * FROM enterprise_assets
-                            WHERE endpoint_key=?
-                               OR (? IS NOT NULL AND ip_address=? AND coalesce(port,0) IN (0,?))
-                               OR (? IS NOT NULL AND hostname=? AND coalesce(port,0) IN (0,?))
-                            ORDER BY endpoint_key=? DESC LIMIT 1
-                            """,
-                            (
-                                normalized.endpoint_key,
-                                normalized.ip_address, normalized.ip_address, normalized.port or 0,
-                                normalized.hostname, normalized.hostname, normalized.port or 0,
-                                normalized.endpoint_key,
-                            ),
-                        ).fetchone()
-                        if asset is not None:
-                            task = db.execute(
-                                "SELECT id,asset_id,status FROM profile_tasks WHERE asset_id=?",
-                                (asset["id"],),
-                            ).fetchone()
-                            assignment = {
-                                "task_id": str(task["id"]) if task else "",
-                                "asset_id": str(asset["id"]),
-                                "endpoint_key": str(asset["endpoint_key"]),
-                                "hostname": asset["hostname"],
-                                "ip_address": asset["ip_address"],
-                                "scheme": asset["scheme"],
-                                "port": asset["port"],
-                            }
-                    if asset is None or task is None or assignment is None:
-                        continue
-                    matching_records = [
-                        record for record in records
-                        if (
-                            (child := normalize_asset_candidate(record.get("url"))) is not None
-                            and _assignment_accepts(assignment, child)
-                        )
-                    ]
-                    effective_error = str(error or "").strip()
-                    status = (
-                        "failed" if effective_error
-                        else "profiled" if complete and matching_records
-                        else "partial"
-                    )
-                    updated = db.execute(
-                        """
-                        UPDATE profile_tasks SET status=?,attempts=attempts+1,updated_at=?
-                        WHERE id=? AND status IN ('pending','partial')
-                        """,
-                        (status, now, task["id"]),
-                    )
-                    transitioned = updated.rowcount > 0
-                    if not transitioned and str(task["status"]) != "profiled":
-                        continue
-                    if transitioned:
-                        asset_status = {
-                            "failed": "blocked",
-                            "profiled": "profiled",
-                            "partial": "partial",
-                        }[status]
-                        db.execute(
-                            "UPDATE enterprise_assets SET status=?,last_seen_at=? WHERE id=?",
-                            (asset_status, now, asset["id"]),
-                        )
-                        db.execute(
-                            """
-                            INSERT INTO validation_attempts(id,asset_id,outcome,detail,attempted_at)
-                            VALUES (?,?,?,?,?)
-                            """,
-                            (
-                                _id("AVA"),
-                                asset["id"],
-                                "profile_failed" if status == "failed" else "profile_complete" if status == "profiled" else "profile_partial",
-                                effective_error[:2000] or None,
-                                now,
-                            ),
-                        )
-                    for record in matching_records:
-                        url = str(record.get("url") or "").strip()
-                        child = normalize_asset_candidate(url)
-                        if child is None:
-                            continue
-                        db.execute(
-                            """
-                            INSERT INTO profile_urls(
-                                id,profile_task_id,url,function,technology_json,created_at
-                            ) VALUES (?,?,?,?,?,?)
-                            ON CONFLICT(profile_task_id,url) DO UPDATE SET
-                              function=CASE
-                                WHEN excluded.function IS NULL OR excluded.function='' THEN profile_urls.function
-                                WHEN profile_urls.function IS NULL OR profile_urls.function='' THEN excluded.function
-                                WHEN instr(profile_urls.function,excluded.function)>0 THEN profile_urls.function
-                                ELSE profile_urls.function || '；' || excluded.function
-                              END,
-                              technology_json=excluded.technology_json
-                            """,
-                            (
-                                _id("APU"), task["id"], url,
-                                str(record.get("function") or "").strip(),
-                                json.dumps(record.get("technology_stack") or [], ensure_ascii=False),
-                                now,
-                            ),
-                        )
+                self._apply_profile_result(
+                    db, assignments_or_seed_urls, records, complete, error, now,
+                )
                 db.execute("COMMIT")
             except Exception:
                 db.execute("ROLLBACK")
                 raise
+
+    @staticmethod
+    def _apply_profile_result(
+        db: Any,
+        assignments_or_seed_urls: list[dict[str, Any] | str],
+        records: list[dict[str, Any]],
+        complete: bool,
+        error: str | None,
+        now: str,
+    ) -> None:
+        for value in assignments_or_seed_urls:
+            assignment: dict[str, Any] | None = None
+            asset = None
+            task = None
+            if isinstance(value, dict) and value.get("task_id"):
+                assignment = dict(value)
+                task = db.execute(
+                    "SELECT id,asset_id,status FROM profile_tasks WHERE id=?",
+                    (str(value["task_id"]),),
+                ).fetchone()
+                if task is not None:
+                    asset = db.execute(
+                        "SELECT * FROM enterprise_assets WHERE id=?",
+                        (str(task["asset_id"]),),
+                    ).fetchone()
+            else:
+                normalized = normalize_asset_candidate(value)
+                if normalized is None:
+                    continue
+                asset = db.execute(
+                    """
+                    SELECT * FROM enterprise_assets
+                    WHERE endpoint_key=?
+                       OR (? IS NOT NULL AND ip_address=? AND coalesce(port,0) IN (0,?))
+                       OR (? IS NOT NULL AND hostname=? AND coalesce(port,0) IN (0,?))
+                    ORDER BY endpoint_key=? DESC LIMIT 1
+                    """,
+                    (
+                        normalized.endpoint_key,
+                        normalized.ip_address, normalized.ip_address, normalized.port or 0,
+                        normalized.hostname, normalized.hostname, normalized.port or 0,
+                        normalized.endpoint_key,
+                    ),
+                ).fetchone()
+                if asset is not None:
+                    task = db.execute(
+                        "SELECT id,asset_id,status FROM profile_tasks WHERE asset_id=?",
+                        (asset["id"],),
+                    ).fetchone()
+                    assignment = {
+                        "task_id": str(task["id"]) if task else "",
+                        "asset_id": str(asset["id"]),
+                        "endpoint_key": str(asset["endpoint_key"]),
+                        "hostname": asset["hostname"],
+                        "ip_address": asset["ip_address"],
+                        "scheme": asset["scheme"],
+                        "port": asset["port"],
+                    }
+            if asset is None or task is None or assignment is None:
+                continue
+            matching_records = [
+                record for record in records
+                if (
+                    (child := normalize_asset_candidate(record.get("url"))) is not None
+                    and _assignment_accepts(assignment, child)
+                )
+            ]
+            effective_error = str(error or "").strip()
+            status = (
+                "failed" if effective_error
+                else "profiled" if complete and matching_records
+                else "partial"
+            )
+            updated = db.execute(
+                """
+                UPDATE profile_tasks SET status=?,attempts=attempts+1,updated_at=?
+                WHERE id=? AND status IN ('pending','partial')
+                """,
+                (status, now, task["id"]),
+            )
+            transitioned = updated.rowcount > 0
+            if not transitioned and str(task["status"]) != "profiled":
+                continue
+            if transitioned:
+                asset_status = {
+                    "failed": "blocked",
+                    "profiled": "profiled",
+                    "partial": "partial",
+                }[status]
+                db.execute(
+                    "UPDATE enterprise_assets SET status=?,last_seen_at=? WHERE id=?",
+                    (asset_status, now, asset["id"]),
+                )
+                db.execute(
+                    """
+                    INSERT INTO validation_attempts(id,asset_id,outcome,detail,attempted_at)
+                    VALUES (?,?,?,?,?)
+                    """,
+                    (
+                        _id("AVA"),
+                        asset["id"],
+                        "profile_failed" if status == "failed" else "profile_complete" if status == "profiled" else "profile_partial",
+                        effective_error[:2000] or None,
+                        now,
+                    ),
+                )
+            for record in matching_records:
+                url = str(record.get("url") or "").strip()
+                child = normalize_asset_candidate(url)
+                if child is None:
+                    continue
+                db.execute(
+                    """
+                    INSERT INTO profile_urls(
+                        id,profile_task_id,url,function,technology_json,created_at
+                    ) VALUES (?,?,?,?,?,?)
+                    ON CONFLICT(profile_task_id,url) DO UPDATE SET
+                      function=CASE
+                        WHEN excluded.function IS NULL OR excluded.function='' THEN profile_urls.function
+                        WHEN profile_urls.function IS NULL OR profile_urls.function='' THEN excluded.function
+                        WHEN instr(profile_urls.function,excluded.function)>0 THEN profile_urls.function
+                        ELSE profile_urls.function || '；' || excluded.function
+                      END,
+                      technology_json=excluded.technology_json
+                    """,
+                    (
+                        _id("APU"), task["id"], url,
+                        str(record.get("function") or "").strip(),
+                        json.dumps(record.get("technology_stack") or [], ensure_ascii=False),
+                        now,
+                    ),
+                )
+
+    # ------------------------------------------------------------------
+    # V7 URL 工作项：SQLite 是画像待办/派发/尝试次数/Run 栅栏的唯一权威。
+    # ------------------------------------------------------------------
+
+    _MIGRATION_NAME = "legacy_profile_state_v1"
+
+    @staticmethod
+    def _ensure_work_item(
+        db: Any,
+        *,
+        asset_id: str,
+        canonical_url: str,
+        purpose: str,
+        source_reason: str,
+        now: str,
+        initial_status: str = "pending",
+        initial_attempts: int = 0,
+        legacy: bool = False,
+        initial_run_id: str | None = None,
+    ) -> tuple[dict[str, Any], bool]:
+        """Idempotently ensure one work item; returns (row, created).
+
+        逻辑身份 = canonical_url + purpose + task_version（默认 1）。已存在的
+        同身份条目不重建、不改状态（调用方按冲突规则显式处理）；来源历史
+        记录进子表，多来源不生成多份同用途待办。
+        """
+        task = db.execute(
+            "SELECT id FROM profile_tasks WHERE asset_id=?", (asset_id,),
+        ).fetchone()
+        if task is None:
+            db.execute(
+                """
+                INSERT INTO profile_tasks(id,asset_id,status,attempts,created_at,updated_at)
+                VALUES (?,?,'pending',0,?,?)
+                """,
+                (_id("APT"), asset_id, now, now),
+            )
+            task = db.execute(
+                "SELECT id FROM profile_tasks WHERE asset_id=?", (asset_id,),
+            ).fetchone()
+        existing = db.execute(
+            """
+            SELECT * FROM profile_work_items
+            WHERE canonical_url=? AND purpose=? AND task_version=1
+            """,
+            (canonical_url, purpose),
+        ).fetchone()
+        if existing is not None:
+            db.execute(
+                """
+                INSERT INTO profile_work_item_sources(
+                    work_item_id,source_reason,first_seen_at,last_seen_at
+                ) VALUES (?,?,?,?)
+                ON CONFLICT(work_item_id,source_reason) DO UPDATE SET
+                  last_seen_at=excluded.last_seen_at
+                """,
+                (str(existing["id"]), source_reason, now, now),
+            )
+            return dict(existing), False
+        item_id = _id("PWI")
+        db.execute(
+            """
+            INSERT INTO profile_work_items(
+                id,asset_id,profile_task_id,canonical_url,purpose,source_reason,status,
+                task_version,attempts,last_dispatch_run_id,last_error,completed_at,
+                legacy_source,created_at,updated_at
+            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            """,
+            (
+                item_id, asset_id, str(task["id"]), canonical_url, purpose,
+                source_reason, initial_status, 1, max(0, int(initial_attempts)),
+                initial_run_id, None, None, int(legacy), now, now,
+            ),
+        )
+        db.execute(
+            """
+            INSERT INTO profile_work_item_sources(
+                work_item_id,source_reason,first_seen_at,last_seen_at
+            ) VALUES (?,?,?,?)
+            """,
+            (item_id, source_reason, now, now),
+        )
+        row = db.execute(
+            "SELECT * FROM profile_work_items WHERE id=?", (item_id,),
+        ).fetchone()
+        return dict(row), True
+
+    def _ensure_asset_and_task(
+        self, db: Any, candidate: NormalizedCandidate, now: str,
+    ) -> str:
+        """Find or bootstrap the endpoint asset (and its profile task)."""
+        asset = db.execute(
+            "SELECT id FROM enterprise_assets WHERE endpoint_key=?",
+            (candidate.endpoint_key,),
+        ).fetchone()
+        if asset is None:
+            asset_id = _id("EA")
+            db.execute(
+                """
+                INSERT INTO enterprise_assets(
+                    id,asset_type,endpoint_key,canonical_url,hostname,ip_address,
+                    scheme,port,status,source_count,official_source,
+                    authoritative_candidate_id,first_seen_at,last_seen_at,metadata_json
+                ) VALUES (?,?,?,?,?,?,?,?,?,0,0,NULL,?,?,'{}')
+                """,
+                (
+                    asset_id, candidate.candidate_kind, candidate.endpoint_key,
+                    candidate.canonical_url, candidate.hostname, candidate.ip_address,
+                    candidate.scheme, candidate.port, "pending_profile", now, now,
+                ),
+            )
+            return asset_id
+        return str(asset["id"])
+
+    # -- 迁移 --------------------------------------------------------
+
+    def ensure_profile_migration(self) -> None:
+        with self.database.connect() as db:
+            row = db.execute(
+                "SELECT 1 FROM profile_migration_meta WHERE name=?",
+                (self._MIGRATION_NAME,),
+            ).fetchone()
+        if row is None:
+            self.migrate_legacy_profile_state()
+
+    def migration_report(self) -> dict[str, Any]:
+        with self.database.connect() as db:
+            row = db.execute(
+                "SELECT report_json FROM profile_migration_meta WHERE name=?",
+                (self._MIGRATION_NAME,),
+            ).fetchone()
+        if row is None:
+            return {}
+        try:
+            value = json.loads(str(row["report_json"] or "{}"))
+        except json.JSONDecodeError:
+            return {}
+        return value if isinstance(value, dict) else {}
+
+    def migrate_legacy_profile_state(self) -> dict[str, Any]:
+        """Import the legacy JSON queue into URL work items (idempotent).
+
+        应用层迁移：读 profile_state.json，走现有 URL 规范化与范围判定后写入
+        SQLite；数据与完成标记在同一事务原子提交（事务回滚即整体未发生，
+        重跑安全）。冲突规则见各分支注释；全部处置计入迁移报告。
+        """
+        from .target_profile import profile_policy, target_profile
+
+        json_path = self.store.path / "profile_state.json"
+        raw = json_path.read_text(encoding="utf-8") if json_path.exists() else None
+        try:
+            state = json.loads(raw) if raw else {}
+        except json.JSONDecodeError:
+            state = {}
+        if not isinstance(state, dict):
+            state = {}
+        pending_urls = [str(item) for item in state.get("pending_seed_urls") or [] if str(item).strip()]
+        completed_urls = [str(item) for item in state.get("completed_seed_urls") or [] if str(item).strip()]
+        review_attempts = {
+            str(url): int(count)
+            for url, count in (state.get("needs_review_attempts") or {}).items()
+            if isinstance(count, int) and count >= 0
+        }
+        incremental_run_id = str(state.get("incremental_attempted_run_id") or "") or None
+        review_run_id = str(state.get("needs_review_attempted_run_id") or "") or None
+        review_cap = max(0, int(profile_policy(self.store)["needs_review_max_attempts"]))
+        # 已有画像结果（JSONL 采集记录 + SQLite profile_urls）用于判定旧
+        # completed 是否有结果佐证。
+        profiled_urls = {str(item.get("url") or "") for item in target_profile(self.store)}
+
+        report: dict[str, Any] = {
+            "imported_pending": 0,
+            "imported_completed": 0,
+            "imported_consumed": 0,
+            "imported_review": 0,
+            "merged": 0,
+            "skipped_invalid": 0,
+            "skipped_out_of_scope": 0,
+            "conflicts": [],
+        }
+        now = now_iso()
+        with self.database.connect() as db:
+            existing_marker = db.execute(
+                "SELECT 1 FROM profile_migration_meta WHERE name=?",
+                (self._MIGRATION_NAME,),
+            ).fetchone()
+            if existing_marker is not None:
+                return self.migration_report()
+            db.execute("BEGIN IMMEDIATE")
+            try:
+                def ensure_item_for_url(
+                    url: str, *, purpose: str, source_reason: str,
+                ) -> tuple[dict[str, Any] | None, str]:
+                    """Returns (item_row_or_None, disposition)."""
+                    candidate = normalize_asset_candidate(url)
+                    if candidate is None or not candidate.canonical_url:
+                        return None, "invalid"
+                    if not asset_value_in_scope(self.store, url):
+                        asset = db.execute(
+                            "SELECT id FROM enterprise_assets WHERE endpoint_key=?",
+                            (candidate.endpoint_key,),
+                        ).fetchone()
+                        if asset is None:
+                            return None, "out_of_scope"
+                        item, created = self._ensure_work_item(
+                            db,
+                            asset_id=str(asset["id"]),
+                            canonical_url=candidate.canonical_url,
+                            purpose=purpose,
+                            source_reason=source_reason,
+                            now=now,
+                            initial_status="dropped",
+                            legacy=True,
+                        )
+                        if created:
+                            db.execute(
+                                """
+                                UPDATE profile_work_items SET last_error=?
+                                WHERE id=?
+                                """,
+                                ("迁移处置：URL 不在当前项目授权范围", item["id"]),
+                            )
+                        return item, "dropped_out_of_scope"
+                    asset_id = self._ensure_asset_and_task(db, candidate, now)
+                    item, created = self._ensure_work_item(
+                        db,
+                        asset_id=asset_id,
+                        canonical_url=candidate.canonical_url,
+                        purpose=purpose,
+                        source_reason=source_reason,
+                        now=now,
+                        initial_status="pending",
+                        legacy=True,
+                    )
+                    return item, "created" if created else "existing"
+
+                for url in pending_urls:
+                    item, disposition = ensure_item_for_url(
+                        url, purpose="collect", source_reason="incremental",
+                    )
+                    if disposition == "invalid":
+                        report["skipped_invalid"] += 1
+                        continue
+                    if disposition == "out_of_scope":
+                        report["skipped_out_of_scope"] += 1
+                        continue
+                    if disposition == "dropped_out_of_scope":
+                        report["skipped_out_of_scope"] += 1
+                        continue
+                    if item is None:
+                        continue
+                    if str(item["status"]) in {"completed", "consumed"}:
+                        # 已有成功/已消费结果不被旧 pending 降级。
+                        report["conflicts"].append({
+                            "url": item["canonical_url"], "kind": "pending_vs_completed",
+                            "resolution": "kept_existing",
+                        })
+                        report["merged"] += 1
+                        continue
+                    db.execute(
+                        """
+                        UPDATE profile_work_items
+                        SET status='pending',last_dispatch_run_id=coalesce(?,last_dispatch_run_id),
+                            updated_at=?
+                        WHERE id=?
+                        """,
+                        (incremental_run_id, now, item["id"]),
+                    )
+                    report["imported_pending"] += 1
+
+                for url in completed_urls:
+                    item, disposition = ensure_item_for_url(
+                        url, purpose="collect", source_reason="incremental",
+                    )
+                    if disposition == "invalid":
+                        report["skipped_invalid"] += 1
+                        continue
+                    if disposition in {"out_of_scope", "dropped_out_of_scope"}:
+                        report["skipped_out_of_scope"] += 1
+                        continue
+                    if item is None:
+                        continue
+                    has_result = (
+                        item["canonical_url"] in profiled_urls
+                        or db.execute(
+                            "SELECT 1 FROM profile_urls WHERE url=?",
+                            (item["canonical_url"],),
+                        ).fetchone() is not None
+                    )
+                    final_status = "completed" if has_result else "consumed"
+                    if str(item["status"]) in {"completed", "consumed"}:
+                        report["merged"] += 1
+                        continue
+                    db.execute(
+                        """
+                        UPDATE profile_work_items
+                        SET status=?,completed_at=CASE WHEN ?='completed' THEN ? ELSE completed_at END,
+                            last_dispatch_run_id=coalesce(?,last_dispatch_run_id),updated_at=?
+                        WHERE id=?
+                        """,
+                        (
+                            final_status, final_status, now,
+                            incremental_run_id, now, item["id"],
+                        ),
+                    )
+                    if final_status == "completed":
+                        report["imported_completed"] += 1
+                    else:
+                        report["imported_consumed"] += 1
+
+                for url, count in review_attempts.items():
+                    item, disposition = ensure_item_for_url(
+                        url, purpose="review", source_reason="needs_review",
+                    )
+                    if disposition == "invalid":
+                        report["skipped_invalid"] += 1
+                        continue
+                    if disposition in {"out_of_scope", "dropped_out_of_scope"}:
+                        report["skipped_out_of_scope"] += 1
+                        continue
+                    if item is None:
+                        continue
+                    if str(item["status"]) == "completed":
+                        report["conflicts"].append({
+                            "url": item["canonical_url"], "kind": "review_vs_completed",
+                            "resolution": "kept_completed",
+                        })
+                        continue
+                    attempts = max(int(item["attempts"] or 0), count)
+                    status = (
+                        item["status"]
+                        if str(item["status"]) in {"partial", "exhausted"}
+                        else ("exhausted" if attempts >= review_cap else "pending")
+                    )
+                    db.execute(
+                        """
+                        UPDATE profile_work_items
+                        SET attempts=?,status=?,last_dispatch_run_id=coalesce(?,last_dispatch_run_id),
+                            updated_at=?
+                        WHERE id=?
+                        """,
+                        (attempts, status, review_run_id, now, item["id"]),
+                    )
+                    report["imported_review"] += 1
+
+                db.execute(
+                    """
+                    INSERT INTO profile_migration_meta(
+                        name,version,completed_at,input_sha256,imported,merged,
+                        skipped,conflicts,report_json
+                    ) VALUES (?,1,?,?,?,?,?,?,?)
+                    """,
+                    (
+                        self._MIGRATION_NAME, now,
+                        hashlib.sha256(raw.encode("utf-8")).hexdigest() if raw else None,
+                        report["imported_pending"] + report["imported_completed"]
+                        + report["imported_consumed"] + report["imported_review"],
+                        report["merged"],
+                        report["skipped_invalid"] + report["skipped_out_of_scope"],
+                        len(report["conflicts"]),
+                        json.dumps(report, ensure_ascii=False),
+                    ),
+                )
+                db.execute("COMMIT")
+            except Exception:
+                db.execute("ROLLBACK")
+                raise
+        return report
+
+    # -- 待办查询 ------------------------------------------------------
+
+    def _pending_work_items(
+        self,
+        *,
+        purpose: str,
+        run_id: str | None,
+        limit: int,
+        cap: int,
+    ) -> list[dict[str, Any]]:
+        """Schedulable work items.
+
+        Run 栅栏只对增量/复核生效（run_id 非 None 时）；基础画像允许同一
+        Run 多轮补充，调用方传 run_id=None。栅栏 SQL 显式处理 NULL，
+        新任务（从未派发）不会被 ``NULL != :run`` 遗漏。
+        """
+        query = [
+            """
+            SELECT wi.id,wi.asset_id,wi.profile_task_id,wi.canonical_url,wi.purpose,
+                   wi.source_reason,wi.status,wi.attempts,wi.legacy_source,
+                   a.endpoint_key,a.hostname,a.ip_address,a.scheme,a.port,
+                   a.official_source
+            FROM profile_work_items wi
+            JOIN enterprise_assets a ON a.id=wi.asset_id
+            WHERE wi.purpose=? AND wi.status IN ('pending','partial')
+              AND wi.attempts < ?
+              AND a.status NOT IN ('out_of_scope','invalid','stale','duplicate')
+            """
+        ]
+        params: list[Any] = [purpose, cap]
+        if run_id is not None:
+            query.append(
+                " AND (wi.last_dispatch_run_id IS NULL OR wi.last_dispatch_run_id <> ?)"
+            )
+            params.append(run_id)
+        query.append(
+            " ORDER BY a.official_source DESC,a.first_seen_at,wi.canonical_url LIMIT ?"
+        )
+        params.append(max(0, int(limit)))
+        if limit <= 0:
+            return []
+        with self.database.connect() as db:
+            rows = [dict(row) for row in db.execute("".join(query), params).fetchall()]
+        return rows
+
+    def pending_collect_work_items(
+        self, *, run_id: str | None = None, limit: int = 1000,
+    ) -> list[dict[str, Any]]:
+        return self._pending_work_items(
+            purpose="collect", run_id=run_id, limit=limit, cap=MAX_PROFILE_ATTEMPTS,
+        )
+
+    def pending_review_work_items(
+        self, *, run_id: str | None, limit: int, cap: int,
+    ) -> list[dict[str, Any]]:
+        return self._pending_work_items(
+            purpose="review", run_id=run_id, limit=limit, cap=max(0, int(cap)),
+        )
+
+    def sync_needs_review_work_items(self) -> int:
+        """Upsert review items from current needs_review assessments."""
+        from .target_profile import target_assessments
+
+        now = now_iso()
+        created = 0
+        with self.database.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            try:
+                for assessment in target_assessments(self.store):
+                    if str(assessment.get("profile_class")) != "needs_review":
+                        continue
+                    url = str(assessment.get("url") or "").strip()
+                    candidate = normalize_asset_candidate(url)
+                    if candidate is None or not candidate.canonical_url:
+                        continue
+                    if not asset_value_in_scope(self.store, url):
+                        continue
+                    asset_id = self._ensure_asset_and_task(db, candidate, now)
+                    _item, was_created = self._ensure_work_item(
+                        db,
+                        asset_id=asset_id,
+                        canonical_url=candidate.canonical_url,
+                        purpose="review",
+                        source_reason="needs_review",
+                        now=now,
+                    )
+                    created += int(was_created)
+                db.execute("COMMIT")
+            except Exception:
+                db.execute("ROLLBACK")
+                raise
+        return created
+
+    def exhausted_review_urls(self) -> list[str]:
+        from .target_profile import profile_policy
+
+        cap = max(0, int(profile_policy(self.store)["needs_review_max_attempts"]))
+        with self.database.connect() as db:
+            rows = db.execute(
+                """
+                SELECT canonical_url FROM profile_work_items
+                WHERE purpose='review' AND (status='exhausted' OR attempts >= ?)
+                ORDER BY canonical_url
+                """,
+                (cap,),
+            ).fetchall()
+        return [str(row["canonical_url"]) for row in rows]
+
+    def record_review_queue_count(
+        self, urls: list[str], run_id: str | None = None,
+    ) -> list[str]:
+        """旧 mark_needs_review_queued 的 SQLite 委托：排队时记账。
+
+        正常调度路径的计数发生在派发事务（enqueue_profile_job_atomic）；
+        本方法只服务于兼容入口/测试的“排队即计数”语义。
+        """
+        from .target_profile import profile_policy
+
+        cap = max(0, int(profile_policy(self.store)["needs_review_max_attempts"]))
+        queued: list[str] = []
+        now = now_iso()
+        with self.database.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            try:
+                for value in urls:
+                    url = str(value or "").strip()
+                    candidate = normalize_asset_candidate(url)
+                    if candidate is None or not candidate.canonical_url:
+                        continue
+                    row = db.execute(
+                        """
+                        SELECT id,attempts,status FROM profile_work_items
+                        WHERE canonical_url=? AND purpose='review' AND task_version=1
+                        """,
+                        (candidate.canonical_url,),
+                    ).fetchone()
+                    if row is None:
+                        continue
+                    db.execute(
+                        """
+                        UPDATE profile_work_items
+                        SET attempts=attempts+1,
+                            status=CASE WHEN attempts+1>=? AND status IN ('pending','partial','dispatched')
+                                THEN 'exhausted' ELSE status END,
+                            last_dispatch_run_id=coalesce(?,last_dispatch_run_id),
+                            updated_at=?
+                        WHERE id=?
+                        """,
+                        (cap, run_id, now, row["id"]),
+                    )
+                    queued.append(candidate.canonical_url)
+                db.execute("COMMIT")
+            except Exception:
+                db.execute("ROLLBACK")
+                raise
+        return queued
+
+    def add_work_items(
+        self,
+        values: list[object],
+        *,
+        purpose: str = "collect",
+        source_reason: str = "incremental",
+    ) -> list[str]:
+        """旧 queue_incremental_profile_urls 的 SQLite 委托（单一写路径）。
+
+        completed 的同身份条目跳过（与旧队列“已知 URL 不重复排队”一致）；
+        consumed（旧队列已消费但无结果）允许重新激活补采。
+        """
+        added: list[str] = []
+        now = now_iso()
+        with self.database.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            try:
+                for value in values:
+                    url = str(value or "").strip()
+                    candidate = normalize_asset_candidate(url)
+                    if candidate is None or not candidate.canonical_url:
+                        continue
+                    if not asset_value_in_scope(self.store, url):
+                        continue
+                    asset_id = self._ensure_asset_and_task(db, candidate, now)
+                    item, created = self._ensure_work_item(
+                        db,
+                        asset_id=asset_id,
+                        canonical_url=candidate.canonical_url,
+                        purpose=purpose,
+                        source_reason=source_reason,
+                        now=now,
+                    )
+                    if created:
+                        added.append(candidate.canonical_url)
+                        continue
+                    status = str(item["status"])
+                    if status == "completed":
+                        continue
+                    if status in {"consumed", "dropped", "exhausted"}:
+                        db.execute(
+                            """
+                            UPDATE profile_work_items
+                            SET status='pending',attempts=0,last_error=NULL,updated_at=?
+                            WHERE id=?
+                            """,
+                            (now, item["id"]),
+                        )
+                        added.append(candidate.canonical_url)
+                db.execute("COMMIT")
+            except Exception:
+                db.execute("ROLLBACK")
+                raise
+        return added
+
+    def work_items_by_ids(self, work_item_ids: list[str]) -> list[dict[str, Any]]:
+        if not work_item_ids:
+            return []
+        placeholders = ",".join("?" for _ in work_item_ids)
+        with self.database.connect() as db:
+            rows = [
+                dict(row)
+                for row in db.execute(
+                    f"""
+                    SELECT wi.id,wi.asset_id,wi.profile_task_id,wi.canonical_url,wi.purpose,
+                           wi.source_reason,wi.status,wi.attempts,wi.legacy_source,
+                           a.endpoint_key,a.hostname,a.ip_address,a.scheme,a.port,
+                           a.official_source
+                    FROM profile_work_items wi
+                    JOIN enterprise_assets a ON a.id=wi.asset_id
+                    WHERE wi.id IN ({placeholders})
+                      AND wi.status IN ('pending','partial')
+                      AND wi.attempts < ?
+                      AND a.status NOT IN ('out_of_scope','invalid','stale','duplicate')
+                    ORDER BY a.official_source DESC,a.first_seen_at,wi.canonical_url
+                    """,
+                    [*work_item_ids, MAX_PROFILE_ATTEMPTS],
+                ).fetchall()
+            ]
+        return rows
+
+    # -- 派发与结果回写 ------------------------------------------------
+
+    @staticmethod
+    def work_item_assignments(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Derive job payload assignments (one per endpoint asset) from items."""
+        by_asset: dict[str, dict[str, Any]] = {}
+        for item in items:
+            asset_id = str(item["asset_id"])
+            current = by_asset.get(asset_id)
+            if current is None:
+                current = {
+                    "task_id": str(item["profile_task_id"]),
+                    "asset_id": asset_id,
+                    "endpoint_key": str(item["endpoint_key"]),
+                    "seed_url": str(item["canonical_url"]),
+                    "hostname": item["hostname"],
+                    "ip_address": item["ip_address"],
+                    "scheme": item["scheme"],
+                    "port": item["port"],
+                }
+                by_asset[asset_id] = current
+        return list(by_asset.values())
+
+    def record_job_profile_result(
+        self,
+        job: dict[str, Any],
+        records: list[dict[str, Any]],
+        *,
+        complete: bool,
+        error: str | None = None,
+    ) -> bool:
+        """Job-keyed idempotent write-back for profile results.
+
+        覆盖 _commit_candidates 之后处理窗口：按 job_id 唯一回执保证“业务
+        结果已投影、任务状态未更新时崩溃”的恢复路径能补齐且不重复；同
+        Job 的技术重试与结果重放只应用一次（端点层 attempts 也只递增一次）。
+        """
+        job_id = str(job.get("id") or "")
+        if not job_id:
+            return False
+        now = now_iso()
+        with self.database.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            try:
+                existing = db.execute(
+                    "SELECT 1 FROM profile_postprocess_receipts WHERE job_id=?",
+                    (job_id,),
+                ).fetchone()
+                if existing is not None:
+                    db.execute("COMMIT")
+                    return False
+                assignments = list((job.get("payload") or {}).get("profile_assignments") or [])
+                self._apply_profile_result(
+                    db, assignments, records, complete, error, now,
+                )
+                accepted_urls = set()
+                for record in records:
+                    candidate = normalize_asset_candidate(record.get("url"))
+                    accepted_urls.add(
+                        candidate.canonical_url
+                        or str(record.get("url") or "").strip()
+                    )
+                from .target_profile import profile_policy
+
+                review_cap = max(0, int(profile_policy(self.store)["needs_review_max_attempts"]))
+                dispatched = db.execute(
+                    """
+                    SELECT wi.* FROM profile_work_items wi
+                    JOIN profile_dispatches pd ON pd.work_item_id=wi.id
+                    WHERE pd.job_id=?
+                    """,
+                    (job_id,),
+                ).fetchall()
+                finalized = 0
+                for item in dispatched:
+                    cap = (
+                        MAX_PROFILE_ATTEMPTS
+                        if str(item["purpose"]) == "collect"
+                        else review_cap
+                    )
+                    matched = str(item["canonical_url"]) in accepted_urls
+                    if error:
+                        new_status = (
+                            "exhausted" if int(item["attempts"] or 0) >= cap else "partial"
+                        )
+                    elif complete and matched:
+                        new_status = "completed"
+                    elif matched:
+                        new_status = "partial"
+                    else:
+                        # kind=none / 无匹配记录：不能当作成功画像。
+                        new_status = (
+                            "exhausted" if int(item["attempts"] or 0) >= cap else "partial"
+                        )
+                    db.execute(
+                        """
+                        UPDATE profile_work_items
+                        SET status=?,last_error=?,completed_at=?,
+                            last_dispatch_job_id=?,updated_at=?
+                        WHERE id=?
+                        """,
+                        (
+                            new_status,
+                            str(error or "").strip()[:2000] or None,
+                            now if new_status == "completed" else None,
+                            job_id, now, item["id"],
+                        ),
+                    )
+                    finalized += 1
+                db.execute(
+                    """
+                    INSERT INTO profile_postprocess_receipts(job_id,processed_at,summary_json)
+                    VALUES (?,?,?)
+                    """,
+                    (
+                        job_id, now,
+                        json.dumps({
+                            "assignments": len(assignments),
+                            "records": len(records),
+                            "work_items": finalized,
+                            "complete": bool(complete),
+                            "error": str(error or "").strip()[:500] or None,
+                        }, ensure_ascii=False),
+                    ),
+                )
+                db.execute("COMMIT")
+                return True
+            except Exception:
+                db.execute("ROLLBACK")
+                raise
+
+    def recover_profile_postprocess(self, database: Any = None) -> int:
+        """Re-run postprocess for committed profile jobs missing receipts."""
+        db = database or self.database
+        rows = db.list_all_jobs()
+        recovered = 0
+        for job in rows:
+            if str(job.get("stage")) not in {"profile", "profile_incremental"}:
+                continue
+            if job.get("status") != "completed" or not job.get("committed_at"):
+                continue
+            job_id = str(job["id"])
+            with self.database.connect() as conn:
+                done = conn.execute(
+                    "SELECT 1 FROM profile_postprocess_receipts WHERE job_id=?",
+                    (job_id,),
+                ).fetchone()
+            if done is not None:
+                continue
+            payload = (job.get("result") or {}).get("payload") or {}
+            records = payload.get("records") if isinstance(payload.get("records"), list) else []
+            complete = bool(payload.get("exploration_complete", False))
+            if self.record_job_profile_result(
+                job, records, complete=complete, error=None,
+            ):
+                recovered += 1
+        return recovered

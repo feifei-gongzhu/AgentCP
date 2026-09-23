@@ -1132,24 +1132,16 @@ def queue_incremental_profile_urls(
     store: ProjectStore,
     values: list[object],
 ) -> list[str]:
-    state = load_profile_state(store)
-    known = {str(item["url"]) for item in target_profile(store)}
-    pending = set(str(item) for item in state.get("pending_seed_urls", []))
-    completed = set(str(item) for item in state.get("completed_seed_urls", []))
-    added: list[str] = []
-    for value in values:
-        try:
-            url = canonical_target_url(str(value or ""))
-        except ValueError:
-            continue
-        if url in known or url in pending or url in completed:
-            continue
-        pending.add(url)
-        added.append(url)
-    if added:
-        state["pending_seed_urls"] = sorted(pending)
-        save_profile_state(store, state)
-    return added
+    """旧 JSON 入队入口 → 委托 SQLite URL 工作项（单一写路径）。
+
+    迁移完成后本函数不再写 profile_state.json 的 pending 队列；completed 的
+    同身份条目跳过（与旧“已知 URL 不重复排队”一致），consumed 可重新激活。
+    """
+    from .asset_inventory import AssetInventory
+
+    return AssetInventory(store).add_work_items(
+        values, purpose="collect", source_reason="incremental",
+    )
 
 
 def pending_incremental_profile_urls(
@@ -1157,21 +1149,25 @@ def pending_incremental_profile_urls(
     *,
     run_id: str | None = None,
 ) -> list[str]:
-    state = load_profile_state(store)
-    if run_id and state.get("incremental_attempted_run_id") == run_id:
-        return []
-    return [str(item) for item in state.get("pending_seed_urls", []) if str(item).strip()]
+    from .asset_inventory import AssetInventory
+
+    return [
+        str(item["canonical_url"])
+        for item in AssetInventory(store).pending_collect_work_items(
+            run_id=run_id, limit=10_000,
+        )
+    ]
 
 
 def mark_incremental_profile_started(
     store: ProjectStore,
     run_id: str,
 ) -> list[str]:
-    state = load_profile_state(store)
-    state["incremental_attempted_run_id"] = run_id
-    state["last_error"] = None
-    save_profile_state(store, state)
-    return [str(item) for item in state.get("pending_seed_urls", []) if str(item).strip()]
+    """停用：Run 栅栏由派发事务写入的 last_dispatch_run_id 承担。
+
+    保留签名以兼容旧调用；返回按新数据源计算的当前待办。
+    """
+    return pending_incremental_profile_urls(store, run_id=run_id)
 
 
 def finish_incremental_profile(
@@ -1180,39 +1176,21 @@ def finish_incremental_profile(
     *,
     error: str | None = None,
 ) -> dict[str, Any]:
-    state = load_profile_state(store)
-    state["last_error"] = str(error or "").strip() or None
-    if not error:
-        consumed = set(seed_urls)
-        state["pending_seed_urls"] = [
-            str(item) for item in state.get("pending_seed_urls", [])
-            if str(item) not in consumed
-        ]
-        state["completed_seed_urls"] = list(dict.fromkeys([
-            *[str(item) for item in state.get("completed_seed_urls", [])],
-            *seed_urls,
-        ]))
-    return save_profile_state(store, state)
+    """停用：结果回写走 AssetInventory.record_job_profile_result（按 Job 幂等）。
+
+    保留签名以兼容旧调用；仅返回阶段统计，不再消费任何队列。
+    """
+    return load_profile_state(store)
 
 
 # ---------------------------------------------------------------------------
 # needs_review 有界复核（与“尚未评估”严格区分）。
 # 复核不新增常驻 Agent：needs_review URL 合并进已有的增量画像通道，
-# 每个方向 Run 至多复核一批（incremental_attempted_run_id 天然限流），
+# 每个方向 Run 至多复核一批（工作项 last_dispatch_run_id 限流），
 # 达到上限后进入 exhausted 终态，不再重复消耗模型调用。
+# 以下三个函数自 V7 起委托 SQLite 工作项；profile_state.json 中的
+# needs_review_attempts / *attempted_run_id 字段成为迁移前的归档数据。
 # ---------------------------------------------------------------------------
-
-def _needs_review_attempts(store: ProjectStore) -> dict[str, int]:
-    state = load_profile_state(store)
-    values = state.get("needs_review_attempts")
-    if not isinstance(values, dict):
-        return {}
-    return {
-        str(url): int(attempts)
-        for url, attempts in values.items()
-        if isinstance(attempts, int) and attempts >= 0
-    }
-
 
 def pending_needs_review_urls(
     store: ProjectStore,
@@ -1220,27 +1198,22 @@ def pending_needs_review_urls(
     limit: int = PROFILE_NEEDS_REVIEW_BATCH_LIMIT,
     exclude_run_id: str | None = None,
 ) -> list[str]:
-    """needs_review 且复核次数未耗尽的 URL，按最新评估顺序有界返回。
+    """needs_review 且复核次数未耗尽的 URL，有界返回。
 
-    ``exclude_run_id`` 是每 Run 一批的围栏：本 Run 已排队过复核的 URL
+    ``exclude_run_id`` 是每 Run 一批的围栏：本 Run 已派发过复核的 URL
     不再重复返回，避免同一 Run 多波反复消耗复核次数。
     """
+    from .asset_inventory import AssetInventory
+
+    inventory = AssetInventory(store)
+    inventory.sync_needs_review_work_items()
     cap = profile_policy(store)["needs_review_max_attempts"]
-    state = load_profile_state(store)
-    if exclude_run_id and str(state.get("needs_review_attempted_run_id") or "") == str(exclude_run_id):
-        return []
-    attempts = _needs_review_attempts(store)
-    result: list[str] = []
-    for assessment in target_assessments(store):
-        if assessment.get("profile_class") != "needs_review":
-            continue
-        url = str(assessment.get("url") or "")
-        if not url or attempts.get(url, 0) >= cap:
-            continue
-        result.append(url)
-        if len(result) >= max(1, limit):
-            break
-    return result
+    return [
+        str(item["canonical_url"])
+        for item in inventory.pending_review_work_items(
+            run_id=exclude_run_id, limit=limit, cap=cap,
+        )
+    ]
 
 
 def mark_needs_review_queued(
@@ -1251,34 +1224,20 @@ def mark_needs_review_queued(
 ) -> list[str]:
     """Record one review attempt per URL at queue time (not at model time).
 
-    调用方必须只对实际进入增量画像 Job 的 URL 计数；未入队的 URL 不得
-    消耗复核次数。``run_id`` 记录本 Run 已排队，配合 exclude_run_id 限流。
+    委托 SQLite（record_review_queue_count）。正常调度路径的计数发生在
+    派发事务；本入口只服务兼容调用与测试的“排队即计数”语义。
     """
-    state = load_profile_state(store)
-    attempts = _needs_review_attempts(store)
-    queued: list[str] = []
-    for value in urls:
-        url = str(value or "").strip()
-        if url:
-            attempts[url] = attempts.get(url, 0) + 1
-            queued.append(url)
-    if queued:
-        state["needs_review_attempts"] = attempts
-        if run_id:
-            state["needs_review_attempted_run_id"] = str(run_id)
-        save_profile_state(store, state)
-    return queued
+    from .asset_inventory import AssetInventory
+
+    return AssetInventory(store).record_review_queue_count(urls, run_id=run_id)
 
 
 def needs_review_exhausted_urls(store: ProjectStore) -> list[str]:
-    cap = profile_policy(store)["needs_review_max_attempts"]
-    attempts = _needs_review_attempts(store)
-    return [
-        str(assessment.get("url") or "")
-        for assessment in target_assessments(store)
-        if assessment.get("profile_class") == "needs_review"
-        and attempts.get(str(assessment.get("url") or ""), 0) >= cap
-    ]
+    from .asset_inventory import AssetInventory
+
+    inventory = AssetInventory(store)
+    inventory.sync_needs_review_work_items()
+    return inventory.exhausted_review_urls()
 
 
 def assessment_coverage(store: ProjectStore) -> dict[str, Any]:

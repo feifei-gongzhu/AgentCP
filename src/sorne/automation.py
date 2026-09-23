@@ -30,15 +30,9 @@ from .waf import WAFManager
 from .target_profile import (
     begin_baseline_profile_pass,
     finish_baseline_profile_pass,
-    finish_incremental_profile,
     baseline_profile_required,
     load_profile_state,
-    mark_incremental_profile_started,
     pending_baseline_profile_targets,
-    pending_incremental_profile_urls,
-    pending_needs_review_urls,
-    mark_needs_review_queued,
-    queue_incremental_profile_urls,
     seed_priority_target_directions,
     DIRECTION_BACKLOG_HIGH_WATERMARK,
 )
@@ -471,10 +465,12 @@ class AutomationEngine:
         inventory = AssetInventory(self.store)
         inventory.sync_declared_targets()
         inventory.prepare_run()
-        asset_profile_assignments = inventory.pending_profile_assignments()
+        # 补齐“业务结果已投影、画像任务后处理未落账”的中断窗口。
+        inventory.recover_profile_postprocess(self.db)
+        baseline_work_items = inventory.pending_collect_work_items()
         needs_baseline_profile = bool(
             profile_member
-            and asset_profile_assignments
+            and baseline_work_items
             and baseline_profile_required(self.store)
         )
         methodology = ensure_methodology(
@@ -511,8 +507,12 @@ class AutomationEngine:
         })
         self._sync_run_state(run_id)
         if needs_baseline_profile and profile_member is not None:
-            self._collect_mrecon_assignments(run_id, asset_profile_assignments)
-            self._schedule_profile_job(run_id, profile_member, mode="baseline")
+            self._collect_mrecon_assignments(
+                run_id, AssetInventory.work_item_assignments(baseline_work_items),
+            )
+            self._schedule_profile_job(
+                run_id, profile_member, mode="baseline", work_items=baseline_work_items,
+            )
             self.db.set_run_stage(run_id, "profile")
         else:
             self._schedule_iteration(run_id)
@@ -660,24 +660,40 @@ class AutomationEngine:
         member: TeamMember,
         *,
         mode: str,
-        seed_urls: list[str] | None = None,
-        assignments: list[dict[str, Any]] | None = None,
+        work_items: list[dict[str, Any]] | None = None,
     ) -> bool:
+        """Shard URL work items and dispatch them atomically with their jobs.
+
+        工作项置 dispatched、尝试计数与 Job 创建在 enqueue_profile_job_atomic
+        的同一事务内完成；payload 保留 profile_assignments/profile_seed_urls
+        兼容字段（由工作项派生）供过滤与结果回写使用。
+        """
+        if not work_items:
+            return False
         requested_workers = max(1, int(member.max_running))
-        inventory = AssetInventory(self.store)
-        if assignments is not None:
-            selected_assignments = [dict(item) for item in assignments if item.get("task_id")]
-        elif seed_urls is not None:
-            selected_assignments = inventory.profile_assignments_for_seeds(seed_urls)
+        if mode == "baseline":
+            state = begin_baseline_profile_pass(self.store)
+            stage = "profile"
         else:
-            selected_assignments = inventory.pending_profile_assignments()
+            state = None
+            stage = "profile_incremental"
+        worker_count = min(requested_workers, len(work_items))
+        item_shards = [
+            work_items[index::worker_count]
+            for index in range(worker_count)
+        ]
+        for index, item_shard in enumerate(item_shards):
+            seed_shard = [str(item["canonical_url"]) for item in item_shard]
+            assignments = AssetInventory.work_item_assignments(item_shard)
             if mode == "baseline":
+                # 基础画像的种子优先用项目所有者声明的原始目标（同主机时），
+                # 与配置目标保持一致的可点击入口。
                 configured = pending_baseline_profile_targets(self.store)
                 configured_by_host = {
                     str(urlparse(value if "://" in value else f"https://{value}").hostname or "").casefold(): value
                     for value in configured
                 }
-                selected_assignments = [
+                assignments = [
                     {
                         **item,
                         "seed_url": configured_by_host.get(
@@ -685,23 +701,10 @@ class AutomationEngine:
                             item["seed_url"],
                         ),
                     }
-                    for item in selected_assignments
+                    for item in assignments
                 ]
-        if not selected_assignments:
-            return False
-        worker_count = min(requested_workers, len(selected_assignments))
-        if mode == "baseline":
-            state = begin_baseline_profile_pass(self.store)
-            stage = "profile"
-        else:
-            state = None
-            stage = "profile_incremental"
-        assignment_shards = [
-            selected_assignments[index::worker_count]
-            for index in range(worker_count)
-        ]
-        for index, assignment_shard in enumerate(assignment_shards):
-            seed_shard = [str(item["seed_url"]) for item in assignment_shard]
+                # mrecon 完成度按派发种子判定，同步替换 mrecon 去重用的种子串。
+                seed_shard = [str(item["seed_url"]) for item in assignments]
             job_member_name = (
                 member.name
                 if worker_count == 1
@@ -730,7 +733,7 @@ class AutomationEngine:
                         "不得重新遍历已有完整画像，也不得处理其他并发分片。"
                     ),
                 }
-            self.db.enqueue_job(
+            self.db.enqueue_profile_job_atomic(
                 run_id,
                 stage,
                 job_member_name,
@@ -743,13 +746,15 @@ class AutomationEngine:
                         if mode == "baseline"
                         else None
                     ),
-                    "profile_assignments": assignment_shard,
+                    "profile_assignments": assignments,
                     "profile_seed_urls": seed_shard,
                     "profile_seed_targets": seed_shard if mode == "baseline" else [],
                     "profile_shard_index": index,
                     "profile_shard_count": worker_count,
+                    "profile_work_item_ids": [str(item["id"]) for item in item_shard],
                     "context_suffix": json.dumps(context, ensure_ascii=False, indent=2),
                 },
+                [str(item["id"]) for item in item_shard],
             )
         self.db.set_run_stage(run_id, stage)
         project_state = self.store.load_state()
@@ -980,10 +985,8 @@ class AutomationEngine:
         for item in completed:
             payload = (item.get("result") or {}).get("payload") or {}
             if payload.get("kind") == "none":
-                inventory.record_profile_result(
-                    list((item.get("payload") or {}).get("profile_assignments") or []),
-                    [],
-                    complete=False,
+                inventory.record_job_profile_result(
+                    item, [], complete=False,
                 )
         failed = next(
             (item for item in jobs if item["status"] in {"failed", "restricted", "cancelled"}),
@@ -1005,14 +1008,8 @@ class AutomationEngine:
                 error=error,
             )
             if failed:
-                inventory.record_profile_result(
-                    list(
-                        (failed.get("payload") or {}).get("profile_assignments") or
-                        (failed.get("payload") or {}).get("profile_seed_urls", [])
-                    ),
-                    [],
-                    complete=False,
-                    error=error,
+                inventory.record_job_profile_result(
+                    failed, [], complete=False, error=error,
                 )
             if profile_state["baseline_status"] == "partial":
                 self.db.add_event(run_id, (failed or {}).get("id"), "profile_baseline_partial", {
@@ -1050,7 +1047,7 @@ class AutomationEngine:
                 for payload in payloads
             ),
         )
-        pending_asset_assignments = inventory.pending_profile_assignments()
+        pending_work_items = inventory.pending_collect_work_items()
         if profile_state["baseline_status"] == "failed":
             error = str(profile_state.get("last_error") or "基础画像没有形成有效 URL")
             self.db.finish_run(run_id, "failed", "profile_baseline_empty")
@@ -1060,7 +1057,7 @@ class AutomationEngine:
             )
             summaries.append(f"前置基础画像失败，漏洞规划未启动：{error}")
             return summaries
-        if profile_state["baseline_status"] == "complete" and pending_asset_assignments:
+        if profile_state["baseline_status"] == "complete" and pending_work_items:
             member = self._profile_member(run)
             if member is None:
                 self.db.finish_run(run_id, "failed", "profile_mapper_missing")
@@ -1070,7 +1067,7 @@ class AutomationEngine:
                 run_id,
                 member,
                 mode="baseline",
-                assignments=pending_asset_assignments,
+                work_items=pending_work_items,
             )
             summaries.append("发现新的待画像资产，继续有界基础画像")
             return summaries
@@ -1082,18 +1079,17 @@ class AutomationEngine:
                 self.db.finish_run(run_id, "failed", "profile_mapper_missing")
                 summaries.append(error)
                 return summaries
-            assigned = list({
-                str(item.get("task_id")): json.dumps(item, ensure_ascii=False, sort_keys=True)
+            assigned_ids = list(dict.fromkeys(
+                str(item)
                 for job in jobs
-                for item in (job.get("payload") or {}).get("profile_assignments", [])
-                if item.get("task_id")
-            }.values())
-            assigned_assignments = [json.loads(item) for item in assigned]
+                for item in (job.get("payload") or {}).get("profile_work_item_ids", [])
+            ))
+            assigned_items = AssetInventory(self.store).work_items_by_ids(assigned_ids)
             scheduled = self._schedule_profile_job(
                 run_id,
                 member,
                 mode="baseline",
-                assignments=pending_asset_assignments or assigned_assignments,
+                work_items=pending_work_items or assigned_items,
             )
             if not scheduled:
                 seeded = self._activate_hunt(run_id)
@@ -1142,22 +1138,13 @@ class AutomationEngine:
         for job in jobs:
             payload = (job.get("result") or {}).get("payload") or {}
             if job.get("status") == "completed" and payload.get("kind") == "none":
-                inventory.record_profile_result(
-                    list((job.get("payload") or {}).get("profile_assignments") or []),
-                    [],
-                    complete=False,
+                inventory.record_job_profile_result(
+                    job, [], complete=False,
                 )
         if failed:
-            inventory.record_profile_result(
-                list(
-                    (failed.get("payload") or {}).get("profile_assignments") or
-                    (failed.get("payload") or {}).get("profile_seed_urls", [])
-                ),
-                [],
-                complete=False,
-                error=error,
+            inventory.record_job_profile_result(
+                failed, [], complete=False, error=error,
             )
-        finish_incremental_profile(self.store, seed_urls, error=error)
         if error:
             event_job = failed or (jobs[-1] if jobs else {})
             self.db.add_event(run_id, event_job.get("id"), "profile_incremental_deferred", {
@@ -1176,44 +1163,53 @@ class AutomationEngine:
         member = self._profile_member(run)
         if member is None:
             return False
-        legacy_pending = pending_incremental_profile_urls(self.store, run_id=run["id"])
-        asset_pending = AssetInventory(self.store).pending_profile_seeds()
+        inventory = AssetInventory(self.store)
+        inventory.ensure_profile_migration()
         # needs_review 复核不新增常驻 Agent：并入既有增量画像通道。
-        # 只并入能解析到画像任务分派的 URL；每 Run 至多一批
-        # （needs_review_attempted_run_id 限流）；达到复核上限的 URL 进入
-        # exhausted 终态。复核次数只对实际进入调度分片的 URL 计数，
-        # 超出分片容量或调度失败都不消耗次数。
-        review_pending = pending_needs_review_urls(self.store, exclude_run_id=str(run["id"]))
-        resolvable_review = []
-        if review_pending:
-            inventory = AssetInventory(self.store)
-            resolvable_review = [
-                url for url in review_pending
-                if inventory.profile_assignments_for_seeds([url])
-            ]
-        pending = list(dict.fromkeys([*legacy_pending, *asset_pending, *resolvable_review]))
+        # 增量与复核的 Run 限流由工作项 last_dispatch_run_id 承担（派发事务
+        # 写入）；复核次数在派发时计数，超出分片容量或调度失败都不消耗。
+        inventory.sync_needs_review_work_items()
+        from .target_profile import profile_policy
+
+        review_cap = int(profile_policy(self.store)["needs_review_max_attempts"])
+        collect_limit = 100
+        collect_pending = inventory.pending_collect_work_items(
+            run_id=str(run["id"]), limit=collect_limit,
+        )
+        # 复核与采集共享本批容量上限：采集占满时不并入复核（与旧合并截断
+        # 语义一致），未进入 Job 的复核 URL 不消耗复核次数。
+        review_capacity = max(0, collect_limit - len(collect_pending))
+        review_pending = (
+            inventory.pending_review_work_items(
+                run_id=str(run["id"]),
+                limit=review_capacity,
+                cap=review_cap,
+            )
+            if review_capacity
+            else []
+        )
+        seen: set[str] = set()
+        pending: list[dict[str, Any]] = []
+        for item in [*collect_pending, *review_pending]:
+            if str(item["id"]) in seen:
+                continue
+            seen.add(str(item["id"]))
+            pending.append(item)
         if not pending:
             return False
-        seed_urls = pending[:100]
         scheduled = self._schedule_profile_job(
             run["id"],
             member,
             mode="incremental",
-            seed_urls=seed_urls,
+            work_items=pending,
         )
         if not scheduled:
-            # 没有可调度的分派时不标记“本 Run 已尝试”，也不消耗复核次数。
             return False
-        scheduled_seeds = set(seed_urls)
-        queued_review = mark_needs_review_queued(
-            self.store,
-            [url for url in resolvable_review if url in scheduled_seeds],
-            run_id=str(run["id"]),
-        )
-        mark_incremental_profile_started(self.store, run["id"])
         self.db.add_event(run["id"], None, "profile_incremental_scheduled", {
-            "seed_urls": seed_urls,
-            "needs_review_recheck_urls": queued_review,
+            "work_item_urls": [str(item["canonical_url"]) for item in pending],
+            "needs_review_recheck_urls": [
+                str(item["canonical_url"]) for item in review_pending
+            ],
         })
         return True
 
@@ -2049,8 +2045,10 @@ class AutomationEngine:
                 )
                 self._finish_bound_direction(bound_direction, payload=payload)
                 if payload.get("kind") == "target_profile_batch" and profile_assignments:
-                    inventory.record_profile_result(
-                        profile_assignments,
+                    # 按 Job 幂等回写：业务结果已投影、任务状态未更新时崩溃，
+                    # 由 recover_profile_postprocess 补齐且不重复计数。
+                    inventory.record_job_profile_result(
+                        job,
                         list(payload.get("records") or []),
                         complete=bool(payload.get("exploration_complete", False)),
                     )
@@ -2077,13 +2075,11 @@ class AutomationEngine:
                     ),
                     confidence=float(payload.get("confidence", 0.5) or 0.5),
                 )
-                added_profile_seeds = queue_incremental_profile_urls(
-                    self.store,
-                    inventory_seeds,
-                )
-                if added_profile_seeds:
+                # 新发现 URL 由 register_discovered_urls 直接创建待办工作项
+                # （_import_rows 内同事务），不再经 JSON 队列二次入队。
+                if inventory_seeds:
                     self.db.add_event(run_id, job["id"], "profile_incremental_urls_queued", {
-                        "seed_urls": added_profile_seeds,
+                        "seed_urls": inventory_seeds,
                     })
                 if job["role"] == "waf_analyst" and waf_assessment_id:
                     waf_status = (

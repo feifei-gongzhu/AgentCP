@@ -10,7 +10,7 @@ from typing import Any, Iterator
 from uuid import uuid4
 
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 
 _ASSET_TERMINAL_STATUSES = (
@@ -226,6 +226,96 @@ _ASSET_SCHEMA_V4 = (
         ON commit_outbox(status, created_at)
     """,
 )
+
+# ---------------------------------------------------------------------------
+# V7：URL 级画像工作项。资产端点（enterprise_assets/profile_tasks）只做身份
+# 与汇总；待办、派发、按用途独立的尝试次数与 Run 栅栏全部由工作项层表达。
+# 逻辑身份 = canonical_url + purpose + task_version（版本仅在明确重评/目标
+# 变更/既有失效机制触发时变化）。多来源不生成多份同用途待办：来源历史记录
+# 在 profile_work_item_sources 子表。
+# ---------------------------------------------------------------------------
+_PROFILE_SCHEMA_V7 = (
+    """
+    CREATE TABLE IF NOT EXISTS profile_work_items (
+        id TEXT PRIMARY KEY,
+        asset_id TEXT NOT NULL REFERENCES enterprise_assets(id) ON DELETE CASCADE,
+        profile_task_id TEXT NOT NULL REFERENCES profile_tasks(id) ON DELETE CASCADE,
+        canonical_url TEXT NOT NULL,
+        purpose TEXT NOT NULL CHECK(purpose IN ('collect','review')),
+        source_reason TEXT NOT NULL CHECK(source_reason IN (
+            'baseline','discovered','incremental','needs_review'
+        )),
+        status TEXT NOT NULL CHECK(status IN (
+            'pending','dispatched','partial','completed','consumed','exhausted','dropped'
+        )),
+        task_version INTEGER NOT NULL DEFAULT 1,
+        attempts INTEGER NOT NULL DEFAULT 0,
+        last_dispatch_run_id TEXT,
+        last_dispatch_job_id TEXT,
+        last_error TEXT,
+        completed_at TEXT,
+        legacy_source INTEGER NOT NULL DEFAULT 0 CHECK(legacy_source IN (0,1)),
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        UNIQUE(canonical_url, purpose, task_version)
+    )
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_profile_work_items_status
+        ON profile_work_items(purpose, status, attempts, last_dispatch_run_id)
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_profile_work_items_asset
+        ON profile_work_items(asset_id, status)
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS profile_work_item_sources (
+        work_item_id TEXT NOT NULL REFERENCES profile_work_items(id) ON DELETE CASCADE,
+        source_reason TEXT NOT NULL CHECK(source_reason IN (
+            'baseline','discovered','incremental','needs_review'
+        )),
+        first_seen_at TEXT NOT NULL,
+        last_seen_at TEXT NOT NULL,
+        PRIMARY KEY(work_item_id, source_reason)
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS profile_dispatches (
+        id TEXT PRIMARY KEY,
+        work_item_id TEXT NOT NULL REFERENCES profile_work_items(id) ON DELETE CASCADE,
+        run_id TEXT,
+        job_id TEXT NOT NULL,
+        dispatched_at TEXT NOT NULL,
+        counted INTEGER NOT NULL DEFAULT 1 CHECK(counted IN (0,1)),
+        UNIQUE(job_id, work_item_id)
+    )
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_profile_dispatches_item
+        ON profile_dispatches(work_item_id, dispatched_at)
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS profile_postprocess_receipts (
+        job_id TEXT PRIMARY KEY,
+        processed_at TEXT NOT NULL,
+        summary_json TEXT NOT NULL DEFAULT '{}'
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS profile_migration_meta (
+        name TEXT PRIMARY KEY,
+        version INTEGER NOT NULL,
+        completed_at TEXT NOT NULL,
+        input_sha256 TEXT,
+        imported INTEGER NOT NULL DEFAULT 0,
+        merged INTEGER NOT NULL DEFAULT 0,
+        skipped INTEGER NOT NULL DEFAULT 0,
+        conflicts INTEGER NOT NULL DEFAULT 0,
+        report_json TEXT
+    )
+    """,
+)
+
 
 _COMMIT_SCHEMA_V6 = (
     """
@@ -590,6 +680,11 @@ class ControlDatabase:
                     db.execute(statement)
                 self._migrate_commit_schema_v6(db, current_version)
                 self._validate_commit_schema_v6(db)
+                # V7 只做 DDL（表/列/索引/约束）；旧 JSON 队列的数据导入由
+                # 应用层 AssetInventory.migrate_legacy_profile_state 完成，
+                # 避免数据库初始化反向依赖高层画像模块。
+                for statement in _PROFILE_SCHEMA_V7:
+                    db.execute(statement)
                 foreign_key_errors = db.execute("PRAGMA foreign_key_check").fetchall()
                 if foreign_key_errors:
                     raise RuntimeError(
@@ -1046,6 +1141,86 @@ class ControlDatabase:
             )
             self._event(db, run_id, job_id, "job_queued", {"stage": stage, "member": member_name})
             db.execute("COMMIT")
+        return job_id
+
+    def enqueue_profile_job_atomic(
+        self,
+        run_id: str,
+        stage: str,
+        member_name: str,
+        role: str,
+        payload: dict[str, Any],
+        work_item_ids: list[str],
+        max_attempts: int = 3,
+        wave: int | None = None,
+    ) -> str:
+        """Create one profile job and mark its work items dispatched atomically.
+
+        工作项置 dispatched、尝试次数 +1、派发回执与 Job 插入在同一事务：
+        不出现“记了派发但 Job 没建”，也不出现“Job 建了但工作项仍 pending
+        被第二个调度器再次分配”。尝试次数只在派发回执为新插入时递增——
+        同一派发的 Job 技术重试与结果重放不重复扣业务预算；进程重启后恢复
+        同一派发（同 job_id）也不会再次计数。
+        """
+        job_id = f"J-{uuid4().hex[:12]}"
+        now = _now()
+        with self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            try:
+                run = db.execute(
+                    "SELECT status,control_version,wave FROM automation_runs WHERE id=?",
+                    (run_id,),
+                ).fetchone()
+                if run is None or run["status"] != "running":
+                    raise RuntimeError(f"运行 {run_id} 不接受新任务。")
+                marker = db.execute(
+                    "SELECT 1 FROM profile_migration_meta WHERE name='legacy_profile_state_v1'",
+                ).fetchone()
+                if marker is None:
+                    raise RuntimeError(
+                        "画像队列迁移未完成：请先完成 legacy JSON 导入"
+                        "（AssetInventory.ensure_profile_migration）再派发画像任务"
+                    )
+                db.execute(
+                    """
+                    INSERT INTO jobs(
+                        id,run_id,stage,member_name,role,payload_json,status,attempts,max_attempts,
+                        control_version,wave,created_at,updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, 'queued', 0, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        job_id, run_id, stage, member_name, role,
+                        json.dumps(payload, ensure_ascii=False), max_attempts,
+                        int(run["control_version"]), int(wave or run["wave"]), now, now,
+                    ),
+                )
+                for work_item_id in work_item_ids:
+                    inserted = db.execute(
+                        """
+                        INSERT OR IGNORE INTO profile_dispatches(
+                            id,work_item_id,run_id,job_id,dispatched_at
+                        ) VALUES (?,?,?,?,?)
+                        """,
+                        (f"PD-{uuid4().hex[:12]}", work_item_id, run_id, job_id, now),
+                    )
+                    if inserted.rowcount == 1:
+                        db.execute(
+                            """
+                            UPDATE profile_work_items
+                            SET status='dispatched',attempts=attempts+1,
+                                last_dispatch_run_id=?,last_dispatch_job_id=?,updated_at=?
+                            WHERE id=?
+                            """,
+                            (run_id, job_id, now, work_item_id),
+                        )
+                self._event(db, run_id, job_id, "job_queued", {"stage": stage, "member": member_name})
+                self._event(db, run_id, job_id, "profile_work_dispatched", {
+                    "work_item_count": len(work_item_ids),
+                })
+                db.execute("COMMIT")
+            except Exception:
+                db.execute("ROLLBACK")
+                raise
         return job_id
 
     def register_direction(
