@@ -24,6 +24,8 @@ from .agent_compose import (
 from . import diagnostics
 from . import secret_redact
 from . import worker_payload
+from .cancellable_process import ProcessCancelled, ProcessTimeout, run_cancellable_process
+from .docker_command import bind_mount, docker_base_args
 from .provider_auth import anthropic_secret_env_var, normalize_base_url, resolve_anthropic_auth_mode
 from .schemas import VALID_WORKER_KINDS
 from .platform_process import process_group_options, terminate_process_tree
@@ -406,49 +408,38 @@ class LocalDockerRuntime:
         (workspace_root / ".sorne-work").mkdir(exist_ok=True)
         command = [
             find_docker_binary(),
-            "run", "--rm", "--init",
-            "--network", str(self.config.extra.get("network") or "bridge"),
-            "--cpus", str(self.config.extra.get("cpus") or "2"),
-            "--memory", str(self.config.extra.get("memory") or "2g"),
-            "--pids-limit", str(self.config.extra.get("pids_limit") or 256),
-            "--security-opt", "no-new-privileges:true",
-            "--cap-drop", "ALL",
-            "-v", f"{workspace_root}:/workspace:{mount_mode}",
-            "-v", f"{evidence_root}:/workspace/evidence:{mount_mode}",
-            "-v", f"{work_root}:/workspace/.sorne-work:{mount_mode}",
+            *docker_base_args(
+                network=str(self.config.extra.get("network") or "bridge"),
+                cpus=self.config.extra.get("cpus") or "2",
+                memory=self.config.extra.get("memory") or "2g",
+                pids_limit=self.config.extra.get("pids_limit") or 256,
+            ),
+            "-v", bind_mount(workspace_root, "/workspace", mount_mode),
+            "-v", bind_mount(evidence_root, "/workspace/evidence", mount_mode),
+            "-v", bind_mount(work_root, "/workspace/.sorne-work", mount_mode),
             "-w", "/workspace",
         ]
         if self.profile.target_path is not None:
-            command.extend(["-v", f"{self.profile.target_path}:/target:ro"])
+            command.extend(["-v", bind_mount(self.profile.target_path, "/target", "ro")])
         command.extend([
             "--entrypoint", "/bin/sh",
             image,
             "-lc", shell_command,
         ])
-        process = subprocess.Popen(
-            command,
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            **process_group_options(),
-        )
-        while True:
-            try:
-                stdout, stderr = process.communicate(timeout=0.2)
-                break
-            except subprocess.TimeoutExpired:
-                pass
-            if self.cancel_check():
-                _terminate(process)
-                raise LocalDockerError("任务已被调度器取消")
-            if time.monotonic() >= deadline:
-                _terminate(process)
-                raise LocalDockerError(f"本地 Docker 模型执行超时: {self.timeout}s")
+        try:
+            completed = run_cancellable_process(
+                command,
+                timeout_seconds=max(1, int(deadline - time.monotonic())),
+                cancel_check=self.cancel_check,
+                env=None,
+            )
+        except ProcessCancelled as exc:
+            raise LocalDockerError("任务已被调度器取消") from exc
+        except ProcessTimeout as exc:
+            raise LocalDockerError(f"本地 Docker 模型执行超时: {self.timeout}s") from exc
+        stdout, stderr = completed.stdout, completed.stderr
         combined = (
-            f"exit_code={process.returncode}\n"
+            f"exit_code={completed.returncode}\n"
             f"stdout:\n{stdout}\n"
             f"stderr:\n{stderr}"
         )
@@ -476,22 +467,22 @@ class LocalDockerRuntime:
         work_root.mkdir(parents=True, exist_ok=True)
         command = [
             find_docker_binary(),
-            "run", "--rm", "--init", "-i",
-            "--network", str(self.config.extra.get("network") or "bridge"),
-            "--cpus", str(self.config.extra.get("cpus") or "2"),
-            "--memory", str(self.config.extra.get("memory") or "2g"),
-            "--pids-limit", str(self.config.extra.get("pids_limit") or 256),
-            "--security-opt", "no-new-privileges:true",
-            "--cap-drop", "ALL",
-            "-v", f"{workspace_root}:/workspace:{mount_mode}",
-            "-v", f"{evidence_root}:/workspace/evidence:{mount_mode}",
-            "-v", f"{work_root}:/workspace/.sorne-work:{mount_mode}",
-            "-v", f"{runtime_root}:/agent-state:rw",
-            "-v", f"{input_root}:/agent-input:ro",
+            *docker_base_args(
+                network=str(self.config.extra.get("network") or "bridge"),
+                cpus=self.config.extra.get("cpus") or "2",
+                memory=self.config.extra.get("memory") or "2g",
+                pids_limit=self.config.extra.get("pids_limit") or 256,
+                interactive=True,
+            ),
+            "-v", bind_mount(workspace_root, "/workspace", mount_mode),
+            "-v", bind_mount(evidence_root, "/workspace/evidence", mount_mode),
+            "-v", bind_mount(work_root, "/workspace/.sorne-work", mount_mode),
+            "-v", bind_mount(runtime_root, "/agent-state", "rw"),
+            "-v", bind_mount(input_root, "/agent-input", "ro"),
             "-w", "/workspace",
         ]
         if self.profile.target_path is not None:
-            command.extend(["-v", f"{self.profile.target_path}:/target:ro"])
+            command.extend(["-v", bind_mount(self.profile.target_path, "/target", "ro")])
 
         # docker CLI 进程环境保持宿主机原样：~/.docker/config.json 的
         # currentContext（desktop-linux → ~/.docker/run/docker.sock）依赖
@@ -635,21 +626,38 @@ class LocalDockerRuntime:
         )
         if self.profile.provider == "claude":
             return self._consume_claude_stream(process, prompt)
+        # 非 claude 路径走共享可取消/超时 runner（复用同一进程，仅接管等待
+        # 循环：取消、超时、进程树清理与有界输出消费行为与 drivers 一致）。
+        stdout_lines: list[str] = []
+        stderr_lines: list[str] = []
+
+        def collect(stream: Any, sink: list[str]) -> None:
+            if stream is not None:
+                retained = 0
+                for line in iter(stream.readline, ""):
+                    if retained < 8 * 1024 * 1024:
+                        sink.append(line)
+                        retained += len(line)
+
+        readers = [
+            threading.Thread(target=collect, args=(process.stdout, stdout_lines), daemon=True),
+            threading.Thread(target=collect, args=(process.stderr, stderr_lines), daemon=True),
+        ]
+        for reader in readers:
+            reader.start()
         deadline = time.monotonic() + self.timeout
-        stdout = ""
-        stderr = ""
-        while True:
-            try:
-                stdout, stderr = process.communicate(timeout=0.2)
-                break
-            except subprocess.TimeoutExpired:
-                pass
+        while process.poll() is None:
             if self.cancel_check():
                 _terminate(process)
                 raise LocalDockerError("任务已被调度器取消")
             if time.monotonic() >= deadline:
                 _terminate(process)
                 raise LocalDockerError(f"本地 Docker 模型执行超时: {self.timeout}s")
+            time.sleep(0.2)
+        for reader in readers:
+            reader.join(timeout=2)
+        stdout = "".join(stdout_lines)
+        stderr = "".join(stderr_lines)
         if process.returncode != 0:
             raise LocalDockerError(
                 "本地 Docker Worker 执行失败\n"

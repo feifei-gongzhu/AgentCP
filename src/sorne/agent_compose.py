@@ -747,32 +747,20 @@ class AgentComposeRuntime:
 
     def _execute_json(self, args: list[str], timeout: int) -> dict[str, Any]:
         command = [str(self.binary), *args]
-        process = subprocess.Popen(
-            command,
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            **process_group_options(),
-        )
-        deadline = time.monotonic() + max(1, timeout)
-        stdout = ""
-        stderr = ""
-        while True:
-            try:
-                stdout, stderr = process.communicate(timeout=0.2)
-                break
-            except subprocess.TimeoutExpired:
-                pass
-            if self.cancel_check():
-                _terminate_process(process)
-                raise AgentComposeError("agent-compose 运行已被 Sorne 控制器取消")
-            if time.monotonic() >= deadline:
-                _terminate_process(process)
-                raise AgentComposeError(f"agent-compose 执行超时: {timeout}s")
-        if process.returncode != 0:
+        try:
+            completed = run_cancellable_process(
+                command,
+                timeout_seconds=max(1, timeout),
+                cancel_check=self.cancel_check,
+            )
+        except ProcessCancelled as exc:
+            raise AgentComposeError("agent-compose 运行已被 Sorne 控制器取消") from exc
+        except ProcessTimeout as exc:
+            raise AgentComposeError(f"agent-compose 执行超时: {timeout}s") from exc
+        stdout, stderr = completed.stdout, completed.stderr
+        if completed.returncode != 0:
             raise AgentComposeError(
-                f"agent-compose 命令失败 returncode={process.returncode}: "
+                f"agent-compose 命令失败 returncode={completed.returncode}: "
                 + (stderr.strip() or stdout.strip())[:3000]
             )
         try:

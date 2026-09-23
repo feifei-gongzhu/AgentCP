@@ -6,8 +6,6 @@ import re
 import shutil
 import subprocess
 import tempfile
-import threading
-import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
@@ -24,12 +22,18 @@ from .agent_compose import (
 from . import claude_events
 from . import secret_redact
 from . import worker_payload
+from .cancellable_process import (
+    ProcessCancelled,
+    ProcessTimeout,
+    run_cancellable_process,
+)
+from .docker_command import bind_mount, docker_base_args
 from .local_docker import LocalDockerError, LocalDockerRuntime
 from .provider_auth import normalize_base_url, resolve_anthropic_auth_mode
 from .runtime_config import canonical_runtime_mode
 from .schemas import VALID_WORKER_KINDS
 from .store import ROOT
-from .platform_process import process_group_options, terminate_process_tree
+from .platform_process import terminate_process_tree
 
 
 OUTPUT_SCHEMA = Path(__file__).resolve().parent / "worker_output_schema.json"
@@ -254,104 +258,34 @@ class CodexCliDriver(BaseDriver):
         cwd_override: Path | None = None,
         line_callback: Callable[[str], None] | None = None,
     ) -> subprocess.CompletedProcess[str]:
-        process_options = process_group_options()
+        # 共享可取消/超时执行（cancellable_process）；本包装只负责把
+        # FileNotFoundError/OSError/取消/超时翻译成 DriverError 的可操作文案。
+        executable = cmd[0] if cmd else "?"
         try:
-            process = subprocess.Popen(
+            return run_cancellable_process(
                 cmd,
-                stdin=subprocess.PIPE if input_text is not None else None,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                bufsize=1,
+                timeout_seconds=self.timeout,
+                cancel_check=self.cancel_check,
                 env=env_override or _merged_env(self.config),
                 cwd=str(cwd_override) if cwd_override else None,
-                **process_options,
+                input_text=input_text,
+                line_callback=line_callback,
             )
         except FileNotFoundError as exc:
             # The CLI binary is not on the launching service's PATH. This is an
             # environment/config problem, not a model failure, so retrying is
             # pointless — surface an actionable message instead of a bare Errno.
-            executable = cmd[0] if cmd else "?"
             raise DriverError(
                 f"未找到本地可执行文件 '{executable}'：请确认已安装该 CLI 且它在启动 "
                 "Sorne 服务的进程 PATH 中（GUI/后台方式启动时常缺少 /opt/homebrew/bin "
                 "等路径），或改用“本地 Docker”运行模式。"
             ) from exc
         except OSError as exc:
-            executable = cmd[0] if cmd else "?"
             raise DriverError(f"无法启动本地可执行文件 '{executable}': {exc}") from exc
-        stdout_lines: list[str] = []
-        stderr_lines: list[str] = []
-        def read_stdout() -> None:
-            if process.stdout is None:
-                return
-            retained = 0
-            for line in iter(process.stdout.readline, ""):
-                if retained < 8 * 1024 * 1024:
-                    stdout_lines.append(line)
-                    retained += len(line)
-                if line_callback is not None:
-                    try:
-                        line_callback(line)
-                    except Exception:
-                        continue
-
-        def read_stderr() -> None:
-            if process.stderr is None:
-                return
-            retained = 0
-            for line in iter(process.stderr.readline, ""):
-                if retained < 1024 * 1024:
-                    stderr_lines.append(line)
-                    retained += len(line)
-
-        reader_threads = [
-            threading.Thread(target=read_stdout, daemon=True),
-            threading.Thread(target=read_stderr, daemon=True),
-        ]
-        for reader in reader_threads:
-            reader.start()
-
-        prompt_delivery_failed = threading.Event()
-        writer: threading.Thread | None = None
-        if input_text is not None and process.stdin is not None:
-            def write_stdin() -> None:
-                try:
-                    assert process.stdin is not None
-                    process.stdin.write(input_text)
-                    process.stdin.close()
-                except (BrokenPipeError, OSError):
-                    prompt_delivery_failed.set()
-                    try:
-                        process.stdin.close()
-                    except (BrokenPipeError, OSError):
-                        pass
-
-            writer = threading.Thread(target=write_stdin, daemon=True)
-            writer.start()
-        deadline = time.monotonic() + self.timeout
-        while process.poll() is None:
-            if self.cancel_check():
-                _terminate_process_tree(process)
-                raise DriverError("任务已被调度器取消")
-            if time.monotonic() >= deadline:
-                _terminate_process_tree(process)
-                raise DriverError(f"模型执行超时: {self.timeout}s")
-            time.sleep(0.2)
-        if writer is not None:
-            writer.join(timeout=2)
-        for reader in reader_threads:
-            reader.join(timeout=2)
-        stdout = "".join(stdout_lines)
-        stderr = "".join(stderr_lines)
-        if prompt_delivery_failed.is_set() and process.returncode == 0:
-            return subprocess.CompletedProcess(
-                cmd,
-                1,
-                stdout,
-                "模型子进程在接收 Prompt 前已退出\n" + stderr,
-            )
-        return subprocess.CompletedProcess(cmd, process.returncode, stdout, stderr)
+        except ProcessCancelled as exc:
+            raise DriverError("任务已被调度器取消") from exc
+        except ProcessTimeout as exc:
+            raise DriverError(f"模型执行超时: {self.timeout}s") from exc
 
 class ClaudeCliDriver(BaseDriver):
     def run(self, prompt: str) -> dict[str, Any]:
@@ -591,30 +525,19 @@ class ContainerWorkerDriver(CodexCliDriver):
         evidence_path.mkdir(parents=True, exist_ok=True)
         cmd = [
             self.config.command or find_docker_binary(),
-            "run",
-            "--rm",
-            "--init",
-            "--network",
-            network,
-            "--cpus",
-            str(self.config.extra.get("cpus", "2")),
-            "--memory",
-            str(self.config.extra.get("memory", "2g")),
-            "--pids-limit",
-            str(self.config.extra.get("pids_limit", 256)),
-            "--security-opt",
-            "no-new-privileges:true",
-            "--cap-drop",
-            "ALL",
-            "-v",
-            f"{workspace_path}:/workspace:{mount_mode}",
-            "-v",
-            f"{evidence_path}:/workspace/evidence:{mount_mode}",
+            *docker_base_args(
+                network=network,
+                cpus=self.config.extra.get("cpus", "2"),
+                memory=self.config.extra.get("memory", "2g"),
+                pids_limit=self.config.extra.get("pids_limit", 256),
+            ),
+            "-v", bind_mount(workspace_path, "/workspace", mount_mode),
+            "-v", bind_mount(evidence_path, "/workspace/evidence", mount_mode),
             "-w",
             "/workspace",
         ]
         if target_path is not None:
-            cmd.extend(["-v", f"{target_path}:/target:ro"])
+            cmd.extend(["-v", bind_mount(target_path, "/target", "ro")])
         merged = _merged_env(self.config)
         pass_env = self.config.extra.get("pass_env", [])
         if not isinstance(pass_env, list):
