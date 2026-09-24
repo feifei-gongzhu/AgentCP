@@ -3,58 +3,76 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
-  <meta name="color-scheme" content="light">
-  <title>Sorne · 安全研究控制平面</title>
-  <link rel="stylesheet" href="/frontend/styles.css?v=4.0">
-  <link rel="stylesheet" href="/frontend/extras.css?v=4.0">
+  <meta name="color-scheme" content="dark">
+  <title>Sorne 0.0.4 · 安全研究控制平面</title>
+  <link rel="stylesheet" href="/frontend/styles.css?v=5.0">
 </head>
 <body>
   <div class="app">
+    <!-- ================= 侧边栏 ================= -->
     <aside class="sidebar">
-      <div class="brand"><span class="brand-mark">A</span><div><strong>Sorne</strong><small>安全研究控制平面</small></div></div>
-      <nav aria-label="控制台导航">
-        <a class="nav-item active" data-route-link="hub" href="#hub">任务中心</a>
-        <a class="nav-item" data-route-link="config" href="#config">项目配置</a>
-        <a class="nav-item" data-route-link="run" href="#run">执行与结果</a>
+      <div class="brand">
+        <span class="brand-mark" aria-hidden="true">S</span>
+        <div class="brand-text"><strong>Sorne</strong><small>安全研究控制平面</small></div>
+        <span class="brand-version">0.0.4</span>
+      </div>
+
+      <button id="newTaskButton" class="button primary sidebar-new" type="button">
+        <svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M8 3v10M3 8h10"/></svg>
+        新建审计任务
+      </button>
+
+      <div class="project-switch" id="projectSwitch">
+        <label class="switch-label" for="projectSelect">当前项目</label>
+        <select id="projectSelect" aria-label="选择项目"></select>
+      </div>
+
+      <nav class="nav" aria-label="工作台导航">
+        <a class="nav-item" data-route-link="projects" href="#projects"><i class="nav-icon" data-icon="projects"></i>项目中心</a>
+        <div class="nav-group" id="projectNav" hidden>
+          <span class="nav-group-label">工作台</span>
+          <a class="nav-item" data-route-link="overview" href="#overview"><i class="nav-icon" data-icon="overview"></i>总览</a>
+          <a class="nav-item" data-route-link="findings" href="#findings"><i class="nav-icon" data-icon="findings"></i>发现<span class="nav-count" id="navFindingsCount" hidden></span></a>
+          <a class="nav-item" data-route-link="directions" href="#directions"><i class="nav-icon" data-icon="directions"></i>方向<span class="nav-count" id="navDirectionsCount" hidden></span></a>
+          <a class="nav-item" data-route-link="assets" href="#assets"><i class="nav-icon" data-icon="assets"></i>资产与画像</a>
+          <a class="nav-item" data-route-link="runs" href="#runs"><i class="nav-icon" data-icon="runs"></i>运行与诊断</a>
+          <a class="nav-item" data-route-link="settings" href="#settings"><i class="nav-icon" data-icon="settings"></i>项目设置</a>
+        </div>
       </nav>
+
       <div class="sidebar-foot">
         <div class="pulse"><i></i><span id="connectionText">连接中</span></div>
-        <small>授权策略固定：authorized / *</small>
+        <small>授权策略固定 · authorized / *</small>
       </div>
     </aside>
 
+    <!-- ================= 主内容 ================= -->
     <main class="main">
       <header class="topbar">
         <div class="topbar-title">
-          <p id="routeEyebrow" class="eyebrow">安全研究控制平面</p>
-          <h1 id="projectTitle">任务中心</h1>
+          <p id="routeEyebrow" class="eyebrow">Sorne 工作台</p>
+          <h1 id="pageTitle">项目中心</h1>
         </div>
-        <div class="top-actions">
-          <label class="project-picker" data-route-action="hub">项目
-            <select id="projectSelect" aria-label="选择项目"></select>
-          </label>
-          <button id="enterProjectButton" data-route-action="hub" class="button secondary" type="button">进入项目</button>
-          <button id="newTaskButton" data-route-action="hub" class="button primary" type="button">新建审计任务</button>
-          <button id="returnHubButton" data-route-action="config run" class="button ghost" type="button">返回任务中心</button>
-          <button id="backConfigButton" data-route-action="run" class="button ghost" type="button">返回项目配置</button>
-          <button id="refreshButton" data-route-action="config run" class="button ghost" type="button">立即刷新</button>
-          <button id="viewRunButton" data-route-action="config" class="button secondary" type="button" hidden>查看运行过程</button>
-          <button id="startAuditButton" data-route-action="config" class="button primary" type="button">开始审计</button>
-          <span id="gateBadge" data-route-action="config run" class="status-badge neutral">读取中</span>
+        <div class="top-actions" id="topActions">
+          <span id="gateBadge" class="badge tone-muted">读取中</span>
+          <span id="runBadge" class="badge tone-muted">idle</span>
+          <button id="refreshButton" class="button ghost" type="button">刷新</button>
         </div>
       </header>
 
-      <!-- ============ 任务中心 ============ -->
-      <section id="task-hub" data-view="hub" class="page">
+      <div class="content">
+
+      <!-- ============ 项目中心 ============ -->
+      <section id="view-projects" data-view="projects" class="page">
         <div class="stat-strip" aria-label="长期质量概览">
-          <div class="stat"><span>长期误报率</span><strong id="hubFalsePositiveRate">暂无样本</strong></div>
-          <div class="stat"><span>已人工复核</span><strong id="hubReviewedCount">0</strong></div>
-          <div class="stat"><span>累计驳斥</span><strong id="hubRefutedCount">0</strong></div>
-          <div class="stat"><span>样本可信度</span><strong id="hubSampleQuality">样本严重不足</strong></div>
+          <div class="stat-card"><span class="stat-label">长期误报率</span><strong class="stat-value" id="hubFalsePositiveRate">暂无样本</strong><small class="stat-note">跨项目人工裁决账本</small></div>
+          <div class="stat-card"><span class="stat-label">已人工复核</span><strong class="stat-value" id="hubReviewedCount">0</strong><small class="stat-note">累计</small></div>
+          <div class="stat-card"><span class="stat-label">累计驳斥</span><strong class="stat-value" id="hubRefutedCount">0</strong><small class="stat-note">误报结论</small></div>
+          <div class="stat-card"><span class="stat-label">样本可信度</span><strong class="stat-value" id="hubSampleQuality">样本严重不足</strong><small class="stat-note">样本越多结论越稳</small></div>
         </div>
         <div class="panel">
           <div class="panel-head">
-            <div><h2>项目列表</h2><p class="subtle">点击行进入项目配置；待审批项目会优先标记。删除操作在每行末尾。</p></div>
+            <div><h2>项目列表</h2><p class="subtle">点击行进入项目工作台；待审批项目会优先标记。删除在每行末尾。</p></div>
           </div>
           <div class="table-wrap">
             <table class="data-table project-table">
@@ -68,12 +86,365 @@
         </div>
       </section>
 
-      <!-- ============ 项目配置 ============ -->
-      <section id="target-setup" data-view="config" class="page" hidden>
+      <!-- ============ 总览 ============ -->
+      <section id="view-overview" data-view="overview" class="page" hidden>
+
+        <article id="gateApprovalCard" class="gate-banner" role="alert" aria-live="assertive" hidden>
+          <div class="gate-banner-head">
+            <div class="gate-banner-title">
+              <span class="gate-warning-dot" aria-hidden="true"></span>
+              <div><p class="eyebrow">HARD GATE · 需要人工批准</p><h2>强制门禁：执行已暂停</h2></div>
+            </div>
+            <span id="gateApprovalRunBadge" class="badge tone-warn">awaiting_approval</span>
+          </div>
+          <p id="gateApprovalReason" class="gate-banner-reason">正在读取控制器评估…</p>
+          <div class="gate-metrics" aria-label="门禁客观指标">
+            <div><span>当前阶段</span><strong id="gateApprovalPhase">—</strong></div>
+            <div><span>已用时间</span><strong id="gateApprovalElapsed">0 min</strong></div>
+            <div><span>资产 / 漏洞</span><strong id="gateApprovalAssets">0 / 0</strong></div>
+            <div><span>敏感线索</span><strong id="gateApprovalHighRisk">0</strong></div>
+            <div><span>上次发现</span><strong id="gateApprovalDiscovery">无</strong></div>
+            <div><span>运行状态</span><strong id="gateApprovalRun">无运行</strong></div>
+          </div>
+          <div class="gate-banner-footer">
+            <label class="field">审批备注（可选）
+              <textarea id="gateApprovalNote" rows="2" placeholder="可补充判断；留空时系统会自动写入以上客观指标"></textarea>
+            </label>
+            <div class="gate-banner-actions">
+              <button id="gateContinueButton" class="button primary" type="button">批准继续</button>
+              <button id="gateStopButton" class="button danger" type="button">止损结束</button>
+            </div>
+          </div>
+          <p class="field-note">批准继续会解除门禁并自动恢复已暂停运行；止损结束会解除门禁并终止对应运行。</p>
+        </article>
+
+        <div id="runFailure" class="run-failure" role="alert" hidden></div>
+
+        <div class="run-statusbar" id="runStatusbar">
+          <div class="sb-block"><span>当前阶段</span><strong id="phaseValue">—</strong></div>
+          <div class="sb-block"><span>已用时间</span><strong id="sbElapsed">—</strong></div>
+          <div class="sb-block sb-grow"><span>当前 Run</span><strong id="runSummary" class="mono">暂无自动化运行</strong></div>
+          <div class="sb-actions">
+            <label class="sb-field" title="团队">团队<input id="teamInput" value="default"></label>
+            <label class="sb-field" title="整轮同时运行的 Worker 数">并发<input id="workersInput" type="number" min="1" value="5"></label>
+            <label class="sb-field" title="超时（秒）">超时<input id="timeoutInput" type="number" min="30" max="3600" value="3600"></label>
+            <button id="launchButton" class="button primary" type="button">启动新一轮审计</button>
+            <button id="cancelButton" class="button danger" type="button" disabled>取消运行</button>
+          </div>
+        </div>
+
+        <div class="stat-strip" aria-label="核心指标">
+          <div class="stat-card"><span class="stat-label">活跃授权资产</span><strong class="stat-value" id="assetMetric">0</strong><small class="stat-note" id="assetMetricNote">范围内未失效端点</small></div>
+          <div class="stat-card"><span class="stat-label">事实</span><strong class="stat-value" id="factMetric">0</strong><small class="stat-note" id="factMetricNote">已提交到黑板</small></div>
+          <div class="stat-card tone-danger"><span class="stat-label">漏洞</span><strong class="stat-value" id="vulnMetric">0</strong><small class="stat-note" id="vulnMetricNote">Guardian 已验证</small></div>
+          <div class="stat-card"><span class="stat-label">攻击面覆盖</span><strong class="stat-value" id="coverageMetric">0%</strong><small class="stat-note" id="coverageMetricNote">0/10 已观察</small></div>
+        </div>
+
+        <div class="grid-2">
+          <div class="panel context-panel">
+            <div class="panel-head"><h2>执行上下文</h2><span id="currentTaskBadge" class="chip">—</span></div>
+            <div class="context-row"><span class="context-label">当前任务</span><strong id="currentTask">读取项目状态…</strong></div>
+            <div class="context-row"><span class="context-label">业务目标</span><span id="goalText" class="subtle">正在连接中央黑板</span></div>
+            <div class="context-row"><span class="context-label">控制器决策</span><strong id="decisionValue">—</strong><small id="gateReason" class="subtle">尚无控制器评估</small></div>
+            <div class="context-row"><span class="context-label">本轮进度</span>
+              <div class="progress"><i id="runProgressBar"></i></div>
+              <small id="runProgressText" class="subtle">暂无 Job</small>
+            </div>
+          </div>
+
+          <details id="directivePanel" class="panel directive-panel" open>
+            <summary><span><strong>项目所有者指令 · 最高优先级</strong><small id="interventionScopeNote">项目级持续生效 · 高于全部 Agent 自动规划</small></span></summary>
+            <div class="directive-form">
+              <div class="field-row">
+                <label class="field">干预类型
+                  <select id="interventionType">
+                    <option value="supplement">补充约束与信息</option>
+                    <option value="redirect">修正当前方向</option>
+                    <option value="evidence_correction">纠正证据或事实</option>
+                    <option value="metacog_review">要求元认知复盘</option>
+                  </select>
+                </label>
+                <label class="field">目标（可选）<input id="hintTarget" placeholder="模块、接口或文件"></label>
+                <label class="field">内部优先级<input id="hintPriority" type="number" min="0" max="10" value="10"></label>
+              </div>
+              <label class="field">补充内容
+                <textarea id="hintContent" rows="2" placeholder="例如：停止重复枚举子域；下一轮优先核对已有证据中的鉴权边界"></textarea>
+              </label>
+              <div class="directive-actions"><button id="hintButton" class="button secondary" type="button">提交最高优先级指令</button></div>
+            </div>
+          </details>
+        </div>
+
+        <div class="panel">
+          <div class="panel-head"><h2>攻击面覆盖</h2><span class="chip tone-info" id="coverageSummaryChip">0/0</span></div>
+          <div id="coverageList" class="coverage-list"></div>
+        </div>
+
+        <div class="panel">
+          <div class="panel-head"><h2>最近事件</h2><a class="text-link" href="#runs">查看全部 →</a></div>
+          <div id="recentEvents" class="event-list compact"></div>
+        </div>
+      </section>
+
+      <!-- ============ 发现 ============ -->
+      <section id="view-findings" data-view="findings" class="page" hidden>
+        <div class="panel results-panel">
+          <div class="tab-nav" role="tablist" aria-label="业务结果">
+            <button class="tab active" data-tab="vulns" type="button" role="tab">漏洞 <em id="vulnerabilitiesCount">0</em></button>
+            <button class="tab" data-tab="leads" type="button" role="tab">风险线索 <em id="riskLeadsCount">0</em></button>
+            <button class="tab" data-tab="surface" type="button" role="tab">攻击面 <em id="attackIntelCount">0</em></button>
+          </div>
+
+          <div class="tab-panel" data-tab-panel="vulns" role="tabpanel">
+            <div class="quality-strip">
+              <div><span>系统漏洞</span><strong id="qualitySystemVulns">0</strong></div>
+              <div><span>已复核</span><strong id="qualityReviewed">0</strong></div>
+              <div><span>人工认可</span><strong id="qualityConfirmed">0</strong></div>
+              <div><span>同源合并</span><strong id="qualitySameRoot">0</strong></div>
+              <div><span>人工驳斥</span><strong id="qualityRefuted">0</strong></div>
+              <div><span>长期误报率</span><strong id="qualityFalsePositiveRate">—</strong></div>
+            </div>
+            <p class="panel-note"><span id="qualitySample">样本 0</span> · <span id="qualityRuleSuggestions">尚未形成重复误报规则建议。</span></p>
+            <div class="master-detail">
+              <div id="vulnList" class="item-list" role="listbox" aria-label="系统漏洞池"></div>
+              <div class="detail-panel" id="vulnDetail">
+                <div id="vulnDetailInfo" class="detail-info"><div class="empty-state">选择左侧漏洞查看完整信息。</div></div>
+                <div id="reviewBox" class="review-box" hidden>
+                  <h3>人工漏洞裁决 <span id="reviewFindingName" class="mono"></span></h3>
+                  <div class="field-row">
+                    <label class="field">人工动作
+                      <select id="reviewAction">
+                        <option value="accepted">认可系统判断</option>
+                        <option value="adjusted">漏洞成立，调整等级</option>
+                        <option value="same_root">标记为同源漏洞</option>
+                        <option value="refuted">驳斥为误报</option>
+                        <option value="reclassified">降级重新分类</option>
+                        <option value="retest_requested">要求重新验证</option>
+                      </select>
+                    </label>
+                    <label class="field">最终分类
+                      <select id="reviewClassification">
+                        <option value="vulnerability">漏洞</option>
+                        <option value="same_root_vulnerability">同源漏洞</option>
+                        <option value="risk_lead">风险线索</option>
+                        <option value="attack_surface">攻击面</option>
+                        <option value="inconclusive">证据不足</option>
+                      </select>
+                    </label>
+                    <label class="field">最终等级
+                      <select id="reviewSeverity">
+                        <option value="info">信息</option>
+                        <option value="low">低危</option>
+                        <option value="medium">中危</option>
+                        <option value="high">高危</option>
+                        <option value="critical">严重</option>
+                      </select>
+                    </label>
+                  </div>
+                  <div class="field-row">
+                    <label class="field" id="reviewDuplicateOfLabel" hidden>归属主漏洞
+                      <select id="reviewDuplicateOf"></select>
+                    </label>
+                    <label class="field">驳斥标签（逗号分隔）
+                      <input id="reviewReasonCodes" placeholder="例如：boundary_not_crossed,status_code_only">
+                    </label>
+                    <label class="field">影响范围
+                      <select id="reviewScope">
+                        <option value="current_finding">仅当前漏洞</option>
+                        <option value="current_project_type">当前项目同类</option>
+                        <option value="global_pattern">全局同类模式</option>
+                      </select>
+                    </label>
+                  </div>
+                  <label class="field">人工理由（必填）
+                    <textarea id="reviewReason" rows="3" placeholder="说明为什么认可、调级或驳斥；原文会进入长期反例记忆"></textarea>
+                  </label>
+                  <div class="review-actions"><button id="submitFindingReview" class="button primary" type="button">提交人工结论</button></div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="tab-panel" data-tab-panel="leads" role="tabpanel" hidden>
+            <p class="panel-note" id="leadsSummary">待验证发现；已转化漏洞会明确标记。</p>
+            <div class="master-detail">
+              <div id="leadList" class="item-list" role="listbox" aria-label="风险线索"></div>
+              <div class="detail-panel" id="leadDetail"><div class="empty-state">选择左侧线索查看完整信息。</div></div>
+            </div>
+          </div>
+
+          <div class="tab-panel" data-tab-panel="surface" role="tabpanel" hidden>
+            <p class="panel-note" id="surfaceSummary">已观察资产、配置、服务与入口；技术识别只属于攻击面，不会直接计为漏洞。</p>
+            <div class="master-detail">
+              <div id="surfaceList" class="item-list" role="listbox" aria-label="攻击面情报"></div>
+              <div class="detail-panel" id="surfaceDetail"><div class="empty-state">选择左侧条目查看完整信息。</div></div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ============ 方向 ============ -->
+      <section id="view-directions" data-view="directions" class="page" hidden>
         <div class="panel">
           <div class="panel-head">
-            <div><h2>测试目标</h2><p class="subtle">填写 URL、域名、IP、应用包或本地源码目录。授权策略固定为已授权，目标内容会同步写入 <code>target.json</code> 和 <code>目标信息.md</code>。</p></div>
-            <span class="status-badge completed">authorized / *</span>
+            <h2>验证方向</h2>
+            <span class="chip" id="directionsSummary">人工否决会停止调度；审计记录保留。</span>
+          </div>
+          <div class="master-detail">
+            <div id="directionList" class="item-list" role="listbox" aria-label="方向池"></div>
+            <div class="detail-panel" id="directionDetail"><div class="empty-state">选择左侧方向查看完整信息。</div></div>
+          </div>
+        </div>
+        <div class="panel">
+          <div class="panel-head"><h2>假设池</h2><span class="panel-note" id="methodPackSummary">尚未加载项目方法包。</span></div>
+          <div class="table-wrap">
+            <table class="data-table">
+              <thead><tr><th>假设</th><th>目标</th><th>攻击面维度</th><th>优先分</th><th>证据成熟度</th><th>状态</th><th>来源</th></tr></thead>
+              <tbody id="hypothesesBody"></tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+
+      <!-- ============ 资产与画像 ============ -->
+      <section id="view-assets" data-view="assets" class="page" hidden>
+        <div class="panel">
+          <div class="panel-head">
+            <div><h2>暴露面资产底座</h2><p class="subtle">导入企业提供的 CSV、TSV、TXT、JSON 或 XLSX。系统保留文件与行级溯源，并将范围内资产送入前置画像。</p></div>
+            <span id="assetInventoryBadge" class="badge tone-muted">0 条记录</span>
+          </div>
+          <div class="asset-import-bar">
+            <label class="field">资产文件
+              <input id="assetInventoryFile" type="file" accept=".csv,.tsv,.txt,.json,.xlsx">
+            </label>
+            <label class="field">来源名称
+              <input id="assetLogicalSource" maxlength="240" placeholder="例如：公司资产台账 2026-07">
+            </label>
+            <button id="importAssetInventoryButton" class="button secondary" type="button">导入并归一化</button>
+          </div>
+          <div class="stat-strip asset-metrics" aria-label="资产接入状态">
+            <div class="stat-card"><span class="stat-label">资产底座记录</span><strong class="stat-value" id="assetInventoryTotal">0</strong><small class="stat-note">端点记录（含越界/过期）</small></div>
+            <div class="stat-card"><span class="stat-label">待画像</span><strong class="stat-value" id="assetInventoryPending">0</strong><small class="stat-note">下一轮前置处理</small></div>
+            <div class="stat-card"><span class="stat-label">已画像</span><strong class="stat-value" id="assetInventoryProfiled">0</strong><small class="stat-note">包含部分画像</small></div>
+            <div class="stat-card"><span class="stat-label">范围外</span><strong class="stat-value" id="assetInventoryOutOfScope">0</strong><small class="stat-note">仅记录，不主动访问</small></div>
+          </div>
+          <div class="table-wrap asset-inventory-table">
+            <table class="data-table">
+              <thead><tr><th>资产入口</th><th>类型</th><th>范围/状态</th><th>画像任务</th><th>URL</th><th>来源</th></tr></thead>
+              <tbody id="assetInventoryBody"></tbody>
+            </table>
+          </div>
+          <div class="asset-pagination" aria-label="资产分页">
+            <button id="assetPreviousPage" class="button ghost small" type="button">上一页</button>
+            <span id="assetPaginationText">当前没有资产</span>
+            <button id="assetNextPage" class="button ghost small" type="button">下一页</button>
+          </div>
+          <p id="assetInventoryNote" class="panel-note">尚未导入企业资产文件；手工填写的测试目标会自动进入资产底座。</p>
+        </div>
+
+        <div class="panel">
+          <div class="panel-head">
+            <h2>目标技术画像</h2>
+            <div class="technology-download-actions">
+              <button id="expandTechnologyHosts" class="button ghost small" type="button">全部展开</button>
+              <button id="collapseTechnologyHosts" class="button ghost small" type="button">全部收起</button>
+              <button id="downloadTechnologyXlsx" class="button primary small" type="button">下载 Excel</button>
+              <button id="downloadTechnologyCsv" class="button ghost small" type="button">CSV</button>
+              <button id="downloadTechnologyJson" class="button ghost small" type="button">JSON</button>
+            </div>
+          </div>
+          <p class="panel-note" id="technologyProfileSummary">模型将遍历目标的可点击功能并记录 URL、功能和技术栈。</p>
+          <div id="technologyProfileList" class="technology-host-groups"></div>
+        </div>
+      </section>
+
+      <!-- ============ 运行与诊断 ============ -->
+      <section id="view-runs" data-view="runs" class="page" hidden>
+        <div class="panel">
+          <div class="panel-head">
+            <h2>Job 队列</h2>
+            <p class="panel-note">调度心跳证明 Worker 存活；工具事件来自模型 stream-json，实时显示工具名与脱敏参数。</p>
+          </div>
+          <div class="table-wrap jobs-table">
+            <table class="data-table">
+              <thead><tr><th>执行单元</th><th>职责</th><th>模型</th><th>当前在做什么</th><th>阶段</th><th>状态</th><th>尝试</th><th>运行信号 / 最近错误</th></tr></thead>
+              <tbody id="jobsBody"></tbody>
+            </table>
+          </div>
+        </div>
+
+        <div class="panel">
+          <div class="panel-head"><h2>事件流</h2><span class="chip" id="eventsCountChip">0 条</span></div>
+          <div id="eventsList" class="event-list"></div>
+        </div>
+
+        <div class="panel">
+          <div class="panel-head">
+            <h2>Prompt 审计</h2>
+            <p class="panel-note">黑板保持全量；模型只接收角色化任务胶囊。密钥字段在快照中脱敏。</p>
+          </div>
+          <div class="master-detail evidence-detail">
+            <div class="table-wrap">
+              <table class="data-table">
+                <thead><tr><th>时间</th><th>执行单元</th><th>角色</th><th>Prompt</th><th>上下文预算</th><th>裁剪</th><th></th></tr></thead>
+                <tbody id="promptSnapshotsBody"></tbody>
+              </table>
+            </div>
+            <pre id="promptSnapshotPreview" class="code-view">选择一次模型调用查看实际上下文</pre>
+          </div>
+        </div>
+
+        <div class="diag-grid">
+          <div class="panel">
+            <div class="panel-head"><h2>反事实与记忆</h2><span class="chip" id="researchMemoryCountChip">0</span></div>
+            <p class="panel-note">反事实推翻当前主线；经验记忆来自已证伪路径，有效期内阻止原样重试。</p>
+            <div class="table-wrap">
+              <table class="data-table">
+                <thead><tr><th>类型</th><th>目标</th><th>命题 / 经验</th><th>推翻标准 / 失效条件</th><th>状态</th></tr></thead>
+                <tbody id="researchMemoryBody"></tbody>
+              </table>
+            </div>
+          </div>
+          <div class="panel">
+            <div class="panel-head"><h2>WAF 记录</h2><span class="chip" id="wafCountChip">0</span></div>
+            <div class="table-wrap">
+              <table class="data-table">
+                <thead><tr><th>目标</th><th>原始假设</th><th>状态</th><th>阻断信号</th><th>预算</th></tr></thead>
+                <tbody id="wafAssessmentsBody"></tbody>
+              </table>
+            </div>
+          </div>
+          <div class="panel">
+            <div class="panel-head"><h2>负向证据</h2><span class="chip" id="negativeCountChip">0</span></div>
+            <p class="panel-note">调度剪枝依据，不计入漏洞或风险线索。</p>
+            <div class="table-wrap">
+              <table class="data-table">
+                <thead><tr><th>目标</th><th>被验证假设</th><th>客观结果</th><th>有效期</th><th>调度作用</th></tr></thead>
+                <tbody id="negativeEvidenceBody"></tbody>
+              </table>
+            </div>
+          </div>
+          <div class="panel">
+            <div class="panel-head"><h2>证据索引</h2><span class="chip" id="evidenceCountChip">0</span></div>
+            <div class="master-detail evidence-detail stacked">
+              <div class="table-wrap">
+                <table class="data-table">
+                  <thead><tr><th>Fact</th><th>路径</th><th>大小</th><th>SHA-256</th><th></th></tr></thead>
+                  <tbody id="evidenceBody"></tbody>
+                </table>
+              </div>
+              <pre id="evidencePreview" class="code-view">选择一份证据查看内容</pre>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ============ 项目设置 ============ -->
+      <section id="view-settings" data-view="settings" class="page" hidden>
+        <div class="panel">
+          <div class="panel-head">
+            <div><h2>测试目标</h2><p class="subtle">填写 URL、域名、IP、应用包或本地源码目录。授权策略固定为已授权，目标内容同步写入 target.json 与 目标信息.md。</p></div>
+            <span class="badge tone-ok">authorized / *</span>
           </div>
           <div class="form-grid">
             <label id="webTargetField" class="field">测试目标（每行一个）
@@ -120,43 +491,6 @@
             </label>
             <button id="createProjectButton" class="button primary" type="button">创建项目并使用以上目标</button>
           </div>
-        </div>
-
-        <div class="panel">
-          <div class="panel-head">
-            <div>
-              <h2>暴露面资产底座</h2>
-              <p class="subtle">导入企业提供的 CSV、TSV、TXT、JSON 或 XLSX。系统保留文件与原始行摘要、工作表、行号、来源代际和归一化资产之间的溯源，并将范围内资产送入前置画像。</p>
-            </div>
-            <span id="assetInventoryBadge" class="status-badge neutral">0 assets</span>
-          </div>
-          <div class="asset-import-bar">
-            <label class="field">资产文件
-              <input id="assetInventoryFile" type="file" accept=".csv,.tsv,.txt,.json,.xlsx">
-            </label>
-            <label class="field">来源名称
-              <input id="assetLogicalSource" maxlength="240" placeholder="例如：公司资产台账 2026-07">
-            </label>
-            <button id="importAssetInventoryButton" class="button secondary" type="button">导入并归一化</button>
-          </div>
-          <div class="metric-strip asset-metrics" aria-label="资产接入状态">
-            <div class="metric"><span>资产底座记录</span><strong id="assetInventoryTotal">0</strong><small>端点记录（含越界/过期）</small></div>
-            <div class="metric"><span>待画像</span><strong id="assetInventoryPending">0</strong><small>下一轮前置处理</small></div>
-            <div class="metric"><span>已画像</span><strong id="assetInventoryProfiled">0</strong><small>包含部分画像</small></div>
-            <div class="metric"><span>范围外</span><strong id="assetInventoryOutOfScope">0</strong><small>仅记录，不主动访问</small></div>
-          </div>
-          <div class="table-wrap asset-inventory-table">
-            <table class="data-table">
-              <thead><tr><th>资产入口</th><th>类型</th><th>范围/状态</th><th>画像任务</th><th>URL</th><th>来源</th></tr></thead>
-              <tbody id="assetInventoryBody"></tbody>
-            </table>
-          </div>
-          <div class="asset-pagination" aria-label="资产分页">
-            <button id="assetPreviousPage" class="button ghost small" type="button">上一页</button>
-            <span id="assetPaginationText">当前没有资产</span>
-            <button id="assetNextPage" class="button ghost small" type="button">下一页</button>
-          </div>
-          <p id="assetInventoryNote" class="panel-note">尚未导入企业资产文件；手工填写的测试目标会自动进入资产底座。</p>
         </div>
 
         <div class="panel">
@@ -278,7 +612,7 @@
 
                 <section class="field-group" id="containerGroup" hidden>
                   <h3>Container Worker</h3>
-                  <p class="subtle">由本地 Docker 启动指定镜像。仅编辑镜像与启动命令，其余 extra 字段（网络、资源限制、环境透传等）会原样保留。</p>
+                  <p class="subtle">由本地 Docker 启动指定镜像。仅编辑镜像与启动命令，其余 extra 字段原样保留。</p>
                   <div class="field-row">
                     <label class="field">Worker 镜像
                       <input id="mContainerImage" placeholder="sorne-worker:latest">
@@ -304,7 +638,7 @@
         </div>
 
         <details id="project-blackboard" class="panel disclosure">
-          <summary><span><strong>项目黑板知识库</strong><small>高级配置 · 查看机器状态与完整工作记忆</small></span></summary>
+          <summary><span><strong>项目黑板知识库</strong><small>查看机器状态与完整工作记忆</small></span></summary>
           <div class="disclosure-actions"><button id="copyBoard" class="button ghost small" type="button">复制</button></div>
           <pre id="blackboardText" class="code-view">读取中…</pre>
         </details>
@@ -319,313 +653,10 @@
         </div>
       </section>
 
-      <!-- ============ 执行与结果 ============ -->
-      <section id="overview" data-view="run" class="page" hidden>
-
-        <div class="run-statusbar" id="runStatusbar">
-          <div class="sb-block"><span>当前阶段</span><strong id="phaseValue">—</strong></div>
-          <div class="sb-block"><span>门禁</span><span id="sbGateBadge" class="status-badge neutral">—</span></div>
-          <div class="sb-block"><span>运行</span><span id="sbRunBadge" class="status-badge neutral">idle</span></div>
-          <div class="sb-block"><span>已用时间</span><strong id="sbElapsed">—</strong></div>
-          <div class="sb-block sb-grow"><span>当前 Run</span><strong id="runSummary" class="mono">暂无自动化运行</strong></div>
-          <div class="sb-actions">
-            <label class="sb-field" title="团队">团队<input id="teamInput" value="default"></label>
-            <label class="sb-field" title="整轮同时运行的 Worker 数">全局并发<input id="workersInput" type="number" min="1" value="5"></label>
-            <label class="sb-field" title="超时（秒）">超时<input id="timeoutInput" type="number" min="30" max="3600" value="3600"></label>
-            <button id="launchButton" class="button primary" type="button">启动新一轮审计</button>
-            <button id="cancelButton" class="button danger" type="button" disabled>取消运行</button>
-          </div>
-        </div>
-
-        <article id="gateApprovalCard" class="gate-banner" role="alert" aria-live="assertive" hidden>
-          <div class="gate-banner-head">
-            <div class="gate-banner-title">
-              <span class="gate-warning-dot" aria-hidden="true"></span>
-              <div>
-                <p class="eyebrow">HARD GATE · 需要人工批准</p>
-                <h2>强制门禁：执行已暂停</h2>
-              </div>
-            </div>
-            <span id="gateApprovalRunBadge" class="status-badge blocked">awaiting_approval</span>
-          </div>
-          <p id="gateApprovalReason" class="gate-banner-reason">正在读取控制器评估…</p>
-          <div class="gate-metrics" aria-label="门禁客观指标">
-            <div><span>当前阶段</span><strong id="gateApprovalPhase">—</strong></div>
-            <div><span>已用时间</span><strong id="gateApprovalElapsed">0 min</strong></div>
-            <div><span>资产 / 漏洞</span><strong id="gateApprovalAssets">0 / 0</strong></div>
-            <div><span>敏感线索</span><strong id="gateApprovalHighRisk">0</strong></div>
-            <div><span>上次发现</span><strong id="gateApprovalDiscovery">无</strong></div>
-            <div><span>运行状态</span><strong id="gateApprovalRun">无运行</strong></div>
-          </div>
-          <div class="gate-banner-footer">
-            <label class="field">审批备注（可选）
-              <textarea id="gateApprovalNote" rows="2" placeholder="可补充判断；留空时系统会自动写入以上客观指标"></textarea>
-            </label>
-            <div class="gate-banner-actions">
-              <button id="gateContinueButton" class="button primary" type="button">批准继续</button>
-              <button id="gateStopButton" class="button danger" type="button">止损结束</button>
-            </div>
-          </div>
-          <p class="field-note">批准继续会解除门禁并自动恢复已暂停运行；止损结束会解除门禁并终止对应运行。</p>
-        </article>
-
-        <div class="run-context">
-          <div class="panel context-panel">
-            <div class="context-row"><span class="context-label">当前任务</span><strong id="currentTask">读取项目状态…</strong></div>
-            <div class="context-row"><span class="context-label">业务目标</span><span id="goalText" class="subtle">正在连接中央黑板</span></div>
-            <div class="context-row"><span class="context-label">控制器决策</span><strong id="decisionValue">—</strong><small id="gateReason" class="subtle">尚无控制器评估</small></div>
-            <div class="context-row"><span class="context-label">本轮进度</span>
-              <div class="progress"><i id="runProgressBar"></i></div>
-              <small id="runProgressText" class="subtle">暂无 Job</small>
-            </div>
-            <div id="runFailure" class="run-failure" role="alert" hidden></div>
-          </div>
-          <div class="metric-strip" aria-label="核心指标">
-            <div class="metric"><span>活跃授权资产</span><strong id="assetMetric">0</strong><small id="assetMetricNote">范围内未失效端点</small></div>
-            <div class="metric"><span>事实</span><strong id="factMetric">0</strong><small id="factMetricNote">已提交到黑板</small></div>
-            <div class="metric"><span>漏洞</span><strong id="vulnMetric">0</strong><small id="vulnMetricNote">Guardian 已验证</small></div>
-            <div class="metric"><span>攻击面覆盖</span><strong id="coverageMetric">0%</strong><small id="coverageMetricNote">0/10 已观察</small></div>
-          </div>
-        </div>
-
-        <details id="directivePanel" class="panel directive-panel">
-          <summary><span><strong>项目所有者指令 · 最高优先级</strong><small id="interventionScopeNote">项目级持续生效 · 高于全部 Agent 自动规划</small></span></summary>
-          <div class="directive-form">
-            <label class="field">干预类型
-              <select id="interventionType">
-                <option value="supplement">补充约束与信息</option>
-                <option value="redirect">修正当前方向</option>
-                <option value="evidence_correction">纠正证据或事实</option>
-                <option value="metacog_review">要求元认知复盘</option>
-              </select>
-            </label>
-            <label class="field directive-content">补充内容
-              <textarea id="hintContent" rows="3" placeholder="例如：停止重复枚举子域；下一轮优先核对已有证据中的鉴权边界"></textarea>
-            </label>
-            <label class="field">目标（可选）<input id="hintTarget" placeholder="模块、接口或文件"></label>
-            <label class="field">内部优先级<input id="hintPriority" type="number" min="0" max="10" value="10"></label>
-            <div class="directive-actions"><button id="hintButton" class="button secondary" type="button">提交最高优先级指令</button></div>
-          </div>
-        </details>
-
-        <div class="panel results-panel">
-          <div class="tab-nav" role="tablist" aria-label="业务结果">
-            <button class="tab active" data-tab="vulns" type="button" role="tab">漏洞 <em id="vulnerabilitiesCount">0</em></button>
-            <button class="tab" data-tab="leads" type="button" role="tab">风险线索 <em id="riskLeadsCount">0</em></button>
-            <button class="tab" data-tab="directions" type="button" role="tab">方向 <em id="intentsCount">0</em></button>
-            <button class="tab" data-tab="surface" type="button" role="tab">攻击面 <em id="attackIntelCount">0</em></button>
-            <button class="tab" data-tab="hypotheses" type="button" role="tab">假设 <em id="hypothesesCount">0</em></button>
-            <button class="tab" data-tab="evidence" type="button" role="tab">证据 <em id="evidenceCount">0</em></button>
-            <button class="tab" data-tab="tech" type="button" role="tab">技术画像 <em id="technologyProfileCount">0</em></button>
-          </div>
-
-          <div class="tab-panel" data-tab-panel="vulns" role="tabpanel">
-            <div class="quality-strip">
-              <div><span>系统漏洞</span><strong id="qualitySystemVulns">0</strong></div>
-              <div><span>已复核</span><strong id="qualityReviewed">0</strong></div>
-              <div><span>人工认可</span><strong id="qualityConfirmed">0</strong></div>
-              <div><span>同源合并</span><strong id="qualitySameRoot">0</strong></div>
-              <div><span>人工驳斥</span><strong id="qualityRefuted">0</strong></div>
-              <div><span>长期误报率</span><strong id="qualityFalsePositiveRate">—</strong></div>
-            </div>
-            <p class="panel-note"><span id="qualitySample">样本 0</span> · <span id="qualityRuleSuggestions">尚未形成重复误报规则建议。</span></p>
-            <div class="master-detail">
-              <div id="vulnList" class="item-list" role="listbox" aria-label="系统漏洞池"></div>
-              <div class="detail-panel" id="vulnDetail">
-                <div id="vulnDetailInfo" class="detail-info"><div class="empty-state">选择左侧漏洞查看完整信息。</div></div>
-                <div id="reviewBox" class="review-box" hidden>
-                  <h3>人工漏洞裁决 <span id="reviewFindingName" class="mono"></span></h3>
-                  <div class="field-row">
-                    <label class="field">人工动作
-                      <select id="reviewAction">
-                        <option value="accepted">认可系统判断</option>
-                        <option value="adjusted">漏洞成立，调整等级</option>
-                        <option value="same_root">标记为同源漏洞</option>
-                        <option value="refuted">驳斥为误报</option>
-                        <option value="reclassified">降级重新分类</option>
-                        <option value="retest_requested">要求重新验证</option>
-                      </select>
-                    </label>
-                    <label class="field">最终分类
-                      <select id="reviewClassification">
-                        <option value="vulnerability">漏洞</option>
-                        <option value="same_root_vulnerability">同源漏洞</option>
-                        <option value="risk_lead">风险线索</option>
-                        <option value="attack_surface">攻击面</option>
-                        <option value="inconclusive">证据不足</option>
-                      </select>
-                    </label>
-                    <label class="field">最终等级
-                      <select id="reviewSeverity">
-                        <option value="info">信息</option>
-                        <option value="low">低危</option>
-                        <option value="medium">中危</option>
-                        <option value="high">高危</option>
-                        <option value="critical">严重</option>
-                      </select>
-                    </label>
-                  </div>
-                  <div class="field-row">
-                    <label class="field" id="reviewDuplicateOfLabel" hidden>归属主漏洞
-                      <select id="reviewDuplicateOf"></select>
-                    </label>
-                    <label class="field">驳斥标签（逗号分隔）
-                      <input id="reviewReasonCodes" placeholder="例如：boundary_not_crossed,status_code_only">
-                    </label>
-                    <label class="field">影响范围
-                      <select id="reviewScope">
-                        <option value="current_finding">仅当前漏洞</option>
-                        <option value="current_project_type">当前项目同类</option>
-                        <option value="global_pattern">全局同类模式</option>
-                      </select>
-                    </label>
-                  </div>
-                  <label class="field">人工理由（必填）
-                    <textarea id="reviewReason" rows="3" placeholder="说明为什么认可、调级或驳斥；原文会进入长期反例记忆"></textarea>
-                  </label>
-                  <div class="review-actions"><button id="submitFindingReview" class="button primary" type="button">提交人工结论</button></div>
-                </div>
-              </div>
-            </div>
-          </div>
-
-          <div class="tab-panel" data-tab-panel="leads" role="tabpanel" hidden>
-            <p class="panel-note" id="leadsSummary">待验证发现，超过 24 小时标记为积压；已转化漏洞会明确标记。</p>
-            <div class="master-detail">
-              <div id="leadList" class="item-list" role="listbox" aria-label="风险线索"></div>
-              <div class="detail-panel" id="leadDetail"><div class="empty-state">选择左侧线索查看完整信息。</div></div>
-            </div>
-          </div>
-
-          <div class="tab-panel" data-tab-panel="directions" role="tabpanel" hidden>
-            <p class="panel-note" id="directionsSummary">人工否决会将方向标记为“人工否决”并停止后续调度；审计记录和理由仍保留。</p>
-            <div class="master-detail">
-              <div id="directionList" class="item-list" role="listbox" aria-label="方向池"></div>
-              <div class="detail-panel" id="directionDetail"><div class="empty-state">选择左侧方向查看完整信息。</div></div>
-            </div>
-          </div>
-
-          <div class="tab-panel" data-tab-panel="surface" role="tabpanel" hidden>
-            <p class="panel-note" id="surfaceSummary">已观察资产、配置、服务与入口；技术识别只属于攻击面，不会直接计为漏洞。</p>
-            <div class="master-detail">
-              <div id="surfaceList" class="item-list" role="listbox" aria-label="攻击面情报"></div>
-              <div class="detail-panel" id="surfaceDetail"><div class="empty-state">选择左侧条目查看完整信息。</div></div>
-            </div>
-          </div>
-
-          <div class="tab-panel" data-tab-panel="hypotheses" role="tabpanel" hidden>
-            <p class="panel-note" id="methodPackSummary">尚未加载项目方法包。每个假设都会经过价值、可达性、信息增益、新颖度、前置成熟度和成本评分。</p>
-            <div class="table-wrap">
-              <table class="data-table">
-                <thead><tr><th>假设</th><th>目标</th><th>攻击面维度</th><th>优先分</th><th>证据成熟度</th><th>状态</th><th>来源</th></tr></thead>
-                <tbody id="hypothesesBody"></tbody>
-              </table>
-            </div>
-          </div>
-
-          <div class="tab-panel" data-tab-panel="evidence" role="tabpanel" hidden>
-            <p class="panel-note" id="evidenceSummary">Fact 关联的原始文件、大小和 SHA-256。</p>
-            <div class="master-detail evidence-detail">
-              <div class="table-wrap">
-                <table class="data-table">
-                  <thead><tr><th>Fact</th><th>路径</th><th>大小</th><th>SHA-256</th><th></th></tr></thead>
-                  <tbody id="evidenceBody"></tbody>
-                </table>
-              </div>
-              <pre id="evidencePreview" class="code-view">选择一份证据查看内容</pre>
-            </div>
-          </div>
-
-          <div class="tab-panel" data-tab-panel="tech" role="tabpanel" hidden>
-            <div class="technology-profile-head">
-              <p class="panel-note" id="technologyProfileSummary">模型将遍历目标的可点击功能并记录 URL、功能和技术栈。</p>
-              <div class="technology-download-actions">
-                <button id="expandTechnologyHosts" class="button ghost small" type="button">全部展开</button>
-                <button id="collapseTechnologyHosts" class="button ghost small" type="button">全部收起</button>
-                <button id="downloadTechnologyXlsx" class="button primary small" type="button">下载 Excel</button>
-                <button id="downloadTechnologyCsv" class="button ghost small" type="button">下载 CSV</button>
-                <button id="downloadTechnologyJson" class="button ghost small" type="button">下载 JSON</button>
-              </div>
-            </div>
-            <div id="technologyProfileList" class="technology-host-groups"></div>
-          </div>
-        </div>
-
-        <details id="diagnosticsPanel" class="panel diagnostics-panel">
-          <summary>
-            <span><strong>运行诊断</strong><small>Job 队列、事件流、Prompt 审计与调度记忆</small></span>
-            <em id="diagSummary" class="diag-summary">暂无异常</em>
-          </summary>
-          <div class="diag-layout">
-            <div class="diag-nav" role="tablist" aria-label="诊断分类">
-              <button class="diag-tab active" data-diag="jobs" type="button">Job 队列 <em id="jobsCount">0</em></button>
-              <button class="diag-tab" data-diag="events" type="button">事件流 <em id="eventsCount">0</em></button>
-              <button class="diag-tab" data-diag="prompts" type="button">Prompt 审计 <em id="promptSnapshotsCount">0</em></button>
-              <button class="diag-tab" data-diag="memory" type="button">反事实与记忆 <em id="researchMemoryCount">0</em></button>
-              <button class="diag-tab" data-diag="coverage" type="button">覆盖情况 <em id="verifiedCoverage">0</em></button>
-              <button class="diag-tab" data-diag="waf" type="button">WAF 记录 <em id="wafAssessmentsCount">0</em></button>
-              <button class="diag-tab" data-diag="negative" type="button">负向证据 <em id="negativeEvidenceCount">0</em></button>
-            </div>
-            <div class="diag-content">
-              <div data-diag-panel="jobs">
-                <div class="diag-head">
-                  <span id="runBadge" class="status-badge neutral">idle</span>
-                  <p class="panel-note">调度心跳只证明 Worker 存活；Claude stream-json 会实时显示工具名、脱敏参数、结果摘要和阶段输出。</p>
-                </div>
-                <div class="table-wrap jobs-table">
-                  <table class="data-table">
-                    <thead><tr><th>执行单元</th><th>职责</th><th>模型</th><th>当前在做什么</th><th>阶段</th><th>状态</th><th>尝试</th><th>运行信号 / 最近错误</th></tr></thead>
-                    <tbody id="jobsBody"></tbody>
-                  </table>
-                </div>
-              </div>
-              <div data-diag-panel="events" hidden><div id="eventsList" class="event-list"></div></div>
-              <div data-diag-panel="prompts" hidden>
-                <p class="panel-note">黑板保持全量；模型只接收角色化任务胶囊。API Key、Authorization 和常见密钥字段会在快照中脱敏。</p>
-                <div class="master-detail evidence-detail">
-                  <div class="table-wrap">
-                    <table class="data-table">
-                      <thead><tr><th>时间</th><th>执行单元</th><th>角色</th><th>Prompt</th><th>上下文预算</th><th>裁剪</th><th></th></tr></thead>
-                      <tbody id="promptSnapshotsBody"></tbody>
-                    </table>
-                  </div>
-                  <pre id="promptSnapshotPreview" class="code-view">选择一次模型调用查看实际上下文</pre>
-                </div>
-              </div>
-              <div data-diag-panel="memory" hidden>
-                <p class="panel-note">反事实用来推翻当前主线；经验记忆来自已证伪或受阻路径，在有效期内阻止 Agent 原样重试。</p>
-                <div class="table-wrap">
-                  <table class="data-table">
-                    <thead><tr><th>类型</th><th>目标</th><th>可检验命题 / 经验</th><th>推翻标准 / 失效条件</th><th>状态</th></tr></thead>
-                    <tbody id="researchMemoryBody"></tbody>
-                  </table>
-                </div>
-              </div>
-              <div data-diag-panel="coverage" hidden><div id="coverageList" class="coverage-list"></div></div>
-              <div data-diag-panel="waf" hidden>
-                <div class="table-wrap">
-                  <table class="data-table">
-                    <thead><tr><th>目标</th><th>原始假设</th><th>状态</th><th>阻断信号</th><th>预算</th></tr></thead>
-                    <tbody id="wafAssessmentsBody"></tbody>
-                  </table>
-                </div>
-              </div>
-              <div data-diag-panel="negative" hidden>
-                <p class="panel-note">调度剪枝依据，不计入漏洞或风险线索。</p>
-                <div class="table-wrap">
-                  <table class="data-table">
-                    <thead><tr><th>目标</th><th>被验证假设</th><th>客观结果</th><th>有效期</th><th>调度作用</th></tr></thead>
-                    <tbody id="negativeEvidenceBody"></tbody>
-                  </table>
-                </div>
-              </div>
-            </div>
-          </div>
-        </details>
-      </section>
+      </div>
     </main>
   </div>
   <div id="toast" class="toast" role="status" aria-live="polite"></div>
-  <script type="module" src="/frontend/app.js?v=6.1"></script>
+  <script type="module" src="/frontend/app.js?v=7.0"></script>
 </body>
 </html>

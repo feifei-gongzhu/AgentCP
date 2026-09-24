@@ -1,5 +1,5 @@
 export const state = {
-  vendor: null, projects: [], route: "hub", newTaskMode: false,
+  vendor: null, projects: [], route: "projects", newTaskMode: false,
   runId: null, runStatus: null, timer: null,
   teamConfig: null, teamDirty: false, configVendor: null,
   teamPresets: [], defaultTeamPresetId: null, selectedTeamPresetId: null,
@@ -10,6 +10,7 @@ export const state = {
   projectData: null, qualitySummary: null,
   assetInventory: null, assetOffset: 0, assetPageSize: 100,
   derived: null, automationCache: null, auditCache: null, promptCache: null,
+  metricsCache: null,
 };
 
 // UI-only state survives polling redraws.

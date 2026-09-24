@@ -333,7 +333,7 @@ class LocalDockerRuntime:
                 "Authorization": f"Bearer {self.profile.api_key}",
                 # Some gateways apply browser-default WAF rules to Python's
                 # urllib UA while allowing their documented CLI clients.
-                "User-Agent": "claude-cli/2 Sorne/0.0.3",
+                "User-Agent": "claude-cli/2 Sorne/0.0.4",
             },
             method="POST",
         )

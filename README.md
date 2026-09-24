@@ -1,4 +1,4 @@
-# Sorne 安全研究引擎 Sorne 0.0.3
+# Sorne 安全研究引擎 Sorne 0.0.4
 
 > 完整安装、模型配置、自动化、远程协议、恢复与排错请阅读 [docs/USAGE.md](docs/USAGE.md)。
 >
@@ -15,7 +15,7 @@
 - Schema V6 以 SQLite CommitPlan/Outbox 作为 Worker、人工裁决、WAF 与控制器决定的 durable commit 权威源；JSONL、Markdown、state 和 dashboard 由带 receipt 的幂等投影器恢复，停止后的 fencing token 不能创建迟到提交。
 - Run 具有绝对执行截止时间；单次模型超时会被剩余墙钟预算进一步收紧，截止后不会继续发起模型调用。
 - 项目所有测试目标按所有者声明统一视为已授权，代码中固定为 `authorization=authorized` 和 `scope=["*"]`。
-- 同一执行节拍达到 15 分钟、或项目所有者通过 `complete-subtask` / 控制台主动触发时进入 `awaiting_approval`（Sorne 0.0.3 显式门禁）。自动化子任务完成不再默认阻塞，人工复核异步进行。
+- 同一执行节拍达到 15 分钟、或项目所有者通过 `complete-subtask` / 控制台主动触发时进入 `awaiting_approval`（Sorne 0.0.3+ 显式门禁）。自动化子任务完成不再默认阻塞，人工复核异步进行。
 - 待批准时，继续计时和 Worker 写回都会被代码拒绝。
 - 漏洞假设的潜在危害与验证动作的操作风险分开裁决；只有高/严重操作风险才触发人工门禁。
 - Web 与客户端 Method Pack 各自提供十维攻击面、动态检查清单和初始假设组合。Reason/Metacog 以 PlanBatch 一次提交多条正交假设，由确定性评分选择。

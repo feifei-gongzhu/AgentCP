@@ -9,7 +9,7 @@ from zipfile import ZIP_DEFLATED, ZipFile
 
 
 ROOT = Path(__file__).resolve().parents[1]
-OUTPUT = ROOT / "dist" / "Sorne-Windows-0.0.3.zip"
+OUTPUT = ROOT / "dist" / "Sorne-Windows-0.0.4.zip"
 INCLUDE_ROOTS = ("src", "frontend", "teams", "windows", "docs", "third_party/agent-compose")
 ROOT_FILES = (
     "sorne", "sorne.cmd", "Install-Sorne.cmd", "Start-Sorne.cmd",
@@ -45,7 +45,7 @@ def main() -> int:
     OUTPUT.parent.mkdir(parents=True, exist_ok=True)
     files = package_files()
     manifest = {
-        "product": "Sorne", "version": "0.0.3",
+        "product": "Sorne", "version": "0.0.4",
         "platform": "Windows 10/11 x64",
         "created_at": datetime.now(timezone.utc).isoformat(),
         "file_count": len(files), "projects_included": False,

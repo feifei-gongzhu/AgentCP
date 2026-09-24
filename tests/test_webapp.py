@@ -136,6 +136,7 @@ def test_frontend_assets_are_wired_to_control_api() -> None:
     root = Path(__file__).resolve().parents[1]
     index = (root / "frontend" / "index.html").read_text(encoding="utf-8")
     script = (root / "frontend" / "app.js").read_text(encoding="utf-8")
+    derived = (root / "frontend" / "modules" / "derive.js").read_text(encoding="utf-8")
 
     assert "Sorne" in index
     assert "/api/automation/launch" in script
@@ -165,50 +166,43 @@ def test_frontend_assets_are_wired_to_control_api() -> None:
     assert "renderEmptyWorkspace" in script
     assert "requestGeneration" in script
     assert "location.reload()" not in script
-    assert 'data-view="hub"' in index
-    assert index.count('data-view="config"') == 1
-    # Sorne 0.0.3 三视图顺序：任务中心 → 项目配置 → 执行与结果。
-    assert index.index('data-view="hub"') < index.index('data-view="config"')
-    assert index.index('data-view="config"') < index.index('data-view="run"')
-    assert index.count('data-view="run"') == 1
-    assert 'data-route-link="hub"' in index
-    assert 'data-route-link="config"' in index
-    assert 'data-route-link="run"' in index
-    # Sorne 0.0.3 任务中心：projectList 表格（旧 projectCards 卡片布局已重写）。
+    # Sorne 0.0.4 七区工作台：项目中心 / 总览 / 发现 / 方向 / 资产 / 运行 / 设置。
+    for view in ("projects", "overview", "findings", "directions", "assets", "runs", "settings"):
+        assert f'data-view="{view}"' in index
+        assert f'data-route-link="{view}"' in index
+    assert index.index('data-view="projects"') < index.index('data-view="settings"')
     assert 'id="projectList"' in index
     assert 'id="hubFalsePositiveRate"' in index
-    assert "超过 24 小时标记为积压" in index
-    assert "riskLeadLifecycle" in script
-    assert "deduplicateRiskLeads" in script
-    assert 'direction_status: direction.status' in script
+    assert "riskLeadLifecycle" in derived
+    assert "deduplicateRiskLeads" in derived
+    assert "direction_status" in derived
     assert "复现方式" in script
     assert "evidenceForFact" in script
+    assert "candidate_negative_evidence" in derived
     assert "evidence-open" in script
     assert "quality_metrics" in script
     assert "quality_summary" in script
-    assert 'id="startAuditButton"' in index
+    # 0.0.4：启动入口收敛到总览页 launchButton（三页向导按钮已移除）。
+    assert 'id="launchButton"' in index
     assert 'id="interventionType"' in index
     assert "项目所有者指令" in index
     assert 'scope: "project"' in script
     assert "controller_intervention_added" in (root / "src" / "sorne" / "webapp.py").read_text(encoding="utf-8")
-    assert 'id="viewRunButton"' in index
-    # Sorne 0.0.3 路由收敛到独立模块（hub/config/run 三视图）。
     assert "./modules/router.js" in script
     assert "renderProjectList" in script
     assert "launchAudit" in script
     assert "当前任务" in index
-    assert "Sorne 调度心跳" in script
-    assert "等待 Claude CLI 返回" in script
-    assert "model_tool_started" in script
-    assert "正在执行工具" in script
-    assert "Claude stream-json" in index
+    assert "调度心跳" in script
+    assert "等待模型返回" in script
+    assert "model_tool_started" in (root / "frontend" / "modules" / "events.js").read_text(encoding="utf-8")
+    assert "正在执行工具" in (root / "frontend" / "modules" / "events.js").read_text(encoding="utf-8")
     assert 'id="assetMetricNote"' in index
     assert 'id="coverageMetricNote"' in index
     assert "pending_facts" in script
     assert 'id="submitFindingReview"' in index
     assert 'post("/api/findings/review"' in script
     assert 'post("/api/directions/dismiss"' in script
-    assert "删除方向" in script
+    assert "direction-dismiss" in script
     assert "长期误报率" in index
     assert 'id="wafAssessmentsBody"' in index
     for action_id in (
