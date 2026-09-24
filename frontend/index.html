@@ -91,13 +91,6 @@
 
       <div class="page-head">
         <div><h1>总览</h1><p class="desc" id="goalText">—</p></div>
-        <div class="run-controls">
-          <input id="teamInput" value="default" class="input-sm" title="团队">
-          <input id="workersInput" type="number" min="1" value="5" class="input-sm" title="并发">
-          <input id="timeoutInput" type="number" min="30" max="3600" value="3600" class="input-sm" title="超时">
-          <button id="launchButton" class="btn primary" type="button">启动研究</button>
-          <button id="cancelButton" class="btn danger" type="button" disabled>取消</button>
-        </div>
       </div>
 
       <div class="metrics">
@@ -245,7 +238,16 @@
 
     <!-- 运行 -->
     <section id="view-runs" data-view="runs" hidden>
-      <div class="page-head"><h1>运行与诊断</h1></div>
+      <div class="page-head">
+        <h1>运行与诊断</h1>
+        <div class="run-controls">
+          <input id="teamInput" value="default" class="input-sm" title="团队">
+          <input id="workersInput" type="number" min="1" value="5" class="input-sm" title="并发">
+          <input id="timeoutInput" type="number" min="30" max="3600" value="3600" class="input-sm" title="超时">
+          <button id="launchButton" class="btn primary" type="button">启动研究</button>
+          <button id="cancelButton" class="btn danger" type="button" disabled>取消</button>
+        </div>
+      </div>
       <div class="section">
         <div class="sec-head"><h2>Job 队列</h2></div>
         <div class="table-scroll"><table class="dt"><thead><tr><th>单元</th><th>职责</th><th>模型</th><th>当前</th><th>阶段</th><th>状态</th><th class="num">尝试</th><th>信号</th></tr></thead><tbody id="jobsBody"></tbody></table></div>
