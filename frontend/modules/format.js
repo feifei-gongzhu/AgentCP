@@ -36,14 +36,3 @@ export function ageLabel(value) {
   if (hours < 24) return `${hours} 小时前`;
   return `${Math.floor(hours / 24)} 天前`;
 }
-
-export function formatEventShort(value) {
-  if (!value) return "—";
-  const d = new Date(value);
-  if (Number.isNaN(d.getTime())) return String(value);
-  const month = String(d.getMonth() + 1);
-  const day = String(d.getDate());
-  const hh = String(d.getHours()).padStart(2, "0");
-  const mm = String(d.getMinutes()).padStart(2, "0");
-  return `${month}/${day} ${hh}:${mm}`;
-}
