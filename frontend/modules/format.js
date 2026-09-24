@@ -13,6 +13,15 @@ export function formatEventTime(value) {
   return Number.isNaN(date.getTime()) ? String(value) : date.toLocaleString();
 }
 
+// 紧凑时间（MM/DD HH:mm）：时间列与 feed 行高固定时使用；完整时间放 title。
+export function formatEventShort(value) {
+  if (!value) return "—";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return String(value);
+  const pad = number => String(number).padStart(2, "0");
+  return `${pad(date.getMonth() + 1)}/${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
+}
+
 export function formatDuration(value) {
   const seconds = Number(value);
   if (!Number.isFinite(seconds) || seconds < 0) return "—";

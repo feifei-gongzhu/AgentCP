@@ -1,6 +1,17 @@
 // 运行事件流渲染：已知类型友好渲染，未知类型通用回退（开放集合不丢弃）。
 import { el } from "./dom.js";
-import { truncateText, formatEventTime, formatDuration } from "./format.js";
+import { truncateText, formatEventTime, formatEventShort, formatDuration } from "./format.js";
+
+const STATUS_CN = {
+  idle: "空闲", running: "运行中", completed: "已完成", paused: "已暂停",
+  awaiting_approval: "等待审批", stopping: "正在停止", stopped: "已停止",
+  failed: "失败", cancelled: "已取消", restricted: "策略受限",
+};
+const STAGE_CN = {
+  swarm: "并发执行", review: "结果复核", commit: "结果提交",
+  profile: "基础画像", profile_incremental: "增量画像", mrecon: "前置采集", finished: "已结束",
+};
+function stageCn(value) { return STAGE_CN[value] || value || ""; }
 
 function friendlyEvent(event) {
   const type = event.event_type || event.action || "event";
@@ -34,6 +45,27 @@ function friendlyEvent(event) {
   if (type === "profile_work_dispatched") return { kind: "started", title: "画像工作项已派发", summary: `${data.work_item_count ?? 0} 个 URL 工作项` };
   if (type === "jev_shadow_recorded") return { kind: "completed", title: "JEV 影子分类已留档", summary: `${data.targets ?? 0} 个目标`, meta: data.skipped ? `跳过 ${data.skipped}` : "", detail: "影子数据只进评估记录 classification_provenance，不影响调度。" };
   if (type === "jev_shadow_failed") return { kind: "waiting", title: "JEV 影子调用失败", summary: member, detail: data.error };
+  // 内部生命周期事件：给可读标题，不再直接输出原始 JSON。
+  if (type === "run_created") return { kind: "started", title: "运行已创建", summary: data.team ? `团队 ${data.team}` : "" };
+  if (type === "run_finished") return { kind: data.status === "failed" ? "failed" : "completed", title: "运行已结束", summary: STATUS_CN[data.status] || data.status || "", detail: data.error };
+  if (type === "run_stopping") return { kind: "waiting", title: "运行正在停止", summary: "不再派发新任务；进行中的任务安全收尾" };
+  if (type === "run_stopped") return { kind: "failed", title: "运行已停止", summary: STATUS_CN[data.status] || data.status || "" };
+  if (type === "run_status_changed") return { kind: "waiting", title: "运行状态变更", summary: STATUS_CN[data.status] || data.status || "" };
+  if (type === "run_stage_changed") return { kind: "started", title: "进入新阶段", summary: stageCn(data.stage) };
+  if (type === "run_wave_advanced") return { kind: "started", title: "进入下一波并发", summary: data.wave != null ? `第 ${data.wave} 波` : "" };
+  if (type === "job_queued") return { kind: "started", title: "任务已排队", summary: data.member || member, meta: data.stage ? `阶段 ${stageCn(data.stage)}` : "" };
+  if (type === "job_claimed") return { kind: "started", title: "任务已认领", summary: data.worker_id || member };
+  if (type === "job_completed") return { kind: "completed", title: "任务执行完成", summary: member };
+  if (type === "job_failed") return { kind: "failed", title: "任务执行失败", summary: member, detail: data.error };
+  if (type === "job_policy_restricted") return { kind: "waiting", title: "任务策略受限", summary: member, detail: data.error };
+  if (type === "job_human_cancelled") return { kind: "failed", title: "任务已人工取消", summary: member };
+  if (type === "job_committed") return { kind: "completed", title: "结果已提交黑板", summary: member };
+  if (type === "job_commit_enqueued") return { kind: "completed", title: "结果提交已排队", summary: member };
+  if (type === "direction_registered") return { kind: "started", title: "验证方向已生成", summary: data.direction_id || "" };
+  if (type === "direction_finished") return { kind: "completed", title: "验证方向已结束", summary: data.direction_id || "", detail: data.reason || data.terminal_reason };
+  if (type === "direction_claimed") return { kind: "started", title: "方向已被认领", summary: data.direction_id || "", meta: data.worker_id ? `认领方 ${data.worker_id}` : "" };
+  if (type === "direction_status_changed") return { kind: "waiting", title: "方向状态变更", summary: data.direction_id || "", meta: data.status || "" };
+  if (type === "stale_write_rejected") return { kind: "waiting", title: "过期写入被拒绝", summary: "旧上下文结果已按 Run 栅栏拦截", detail: data.reason || data.error };
     if (type === "api:gate_approved") return { kind: "completed", title: "门禁已批准", summary: data.action === "stop_loss" ? "止损结束" : data.action === "continue" ? "继续执行" : data.action || "", detail: data.reason };
   if (type === "api:automation_launched") return { kind: "started", title: "自动化运行已启动", summary: data.run_id || "" };
   if (type === "api:automation_cancelled") return { kind: "failed", title: "运行已取消", summary: data.run_id || "" };
@@ -49,7 +81,8 @@ function renderEvent(event) {
   const friendly = friendlyEvent(event);
   const row = document.createElement("div");
   row.className = `event-row${friendly ? ` model-event kind-${friendly.kind}` : ""}`;
-  const time = el("time", "", formatEventTime(event.created_at));
+  const time = el("time", "", formatEventShort(event.created_at));
+  time.title = formatEventTime(event.created_at);
   if (!friendly) {
     row.append(time, el("strong", "", event.event_type || event.action), el("small", "", JSON.stringify(event.data || event.details || {})));
     return row;

@@ -147,7 +147,7 @@
     <!-- 发现 -->
     <section id="view-findings" data-view="findings" hidden>
       <div class="page-head"><h1>发现</h1></div>
-      <div class="tab-bar" style="display:flex;gap:0;border-bottom:1px solid var(--border);overflow-x:auto" role="tablist">
+      <div class="tab-bar" role="tablist">
         <button class="tab-btn active" data-tab="vulns" type="button">漏洞 <em id="vulnerabilitiesCount">0</em></button>
         <button class="tab-btn" data-tab="leads" type="button">线索 <em id="riskLeadsCount">0</em></button>
         <button class="tab-btn" data-tab="surface" type="button">攻击面 <em id="attackIntelCount">0</em></button>
@@ -159,10 +159,31 @@
           <span><b id="qualityRefuted">0</b> 驳斥</span><span><b id="qualityFalsePositiveRate">—</b> 误报率</span>
         </div>
         <p class="text-dim mb"><span id="qualitySample"></span> · <span id="qualityRuleSuggestions"></span></p>
-        <div class="split">
-          <div id="vulnList" class="row-list"></div>
+        <div class="split" data-drawer>
+          <div>
+            <div class="table-toolbar">
+              <input id="vulnSearch" class="input-sm toolbar-search" type="search" placeholder="搜索标题 / ID / 资产…">
+              <select id="vulnSeverityFilter" class="input-sm toolbar-select">
+                <option value="">全部严重度</option>
+                <option value="critical">严重</option><option value="high">高危</option>
+                <option value="medium">中危</option><option value="low">低危</option>
+                <option value="info">信息</option><option value="unknown">未定级</option>
+              </select>
+              <select id="vulnStatusFilter" class="input-sm toolbar-select">
+                <option value="">全部状态</option>
+                <option value="pending">候选</option><option value="unreviewed">待人工复核</option>
+                <option value="accepted">已认可</option><option value="adjusted">已调级</option>
+                <option value="same_root">同源</option><option value="refuted">已驳斥</option>
+                <option value="reclassified">已降级</option><option value="retest_requested">要求复验</option>
+              </select>
+              <select id="vulnTypeFilter" class="input-sm toolbar-select"><option value="">全部类型</option></select>
+              <span id="vulnShownCount" class="toolbar-count"></span>
+            </div>
+            <div id="vulnList" class="table-scroll findings-scroll"></div>
+          </div>
           <div id="vulnDetail" class="detail-pane">
-            <div id="vulnDetailInfo"><div class="placeholder">选择漏洞</div></div>
+            <div class="detail-pane-head"><span>漏洞详情</span><button type="button" class="detail-close" aria-label="关闭详情">✕</button></div>
+            <div id="vulnDetailInfo" class="detail-info"><div class="placeholder">选择漏洞</div></div>
             <div id="reviewBox" hidden>
               <h3>人工裁决 <span id="reviewFindingName" class="mono"></span></h3>
               <div class="row-3">
@@ -183,16 +204,57 @@
       </div>
       <div data-tab-panel="leads" hidden>
         <p class="text-dim mb" id="leadsSummary"></p>
-        <div class="split">
-          <div id="leadList" class="row-list"></div>
-          <div id="leadDetail" class="detail-pane"><div class="placeholder">选择线索</div></div>
+        <div class="split" data-drawer>
+          <div>
+            <div class="table-toolbar">
+              <input id="leadSearch" class="input-sm toolbar-search" type="search" placeholder="搜索标题 / ID / 资产…">
+              <select id="leadSeverityFilter" class="input-sm toolbar-select">
+                <option value="">全部严重度</option>
+                <option value="critical">严重</option><option value="high">高危</option>
+                <option value="medium">中危</option><option value="low">低危</option>
+                <option value="info">信息</option><option value="unknown">未定级</option>
+              </select>
+              <select id="leadStatusFilter" class="input-sm toolbar-select">
+                <option value="">全部状态</option>
+                <option value="pending_commit">待收敛</option><option value="queued">待关联验证</option>
+                <option value="unscheduled">待转验证</option><option value="confirmed">已证实为漏洞</option>
+              </select>
+              <select id="leadTypeFilter" class="input-sm toolbar-select"><option value="">全部类型</option></select>
+              <span id="leadShownCount" class="toolbar-count"></span>
+            </div>
+            <div id="leadList" class="table-scroll findings-scroll"></div>
+          </div>
+          <div id="leadDetail" class="detail-pane">
+            <div class="detail-pane-head"><span>线索详情</span><button type="button" class="detail-close" aria-label="关闭详情">✕</button></div>
+            <div id="leadDetailBody" class="detail-pane-body"><div class="placeholder">选择线索</div></div>
+          </div>
         </div>
       </div>
       <div data-tab-panel="surface" hidden>
         <p class="text-dim mb" id="surfaceSummary"></p>
-        <div class="split">
-          <div id="surfaceList" class="row-list"></div>
-          <div id="surfaceDetail" class="detail-pane"><div class="placeholder">选择条目</div></div>
+        <div class="split" data-drawer>
+          <div>
+            <div class="table-toolbar">
+              <input id="surfaceSearch" class="input-sm toolbar-search" type="search" placeholder="搜索标题 / ID / 资产…">
+              <select id="surfaceSeverityFilter" class="input-sm toolbar-select">
+                <option value="">全部严重度</option>
+                <option value="critical">严重</option><option value="high">高危</option>
+                <option value="medium">中危</option><option value="low">低危</option>
+                <option value="info">信息</option><option value="unknown">未定级</option>
+              </select>
+              <select id="surfaceStatusFilter" class="input-sm toolbar-select">
+                <option value="">全部状态</option>
+                <option value="pending">候选</option><option value="committed">已提交</option>
+              </select>
+              <select id="surfaceTypeFilter" class="input-sm toolbar-select"><option value="">全部类型</option></select>
+              <span id="surfaceShownCount" class="toolbar-count"></span>
+            </div>
+            <div id="surfaceList" class="table-scroll findings-scroll"></div>
+          </div>
+          <div id="surfaceDetail" class="detail-pane">
+            <div class="detail-pane-head"><span>攻击面详情</span><button type="button" class="detail-close" aria-label="关闭详情">✕</button></div>
+            <div id="surfaceDetailBody" class="detail-pane-body"><div class="placeholder">选择条目</div></div>
+          </div>
         </div>
       </div>
     </section>
@@ -390,6 +452,7 @@
     </div>
   </div>
 </div>
+<div id="detailBackdrop" class="detail-backdrop" hidden></div>
 <div id="toast" class="toast"></div>
 <script type="module" src="/frontend/app.js?v=9.0"></script>
 </body>

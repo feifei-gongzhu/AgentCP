@@ -30,8 +30,8 @@ export function badge(text, tone) {
 const SEVERITY_LABEL = { critical: "严重", high: "高危", medium: "中危", low: "低危", info: "信息", unknown: "未定级" };
 export function severityChip(severity) {
   const key = String(severity || "unknown").toLowerCase();
-  const node = el("span", `sev sev-${key}`);
-  node.append(el("i", "sev-dot"), el("span", "", SEVERITY_LABEL[key] || key));
+  const node = el("span", "severity", SEVERITY_LABEL[key] || key);
+  node.setAttribute("data-level", key);
   return node;
 }
 export function chip(text, tone = "") {

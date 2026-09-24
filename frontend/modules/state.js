@@ -17,6 +17,11 @@ export const state = {
 export const ui = {
   tab: "vulns", diag: "jobs", memberIndex: 0,
   selected: { vulns: null, leads: null, directions: null, surface: null },
+  findingFilters: {
+    vulns: { q: "", severity: "", status: "", type: "" },
+    leads: { q: "", severity: "", status: "", type: "" },
+    surface: { q: "", severity: "", status: "", type: "" },
+  },
   expandedTechnologyHosts: new Set(),
 };
 
