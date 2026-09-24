@@ -1487,7 +1487,7 @@ async function deleteProject(vendor) {
 /* ---------- 标签切换 ---------- */
 function selectTab(tab) {
   ui.tab = tab;
-  document.querySelectorAll(".tab").forEach(node => node.classList.toggle("active", node.dataset.tab === tab));
+  document.querySelectorAll(".tab-btn").forEach(node => node.classList.toggle("active", node.dataset.tab === tab));
   document.querySelectorAll("[data-tab-panel]").forEach(node => { node.hidden = node.dataset.tabPanel !== tab; });
 }
 
@@ -1533,8 +1533,8 @@ $("projectList").addEventListener("click", async event => {
   if (row) await openProject(row.dataset.vendor);
 });
 // 发现页标签
-document.querySelector(".tab-nav").addEventListener("click", event => {
-  const tab = event.target.closest(".tab");
+document.querySelector(".tab-bar").addEventListener("click", event => {
+  const tab = event.target.closest(".tab-btn");
   if (tab) selectTab(tab.dataset.tab);
 });
 // 证据与 Prompt 预览（事件委托）

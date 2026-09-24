@@ -18,7 +18,7 @@ a{color:var(--af);text-decoration:none}
 .tab-badge{font:500 10px var(--m);background:var(--sf3);color:var(--mu);padding:0 5px;border-radius:8px;margin-left:2px}
 .nav-right{display:flex;align-items:center;gap:8px;margin-left:auto}
 .nav-right select{font:500 13px var(--f);color:var(--fg);background:var(--sf2);border:1px solid var(--bd);border-radius:6px;padding:5px 28px 5px 10px;appearance:none;background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='10' fill='none' stroke='%2371717a' stroke-width='1.5'%3E%3Cpath d='M2.5 4l3.5 3.5L9.5 4'/%3E%3C/svg%3E");background-repeat:no-repeat;background-position:right 8px center;min-width:100px}
-.pill{display:inline-flex;align-items:center;font:500 11px var(--f);color:var(--mu);background:var(--sf2);border-radius:99px;padding:2px 8px}
+.pill{display:inline-flex;align-items:center;font:500 11px var(--f);color:var(--mu);background:var(--sf2);border-radius:99px;padding:2px 8px;white-space:nowrap;max-width:120px;overflow:hidden;text-overflow:ellipsis}
 .pill.ok{color:var(--ok);background:#22c55e12}.pill.warn{color:var(--wa);background:#eab30812}.pill.error{color:var(--er);background:#ef444412}.pill.info{color:var(--af);background:var(--ab)}
 
 .page-container{max-width:1200px;margin:0 auto;padding:36px 32px 80px}

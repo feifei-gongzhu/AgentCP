@@ -54,6 +54,9 @@ export function setBadge(element, value) {
 }
 
 export function setConnectionStatus(text, online = false) {
-  $("connectionText").textContent = text;
-  $("connectionText").parentElement.classList.toggle("online", online);
+  const node = $("connectionText");
+  if (!node) return;
+  node.textContent = text;
+  node.hidden = false;
+  node.classList.toggle("online", online);
 }
