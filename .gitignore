@@ -41,3 +41,6 @@ build/
 .sorne-work/
 *.db-wal
 *.db-shm
+
+# User-local team presets (may contain keychain aliases; never commit).
+user_presets/
