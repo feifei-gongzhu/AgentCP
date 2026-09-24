@@ -13,7 +13,9 @@
 <div class="app">
 
   <aside class="sidebar">
-    <div class="brand"><strong>Sorne</strong><small>安全研究控制平面</small><span class="brand-version">0.0.4</span></div>
+    <div class="brand">
+      <span class="mark"><i></i><i></i></span>
+      <strong>Sorne</strong><small>安全研究控制平面</small><span class="brand-version">0.0.4</span></div>
     <div class="project-switch">
       <label for="projectSelect">项目</label>
       <select id="projectSelect" aria-label="项目"></select>
@@ -101,17 +103,18 @@
       <div class="metrics">
         <div class="metric"><span class="metric-label">活跃资产</span><div class="metric-value" id="assetMetric">0</div><span class="metric-meta" id="assetMetricNote">范围内未失效端点</span></div>
         <div class="metric"><span class="metric-label">事实</span><div class="metric-value" id="factMetric">0</div><span class="metric-meta" id="factMetricNote">已提交到黑板</span></div>
-        <div class="metric" data-attention><span class="metric-label">漏洞</span><div class="metric-value" id="vulnMetric">0</div><span class="metric-meta" id="vulnMetricNote">待人工复核</span></div>
+        <div class="metric"><span class="metric-label">漏洞</span><div class="metric-value" id="vulnMetric">0</div><span class="metric-meta" id="vulnMetricNote">待人工复核</span></div>
         <div class="metric"><span class="metric-label">覆盖</span><div class="metric-value" id="coverageMetric">0%</div><span class="metric-meta" id="coverageMetricNote">已观察维度</span></div>
-        <div class="metric"><span class="metric-label">阶段</span><div class="metric-value" id="phaseValue">—</div><span class="metric-meta">当前</span></div>
-        <div class="metric"><span class="metric-label">运行时间</span><div class="metric-value" id="sbElapsed">—</div><span class="metric-meta">已用</span></div>
+        <!-- 阶段与耗时在下方运行摘要中展示 -->
       </div>
 
       <div class="section">
         <div class="sec-head"><h2>当前状态</h2><span class="pill" id="currentTaskBadge">—</span></div>
         <div class="kv"><span>任务</span><b id="currentTask">—</b></div>
         <div class="kv"><span>决策</span><b id="decisionValue">—</b><small class="text-dim" id="gateReason"></small></div>
-        <div class="kv"><span>Run</span><b id="runSummary" class="mono">—</b></div>
+        <div class="kv"><span>阶段</span><b id="phaseValue">—</b></div>
+      <div class="kv"><span>运行时间</span><b id="sbElapsed">—</b></div>
+      <div class="kv"><span>Run</span><b id="runSummary" class="mono">—</b></div>
         <div class="progress-wrap"><div class="progress"><i id="runProgressBar"></i></div><small id="runProgressText" class="text-dim"></small></div>
       </div>
 

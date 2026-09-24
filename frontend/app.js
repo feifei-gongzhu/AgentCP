@@ -9,7 +9,7 @@ import { state, ui } from "./modules/state.js";
 import { truncateText, percent, formatEventTime, formatDuration, ageLabel } from "./modules/format.js";
 import { $, el, cell, emptyRow, renderRows, preserveScroll, showToast, setBadge, setConnectionStatus } from "./modules/dom.js";
 import { api } from "./modules/api.js";
-import { ICONS, badge, severityChip, chip, itemRow, detailSection, statCard } from "./modules/ui.js";
+import { ICONS, badge, chip, itemRow, detailSection } from "./modules/ui.js";
 import {
   buildDerived, directionStatusInfo, verdictLabel, riskLeadLifecycle,
   phaseLabel, roleLabel, roleShort, stageLabel, jobStatusLabel, verbLabel,
@@ -273,8 +273,15 @@ function updateTeamPresetState(payload, preferredId = null) {
 function renderRunStatus(data, automation, metrics) {
   const run = automation.run || null;
   $("phaseValue").textContent = phaseLabel(data.phase);
-  setBadge($("runBadge"), run?.status || "idle");
-  setBadge($("gateBadge"), data.gate_status === "awaiting_approval" ? "awaiting_approval" : run?.status || "idle");
+  const rb = $("runBadge");
+  rb.textContent = run?.status || "idle";
+  rb.className = "status";
+  rb.setAttribute("data-state", run?.status || "idle");
+  const gb = $("gateBadge");
+  const gateVal = data.gate_status === "awaiting_approval" ? "awaiting_approval" : run?.status || "idle";
+  gb.textContent = gateVal;
+  gb.className = "status";
+  gb.setAttribute("data-state", gateVal);
   $("sbElapsed").textContent = formatDuration(run?.elapsed_seconds);
   $("runSummary").textContent = run ? `${run.id} · ${run.team} · ${stageLabel(run.stage)} · 并发 ${run.max_workers} · wave ${run.wave ?? 1}/${run.max_waves ?? "?"}` : "暂无自动化运行";
   const jobs = automation.jobs || [];
@@ -400,7 +407,7 @@ function renderVulnList() {
       const verdict = verdicts[fact.id];
       const row = itemRow({
         title: fact.title,
-        chips: [severityChip(fact.severity)],
+        chips: [el("span", "severity", fact.severity || "unknown")],
         pending: fact.__pending,
         selected: ui.selected.vulns === fact.id,
         meta: [
@@ -435,7 +442,9 @@ function renderVulnDetail() {
   const nodes = [];
   nodes.push(el("div", "detail-title", fact.title));
   const chipsRow = el("div", "detail-chips");
-  chipsRow.append(severityChip(fact.severity));
+  const sevEl = el("span", "severity", fact.severity || "unknown");
+  sevEl.setAttribute("data-level", (fact.severity || "unknown").toLowerCase());
+  chipsRow.append(sevEl);
   [fact.id, `置信度 ${percent(fact.confidence)}`, `影响力 ${percent(fact.impact_score)}`]
     .forEach(text => chipsRow.append(chip(text)));
   if (fact.__pending) chipsRow.append(chip(`候选 · 来自 ${fact.__member} · 尚未写入黑板`, "warn"));
@@ -505,7 +514,7 @@ function renderLeadList() {
       const confirmed = item.__confirmedVulnerabilities?.length;
       list.append(itemRow({
         title: item.title,
-        chips: [severityChip(item.severity)],
+        chips: (() => { const s = el("span", "severity", item.severity || "unknown"); s.setAttribute("data-level", (item.severity || "unknown").toLowerCase()); return [s]; })(),
         pending: item.__pending,
         selected: ui.selected.leads === item.id,
         meta: [
@@ -529,7 +538,9 @@ function renderLeadDetail() {
   const lifecycle = riskLeadLifecycle(item);
   const nodes = [el("div", "detail-title", item.title)];
   const chipsRow = el("div", "detail-chips");
-  chipsRow.append(severityChip(item.severity));
+  const sevEl = el("span", "severity", item.severity || "unknown");
+  sevEl.setAttribute("data-level", (item.severity || "unknown").toLowerCase());
+  chipsRow.append(sevEl);
   [item.id, lifecycle.label, `置信度 ${percent(item.confidence)}`, `影响力 ${percent(item.impact_score)}`, `创建于 ${formatEventTime(item.created_at || item.updated_at)}`]
     .forEach(text => chipsRow.append(chip(text)));
   if (item.__pending) chipsRow.append(chip(`候选 · 来自 ${item.__member}`, "warn"));
