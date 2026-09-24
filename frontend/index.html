@@ -7,391 +7,376 @@
   <title>Sorne</title>
   <link rel="preconnect" href="https://rsms.me">
   <link rel="stylesheet" href="https://rsms.me/inter/inter.css">
-  <link rel="stylesheet" href="/frontend/styles.css?v=8.0">
+  <link rel="stylesheet" href="/frontend/styles.css?v=9.0">
 </head>
 <body>
+<div class="app">
 
-<header class="nav">
-  <div class="nav-inner">
-    <a class="logo" href="#projects">Sorne</a>
-    <nav class="tabs" id="mainNav">
-      <a data-route-link="projects" href="#projects">项目</a>
-      <a data-route-link="overview" href="#overview" data-project-only>总览</a>
-      <a data-route-link="findings" href="#findings" data-project-only>发现<span class="tab-badge" id="navFindingsCount" hidden></span></a>
-      <a data-route-link="directions" href="#directions" data-project-only>方向<span class="tab-badge" id="navDirectionsCount" hidden></span></a>
-      <a data-route-link="assets" href="#assets" data-project-only>资产</a>
-      <a data-route-link="runs" href="#runs" data-project-only>运行</a>
-      <a data-route-link="settings" href="#settings" data-project-only>设置</a>
-    </nav>
-    <div class="nav-right">
+  <aside class="sidebar">
+    <div class="brand"><strong>Sorne</strong><small>安全研究控制平面</small><span class="brand-version">0.0.4</span></div>
+    <div class="project-switch">
+      <label for="projectSelect">项目</label>
       <select id="projectSelect" aria-label="项目"></select>
-      <button id="newTaskButton" class="btn primary sm" type="button">新建</button>
-      <span id="gateBadge" class="pill" hidden></span>
-      <span id="runBadge" class="pill" hidden></span>
-      <span class="pill" id="connectionText" hidden></span>
-      <button id="refreshButton" class="btn ghost sm" type="button">↻</button>
+    </div>
+    <button id="newTaskButton" class="btn primary" type="button" style="width:100%">新建审计任务</button>
+    <nav class="nav" aria-label="工作台">
+      <a class="nav-item" data-route-link="projects" href="#projects">项目中心</a>
+      <div class="nav-group" id="projectNav" hidden>
+        <span class="nav-group-label">工作台</span>
+        <a class="nav-item" data-route-link="overview" href="#overview">总览</a>
+        <a class="nav-item" data-route-link="findings" href="#findings">发现<span class="nav-count" id="navFindingsCount" hidden></span></a>
+        <a class="nav-item" data-route-link="directions" href="#directions">验证方向<span class="nav-count" id="navDirectionsCount" hidden></span></a>
+        <a class="nav-item" data-route-link="assets" href="#assets">资产</a>
+        <a class="nav-item" data-route-link="runs" href="#runs">运行</a>
+        <a class="nav-item" data-route-link="settings" href="#settings">团队与设置</a>
+      </div>
+    </nav>
+    <div class="sidebar-foot">
+      <div class="pulse"><i></i><span id="connectionText">连接中</span></div>
+      <small style="color:var(--text-muted);font-size:11px">authorized / *</small>
+    </div>
+  </aside>
+
+  <div class="main-area">
+    <div class="context-bar">
+      <div class="ctx-left"><h1 id="pageTitle">项目中心</h1><span id="routeEyebrow" class="text-dim" hidden></span></div>
+      <div class="ctx-right">
+        <span id="gateBadge" class="pill" hidden></span>
+        <span id="runBadge" class="pill" hidden></span>
+        <button id="refreshButton" class="btn ghost sm" type="button">↻</button>
+      </div>
+    </div>
+
+    <div class="content">
+
+    <!-- 项目中心 -->
+    <section id="view-projects" data-view="projects" hidden>
+      <div class="page-head"><div><h1 style="font-size:20px">项目中心</h1><p class="desc">选择项目开始工作</p></div></div>
+      <div class="inline-stats">
+        <span><b id="hubFalsePositiveRate">—</b> 长期误报率</span>
+        <span><b id="hubReviewedCount">0</b> 已复核</span>
+        <span><b id="hubRefutedCount">0</b> 驳斥</span>
+        <span><b id="hubSampleQuality" class="text-dim">—</b></span>
+      </div>
+      <div class="table-scroll"><table class="dt project-table"><thead><tr>
+        <th>项目</th><th>目标 / 当前任务</th><th>阶段</th><th>状态</th><th class="num">目标</th><th class="num">事实</th><th class="num">漏洞</th><th>误报率</th><th>更新时间</th><th style="width:1%">操作</th>
+      </tr></thead><tbody id="projectList"></tbody></table></div>
+    </section>
+
+    <!-- 总览 -->
+    <section id="view-overview" data-view="overview" hidden>
+      <div id="gateApprovalCard" class="gate" hidden>
+        <div class="gate-top">
+          <div><span class="gate-dot"></span><strong>强制门禁</strong><span class="text-dim">执行已暂停，需要批准后继续</span></div>
+          <span id="gateApprovalRunBadge" class="pill warn">awaiting_approval</span>
+        </div>
+        <p id="gateApprovalReason" class="gate-reason"></p>
+        <div class="gate-data">
+          <span><label>阶段</label><b id="gateApprovalPhase">—</b></span>
+          <span><label>耗时</label><b id="gateApprovalElapsed">—</b></span>
+          <span><label>资产/漏洞</label><b id="gateApprovalAssets">—</b></span>
+          <span><label>线索</label><b id="gateApprovalHighRisk">—</b></span>
+          <span><label>上次发现</label><b id="gateApprovalDiscovery">—</b></span>
+          <span><label>运行</label><b id="gateApprovalRun">—</b></span>
+        </div>
+        <div class="gate-actions">
+          <textarea id="gateApprovalNote" rows="1" placeholder="备注（可选）"></textarea>
+          <button id="gateContinueButton" class="btn primary" type="button">批准继续</button>
+          <button id="gateStopButton" class="btn danger" type="button">止损</button>
+        </div>
+      </div>
+      <div id="runFailure" class="alert-error" hidden></div>
+
+      <div class="page-head">
+        <div><h1 style="font-size:20px">总览</h1><p class="desc" id="goalText">—</p></div>
+        <div class="run-controls">
+          <input id="teamInput" value="default" class="input-sm" title="团队">
+          <input id="workersInput" type="number" min="1" value="5" class="input-sm" title="并发">
+          <input id="timeoutInput" type="number" min="30" max="3600" value="3600" class="input-sm" title="超时">
+          <button id="launchButton" class="btn primary" type="button">启动研究</button>
+          <button id="cancelButton" class="btn danger" type="button" disabled>取消</button>
+        </div>
+      </div>
+
+      <div class="metrics">
+        <div class="metric"><span class="metric-label">活跃资产</span><div class="metric-value" id="assetMetric">0</div><span class="metric-meta" id="assetMetricNote">范围内未失效端点</span></div>
+        <div class="metric"><span class="metric-label">事实</span><div class="metric-value" id="factMetric">0</div><span class="metric-meta" id="factMetricNote">已提交到黑板</span></div>
+        <div class="metric" data-attention><span class="metric-label">漏洞</span><div class="metric-value" id="vulnMetric">0</div><span class="metric-meta" id="vulnMetricNote">待人工复核</span></div>
+        <div class="metric"><span class="metric-label">覆盖</span><div class="metric-value" id="coverageMetric">0%</div><span class="metric-meta" id="coverageMetricNote">已观察维度</span></div>
+        <div class="metric"><span class="metric-label">阶段</span><div class="metric-value" id="phaseValue">—</div><span class="metric-meta">当前</span></div>
+        <div class="metric"><span class="metric-label">运行时间</span><div class="metric-value" id="sbElapsed">—</div><span class="metric-meta">已用</span></div>
+      </div>
+
+      <div class="section">
+        <div class="sec-head"><h2>当前状态</h2><span class="pill" id="currentTaskBadge">—</span></div>
+        <div class="kv"><span>任务</span><b id="currentTask">—</b></div>
+        <div class="kv"><span>决策</span><b id="decisionValue">—</b><small class="text-dim" id="gateReason"></small></div>
+        <div class="kv"><span>Run</span><b id="runSummary" class="mono">—</b></div>
+        <div class="progress-wrap"><div class="progress"><i id="runProgressBar"></i></div><small id="runProgressText" class="text-dim"></small></div>
+      </div>
+
+      <div class="section">
+        <div class="sec-head"><h2>攻击面覆盖</h2><span class="text-dim" id="coverageSummaryChip"></span></div>
+        <div id="coverageList" class="coverage-grid"></div>
+      </div>
+
+      <details id="directivePanel" class="collapse">
+        <summary>项目所有者指令 <span class="text-dim" id="interventionScopeNote"></span></summary>
+        <div class="collapse-body">
+          <div class="row-3">
+            <select id="interventionType"><option value="supplement">补充约束</option><option value="redirect">修正方向</option><option value="evidence_correction">纠正证据</option><option value="metacog_review">元认知复盘</option></select>
+            <input id="hintTarget" placeholder="目标（可选）">
+            <input id="hintPriority" type="number" min="0" max="10" value="10" title="优先级">
+          </div>
+          <textarea id="hintContent" rows="2" placeholder="输入指令内容…"></textarea>
+          <button id="hintButton" class="btn" type="button">提交指令</button>
+        </div>
+      </details>
+
+      <div class="section">
+        <div class="sec-head"><h2>最近事件</h2></div>
+        <div id="recentEvents" class="event-feed compact"></div>
+      </div>
+    </section>
+
+    <!-- 发现 -->
+    <section id="view-findings" data-view="findings" hidden>
+      <div class="page-head"><h1 style="font-size:20px">发现</h1></div>
+      <div class="tab-bar" style="display:flex;gap:0;border-bottom:1px solid var(--border);overflow-x:auto" role="tablist">
+        <button class="tab-btn active" data-tab="vulns" type="button">漏洞 <em id="vulnerabilitiesCount">0</em></button>
+        <button class="tab-btn" data-tab="leads" type="button">线索 <em id="riskLeadsCount">0</em></button>
+        <button class="tab-btn" data-tab="surface" type="button">攻击面 <em id="attackIntelCount">0</em></button>
+      </div>
+      <div data-tab-panel="vulns">
+        <div class="inline-stats">
+          <span><b id="qualitySystemVulns">0</b> 漏洞</span><span><b id="qualityReviewed">0</b> 复核</span>
+          <span><b id="qualityConfirmed">0</b> 认可</span><span><b id="qualitySameRoot">0</b> 同源</span>
+          <span><b id="qualityRefuted">0</b> 驳斥</span><span><b id="qualityFalsePositiveRate">—</b> 误报率</span>
+        </div>
+        <p class="text-dim mb"><span id="qualitySample"></span> · <span id="qualityRuleSuggestions"></span></p>
+        <div class="split">
+          <div id="vulnList" class="row-list"></div>
+          <div id="vulnDetail" class="detail-pane">
+            <div id="vulnDetailInfo"><div class="placeholder">选择漏洞</div></div>
+            <div id="reviewBox" hidden>
+              <h3>人工裁决 <span id="reviewFindingName" class="mono"></span></h3>
+              <div class="row-3">
+                <select id="reviewAction"><option value="accepted">认可</option><option value="adjusted">调整</option><option value="same_root">同源</option><option value="refuted">驳斥</option><option value="reclassified">降级</option><option value="retest_requested">复验</option></select>
+                <select id="reviewClassification"><option value="vulnerability">漏洞</option><option value="same_root_vulnerability">同源</option><option value="risk_lead">线索</option><option value="attack_surface">攻击面</option><option value="inconclusive">不足</option></select>
+                <select id="reviewSeverity"><option value="info">信息</option><option value="low">低</option><option value="medium">中</option><option value="high">高</option><option value="critical">严重</option></select>
+              </div>
+              <div class="row-3">
+                <label id="reviewDuplicateOfLabel" class="fld" hidden>主漏洞<select id="reviewDuplicateOf"></select></label>
+                <input id="reviewReasonCodes" placeholder="标签（逗号分隔）">
+                <select id="reviewScope"><option value="current_finding">当前</option><option value="current_project_type">同类</option><option value="global_pattern">全局</option></select>
+              </div>
+              <textarea id="reviewReason" rows="2" placeholder="理由（必填）"></textarea>
+              <button id="submitFindingReview" class="btn primary" type="button">提交</button>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div data-tab-panel="leads" hidden>
+        <p class="text-dim mb" id="leadsSummary"></p>
+        <div class="split">
+          <div id="leadList" class="row-list"></div>
+          <div id="leadDetail" class="detail-pane"><div class="placeholder">选择线索</div></div>
+        </div>
+      </div>
+      <div data-tab-panel="surface" hidden>
+        <p class="text-dim mb" id="surfaceSummary"></p>
+        <div class="split">
+          <div id="surfaceList" class="row-list"></div>
+          <div id="surfaceDetail" class="detail-pane"><div class="placeholder">选择条目</div></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- 方向 -->
+    <section id="view-directions" data-view="directions" hidden>
+      <div class="page-head"><h1 style="font-size:20px">方向</h1><p class="desc" id="directionsSummary"></p></div>
+      <div class="split">
+        <div id="directionList" class="row-list"></div>
+        <div id="directionDetail" class="detail-pane"><div class="placeholder">选择方向</div></div>
+      </div>
+      <div class="section">
+        <div class="sec-head"><h2>假设池</h2><span class="text-dim" id="methodPackSummary"></span></div>
+        <div class="table-scroll"><table class="dt"><thead><tr><th>假设</th><th>目标</th><th>维度</th><th class="num">优先分</th><th>成熟度</th><th>状态</th><th>来源</th></tr></thead><tbody id="hypothesesBody"></tbody></table></div>
+      </div>
+    </section>
+
+    <!-- 资产 -->
+    <section id="view-assets" data-view="assets" hidden>
+      <div class="page-head">
+        <h1 style="font-size:20px">资产与画像 <span id="assetInventoryBadge" class="pill" hidden></span></h1>
+        <div class="import-row">
+          <input id="assetInventoryFile" type="file" accept=".csv,.tsv,.txt,.json,.xlsx" class="input-sm">
+          <input id="assetLogicalSource" maxlength="240" placeholder="来源名称" class="input-sm">
+          <button id="importAssetInventoryButton" class="btn" type="button">导入</button>
+        </div>
+      </div>
+      <div class="metrics">
+        <div class="metric"><span class="metric-label">底座记录</span><div class="metric-value" id="assetInventoryTotal">0</div><span class="metric-meta">端点记录</span></div>
+        <div class="metric"><span class="metric-label">待画像</span><div class="metric-value" id="assetInventoryPending">0</div><span class="metric-meta">下一轮</span></div>
+        <div class="metric"><span class="metric-label">已画像</span><div class="metric-value" id="assetInventoryProfiled">0</div><span class="metric-meta">含部分</span></div>
+        <div class="metric"><span class="metric-label">范围外</span><div class="metric-value" id="assetInventoryOutOfScope">0</div><span class="metric-meta">仅记录</span></div>
+      </div>
+      <div class="table-scroll"><table class="dt"><thead><tr><th>资产</th><th>类型</th><th>状态</th><th>画像</th><th>URL</th><th>溯源</th></tr></thead><tbody id="assetInventoryBody"></tbody></table></div>
+      <div class="pager"><button id="assetPreviousPage" class="btn ghost sm">←</button><span id="assetPaginationText" class="text-dim"></span><button id="assetNextPage" class="btn ghost sm">→</button></div>
+      <p id="assetInventoryNote" class="text-dim"></p>
+      <div class="section">
+        <div class="sec-head">
+          <h2>技术画像 <span id="technologyProfileCount" class="text-dim"></span></h2>
+          <div class="btn-group">
+            <button id="expandTechnologyHosts" class="btn ghost sm">展开</button>
+            <button id="collapseTechnologyHosts" class="btn ghost sm">收起</button>
+            <button id="downloadTechnologyXlsx" class="btn sm">Excel</button>
+            <button id="downloadTechnologyCsv" class="btn ghost sm">CSV</button>
+            <button id="downloadTechnologyJson" class="btn ghost sm">JSON</button>
+          </div>
+        </div>
+        <p class="text-dim mb" id="technologyProfileSummary"></p>
+        <div id="technologyProfileList"></div>
+      </div>
+    </section>
+
+    <!-- 运行 -->
+    <section id="view-runs" data-view="runs" hidden>
+      <div class="page-head"><h1 style="font-size:20px">运行与诊断</h1></div>
+      <div class="section">
+        <div class="sec-head"><h2>Job 队列</h2></div>
+        <div class="table-scroll"><table class="dt"><thead><tr><th>单元</th><th>职责</th><th>模型</th><th>当前</th><th>阶段</th><th>状态</th><th class="num">尝试</th><th>信号</th></tr></thead><tbody id="jobsBody"></tbody></table></div>
+      </div>
+      <div class="section">
+        <div class="sec-head"><h2>事件流</h2><span id="eventsCountChip" class="text-dim"></span></div>
+        <div id="eventsList" class="event-feed"></div>
+      </div>
+      <div class="section">
+        <div class="sec-head"><h2>Prompt 审计</h2></div>
+        <div class="table-scroll"><table class="dt"><thead><tr><th>时间</th><th>单元</th><th>角色</th><th>Prompt</th><th>预算</th><th>裁剪</th><th></th></tr></thead><tbody id="promptSnapshotsBody"></tbody></table></div>
+        <pre id="promptSnapshotPreview" class="code-block">选择一次调用</pre>
+      </div>
+      <div class="grid-2col">
+        <div class="section">
+          <div class="sec-head"><h2>反事实与记忆 <span id="researchMemoryCountChip" class="text-dim"></span></h2></div>
+          <div class="table-scroll"><table class="dt"><thead><tr><th>类型</th><th>目标</th><th>内容</th><th>条件</th><th>状态</th></tr></thead><tbody id="researchMemoryBody"></tbody></table></div>
+        </div>
+        <div class="section">
+          <div class="sec-head"><h2>WAF <span id="wafCountChip" class="text-dim"></span></h2></div>
+          <div class="table-scroll"><table class="dt"><thead><tr><th>目标</th><th>假设</th><th>状态</th><th>信号</th><th>预算</th></tr></thead><tbody id="wafAssessmentsBody"></tbody></table></div>
+        </div>
+        <div class="section">
+          <div class="sec-head"><h2>负向证据 <span id="negativeCountChip" class="text-dim"></span></h2></div>
+          <div class="table-scroll"><table class="dt"><thead><tr><th>目标</th><th>假设</th><th>结果</th><th>有效期</th><th>作用</th></tr></thead><tbody id="negativeEvidenceBody"></tbody></table></div>
+        </div>
+        <div class="section">
+          <div class="sec-head"><h2>证据 <span id="evidenceCountChip" class="text-dim"></span></h2></div>
+          <div class="table-scroll"><table class="dt"><thead><tr><th>Fact</th><th>路径</th><th>大小</th><th>SHA</th><th></th></tr></thead><tbody id="evidenceBody"></tbody></table></div>
+          <pre id="evidencePreview" class="code-block">选择证据</pre>
+        </div>
+      </div>
+    </section>
+
+    <!-- 设置 -->
+    <section id="view-settings" data-view="settings" hidden>
+      <div class="page-head"><h1 style="font-size:20px">团队与设置</h1><p class="desc">目标 · 模型团队 · 黑板</p></div>
+      <div class="section">
+        <div class="sec-head"><h2>测试目标</h2><span class="pill ok">authorized / *</span></div>
+        <div class="form-stack">
+          <label id="webTargetField" class="fld">目标<textarea id="targetTargets" rows="4" placeholder="https://app.example.com&#10;api.example.com"></textarea></label>
+          <div class="row-3">
+            <label id="localTargetPathField" class="fld">本地目录<input id="targetPath"></label>
+            <label class="fld">类型<select id="targetProjectType"><option value="Web渗透">Web</option><option value="客户端">客户端</option></select></label>
+            <label class="fld chk"><span><input id="targetMreconEnabled" type="checkbox" checked> mrecon</span></label>
+          </div>
+          <label class="fld">业务目标<textarea id="targetGoal" rows="2"></textarea></label>
+          <div class="row-2">
+            <label class="fld">不收范围<textarea id="targetOutOfScope" rows="2"></textarea></label>
+            <label class="fld">成功条件<textarea id="targetSuccessCriteria" rows="2"></textarea></label>
+          </div>
+          <div id="clientUploadPanel" class="upload-box" hidden>
+            <input id="clientArtifactFile" type="file">
+            <button id="uploadClientArtifactButton" class="btn" type="button">上传</button>
+            <small id="clientUploadStatus" class="text-dim"></small>
+          </div>
+          <label class="fld">补充说明<textarea id="targetNotes" rows="2"></textarea></label>
+        </div>
+        <div id="newProjectBox" class="new-proj" hidden>
+          <input id="newProjectName" maxlength="80" placeholder="项目名称">
+          <select id="newProjectPreset"><option value="">默认预设</option><option value="__system__">系统模板</option></select>
+          <button id="createProjectButton" class="btn primary" type="button">创建</button>
+        </div>
+      </div>
+      <div class="section">
+        <div class="sec-head">
+          <h2>Agent 团队</h2>
+          <button id="addRoleButton" class="btn ghost sm" type="button">+ 添加</button>
+        </div>
+        <div class="preset-bar">
+          <select id="teamPresetSelect"><option value="">尚无预设</option></select>
+          <div class="btn-group">
+            <button id="applyTeamPresetButton" class="btn sm">应用</button>
+            <button id="saveAsTeamPresetButton" class="btn primary sm">另存</button>
+            <button id="updateTeamPresetButton" class="btn ghost sm">更新</button>
+            <button id="defaultTeamPresetButton" class="btn ghost sm">默认</button>
+            <button id="duplicateTeamPresetButton" class="btn ghost sm">复制</button>
+            <button id="renameTeamPresetButton" class="btn ghost sm">改名</button>
+            <button id="deleteTeamPresetButton" class="btn danger sm">删除</button>
+          </div>
+          <p id="teamPresetStatus" class="text-dim"></p>
+        </div>
+        <div class="team-editor">
+          <div id="memberList" class="member-rows"></div>
+          <div class="member-detail">
+            <div id="memberPanelEmpty" class="placeholder">选择角色</div>
+            <div id="memberPanel" hidden>
+              <div class="sec-head"><strong id="memberPanelTitle"></strong><button id="removeMemberButton" class="btn danger sm" type="button">删除</button></div>
+              <div class="row-3">
+                <label class="fld">名称<input id="mName"><small class="fld-err" id="eName" hidden></small></label>
+                <label class="fld">职责<select id="mRole"><option value="reason">推理</option><option value="metacog">盲点</option><option value="executor">执行</option><option value="reviewer">复核</option><option value="waf_analyst">WAF</option><option value="profile_mapper">画像</option></select></label>
+                <div class="row-2"><label class="fld">并发<input id="mMaxRunning" type="number" min="1"></label><label class="fld">优先级<input id="mPriority" type="number" min="0"></label></div>
+              </div>
+              <div class="row-3">
+                <label class="fld">后端<select id="mType"><option value="codex">codex</option><option value="claude-cli">claude-cli</option><option value="openai-compatible">openai</option><option value="ollama">ollama</option><option value="container">container</option></select></label>
+                <label class="fld" id="fModel">模型<input id="mModel"><small class="fld-err" id="eModel" hidden></small></label>
+                <label class="fld" id="fBaseUrl">地址<input id="mBaseUrl"><small class="fld-err" id="eBaseUrl" hidden></small></label>
+              </div>
+              <div class="row-3">
+                <label class="fld" id="fApiKeyEnv">密钥变量<input id="mApiKeyEnv"><small class="fld-err" id="eApiKeyEnv" hidden></small></label>
+                <label class="fld" id="fAuthMode">鉴权<select id="mAuthMode"><option value="auto">auto</option><option value="bearer">bearer</option><option value="x-api-key">x-api-key</option></select></label>
+                <label class="fld" id="fSecret">Key<input id="mSecret" type="password" placeholder="留空不变"><small id="mSecretStatus" class="text-dim"></small></label>
+              </div>
+              <div class="row-2">
+                <label class="fld">运行模式<select id="mRuntimeMode"><option value="local-docker">Docker</option><option value="agent-compose">agent-compose</option><option value="local-cli">本地 CLI</option></select><small id="localCliNote" hidden class="text-dim"></small></label>
+                <label class="fld">沙箱<select id="mSandbox"><option value="read-only">read-only</option><option value="workspace-write">workspace-write</option><option value="danger-full-access">danger-full-access</option></select></label>
+              </div>
+              <div id="containerGroup" hidden>
+                <label class="fld">镜像<input id="mContainerImage"><small class="fld-err" id="eContainerImage" hidden></small></label>
+                <label class="fld">命令<textarea id="mContainerCommand" rows="2"></textarea><small class="fld-err" id="eContainerCommand" hidden></small></label>
+              </div>
+              <label class="fld">专属提示词<textarea id="mCustomPrompt" rows="5" maxlength="30000"></textarea><small id="mPromptCount" class="text-dim">0/30000</small></label>
+            </div>
+          </div>
+        </div>
+      </div>
+      <details id="project-blackboard" class="collapse">
+        <summary>项目黑板 <span class="text-dim">工作记忆</span></summary>
+        <div class="collapse-body"><button id="copyBoard" class="btn ghost sm">复制</button><pre id="blackboardText" class="code-block"></pre></div>
+      </details>
+      <div class="save-bar">
+        <span id="targetDirtyFlag" class="dirty" hidden>目标未保存</span>
+        <span id="teamDirtyFlag" class="dirty" hidden>团队未保存</span>
+        <span id="saveBarClean" class="text-dim">已保存</span>
+        <span class="spacer"></span>
+        <button id="saveTargetButton" class="btn" type="button">保存目标</button>
+        <button id="saveTeamButton" class="btn primary" type="button">保存团队</button>
+      </div>
+    </section>
+
     </div>
   </div>
-</header>
-
-<main class="page-container">
-    <span id="routeEyebrow" hidden></span>
-    <span id="pageTitle" hidden></span>
-    <span id="projectNav" hidden></span>
-
-  <!-- ========== 项目 ========== -->
-  <section id="view-projects" data-view="projects" hidden>
-    <div class="page-head">
-      <div><h1>项目</h1><p class="desc">选择一个项目开始工作，或创建新的审计任务。</p></div>
-      <div class="head-stats" aria-label="长期质量">
-        <div class="hs"><span class="hs-n" id="hubFalsePositiveRate">—</span><span class="hs-l">长期误报率</span></div>
-        <div class="hs"><span class="hs-n" id="hubReviewedCount">0</span><span class="hs-l">复核</span></div>
-        <div class="hs"><span class="hs-n" id="hubRefutedCount">0</span><span class="hs-l">驳斥</span></div>
-        <div class="hs"><span class="hs-n text-dim" id="hubSampleQuality">—</span><span class="hs-l">样本</span></div>
-      </div>
-    </div>
-    <div class="project-rows" id="projectList"></div>
-  </section>
-
-  <!-- ========== 总览 ========== -->
-  <section id="view-overview" data-view="overview" hidden>
-
-    <div id="gateApprovalCard" class="gate" hidden>
-      <div class="gate-top">
-        <div>
-          <span class="gate-dot"></span>
-          <strong>强制门禁</strong>
-          <span class="text-dim">执行已暂停，需要你批准后继续</span>
-        </div>
-        <span id="gateApprovalRunBadge" class="pill warn">awaiting_approval</span>
-      </div>
-      <p id="gateApprovalReason" class="gate-reason"></p>
-      <div class="gate-data">
-        <span><label>阶段</label><b id="gateApprovalPhase">—</b></span>
-        <span><label>耗时</label><b id="gateApprovalElapsed">—</b></span>
-        <span><label>资产/漏洞</label><b id="gateApprovalAssets">—</b></span>
-        <span><label>线索</label><b id="gateApprovalHighRisk">—</b></span>
-        <span><label>上次发现</label><b id="gateApprovalDiscovery">—</b></span>
-        <span><label>运行</label><b id="gateApprovalRun">—</b></span>
-      </div>
-      <div class="gate-actions">
-        <textarea id="gateApprovalNote" rows="1" placeholder="备注（可选）"></textarea>
-        <button id="gateContinueButton" class="btn primary" type="button">批准继续</button>
-        <button id="gateStopButton" class="btn danger" type="button">止损</button>
-      </div>
-    </div>
-
-    <div id="runFailure" class="alert-error" hidden></div>
-
-    <div class="page-head">
-      <div><h1>总览</h1><p class="desc" id="goalText">—</p></div>
-      <div class="run-controls">
-        <input id="teamInput" value="default" class="input-sm" title="团队">
-        <input id="workersInput" type="number" min="1" value="5" class="input-sm" title="并发">
-        <input id="timeoutInput" type="number" min="30" max="3600" value="3600" class="input-sm" title="超时">
-        <button id="launchButton" class="btn primary" type="button">启动</button>
-        <button id="cancelButton" class="btn danger" type="button" disabled>取消</button>
-      </div>
-    </div>
-
-    <div class="metric-row">
-      <div class="metric"><b id="assetMetric">0</b><span id="assetMetricNote">资产</span></div>
-      <div class="metric"><b id="factMetric">0</b><span id="factMetricNote">事实</span></div>
-      <div class="metric"><b id="vulnMetric">0</b><span id="vulnMetricNote">漏洞</span></div>
-      <div class="metric"><b id="coverageMetric">0%</b><span id="coverageMetricNote">覆盖</span></div>
-      <div class="metric"><b id="phaseValue">—</b><span>阶段</span></div>
-      <div class="metric"><b id="sbElapsed">—</b><span>运行时间</span></div>
-    </div>
-
-    <div class="section">
-      <div class="sec-head"><h2>当前状态</h2><span class="pill" id="currentTaskBadge">—</span></div>
-      <div class="kv"><span>当前任务</span><b id="currentTask">—</b></div>
-      <div class="kv"><span>决策</span><b id="decisionValue">—</b><small id="gateReason"></small></div>
-      <div class="kv"><span>Run</span><b id="runSummary" class="mono">—</b></div>
-      <div class="progress-wrap"><div class="progress"><i id="runProgressBar"></i></div><small id="runProgressText" class="text-dim"></small></div>
-    </div>
-
-    <div class="section">
-      <div class="sec-head"><h2>攻击面覆盖</h2><span class="text-dim" id="coverageSummaryChip"></span></div>
-      <div id="coverageList" class="coverage-grid"></div>
-    </div>
-
-    <details id="directivePanel" class="collapse">
-      <summary>项目所有者指令 <span class="text-dim" id="interventionScopeNote"></span></summary>
-      <div class="collapse-body">
-        <div class="row-3">
-          <select id="interventionType">
-            <option value="supplement">补充约束</option><option value="redirect">修正方向</option>
-            <option value="evidence_correction">纠正证据</option><option value="metacog_review">元认知复盘</option>
-          </select>
-          <input id="hintTarget" placeholder="目标（可选）">
-          <input id="hintPriority" type="number" min="0" max="10" value="10" title="优先级">
-        </div>
-        <textarea id="hintContent" rows="2" placeholder="输入指令内容…"></textarea>
-        <button id="hintButton" class="btn" type="button">提交指令</button>
-      </div>
-    </details>
-
-    <div class="section">
-      <div class="sec-head"><h2>最近事件</h2></div>
-      <div id="recentEvents" class="event-feed"></div>
-    </div>
-  </section>
-
-  <!-- ========== 发现 ========== -->
-  <section id="view-findings" data-view="findings" hidden>
-    <div class="page-head"><h1>发现</h1></div>
-    <div class="tab-bar" role="tablist">
-      <button class="tab-btn active" data-tab="vulns" type="button">漏洞 <em id="vulnerabilitiesCount">0</em></button>
-      <button class="tab-btn" data-tab="leads" type="button">线索 <em id="riskLeadsCount">0</em></button>
-      <button class="tab-btn" data-tab="surface" type="button">攻击面 <em id="attackIntelCount">0</em></button>
-    </div>
-
-    <div data-tab-panel="vulns">
-      <div class="inline-stats" id="vulnQuality">
-        <span><b id="qualitySystemVulns">0</b> 漏洞</span><span><b id="qualityReviewed">0</b> 复核</span>
-        <span><b id="qualityConfirmed">0</b> 认可</span><span><b id="qualitySameRoot">0</b> 同源</span>
-        <span><b id="qualityRefuted">0</b> 驳斥</span><span><b id="qualityFalsePositiveRate">—</b> 误报率</span>
-      </div>
-      <p class="text-dim mb"><span id="qualitySample"></span> · <span id="qualityRuleSuggestions"></span></p>
-      <div class="split">
-        <div id="vulnList" class="row-list"></div>
-        <div id="vulnDetail" class="detail-pane">
-          <div id="vulnDetailInfo"><div class="placeholder">选择漏洞</div></div>
-          <div id="reviewBox" hidden>
-            <h3>人工裁决 <span id="reviewFindingName" class="mono"></span></h3>
-            <div class="row-3">
-              <select id="reviewAction">
-                <option value="accepted">认可</option><option value="adjusted">调整等级</option>
-                <option value="same_root">同源</option><option value="refuted">驳斥</option>
-                <option value="reclassified">重新分类</option><option value="retest_requested">要求复验</option>
-              </select>
-              <select id="reviewClassification">
-                <option value="vulnerability">漏洞</option><option value="same_root_vulnerability">同源</option>
-                <option value="risk_lead">线索</option><option value="attack_surface">攻击面</option><option value="inconclusive">不足</option>
-              </select>
-              <select id="reviewSeverity">
-                <option value="info">信息</option><option value="low">低</option><option value="medium">中</option>
-                <option value="high">高</option><option value="critical">严重</option>
-              </select>
-            </div>
-            <div class="row-3">
-              <label id="reviewDuplicateOfLabel" class="fld" hidden>主漏洞<select id="reviewDuplicateOf"></select></label>
-              <input id="reviewReasonCodes" placeholder="标签（逗号分隔）">
-              <select id="reviewScope"><option value="current_finding">当前</option><option value="current_project_type">同类</option><option value="global_pattern">全局</option></select>
-            </div>
-            <textarea id="reviewReason" rows="2" placeholder="理由（必填）"></textarea>
-            <button id="submitFindingReview" class="btn primary" type="button">提交</button>
-          </div>
-        </div>
-      </div>
-    </div>
-
-    <div data-tab-panel="leads" hidden>
-      <p class="text-dim mb" id="leadsSummary"></p>
-      <div class="split">
-        <div id="leadList" class="row-list"></div>
-        <div id="leadDetail" class="detail-pane"><div class="placeholder">选择线索</div></div>
-      </div>
-    </div>
-
-    <div data-tab-panel="surface" hidden>
-      <p class="text-dim mb" id="surfaceSummary"></p>
-      <div class="split">
-        <div id="surfaceList" class="row-list"></div>
-        <div id="surfaceDetail" class="detail-pane"><div class="placeholder">选择条目</div></div>
-      </div>
-    </div>
-  </section>
-
-  <!-- ========== 方向 ========== -->
-  <section id="view-directions" data-view="directions" hidden>
-    <div class="page-head"><h1>方向</h1><p class="desc" id="directionsSummary"></p></div>
-    <div class="split">
-      <div id="directionList" class="row-list"></div>
-      <div id="directionDetail" class="detail-pane"><div class="placeholder">选择方向</div></div>
-    </div>
-    <div class="section">
-      <div class="sec-head"><h2>假设池</h2><span class="text-dim" id="methodPackSummary"></span></div>
-      <div class="table-wrap"><table class="dt"><thead><tr><th>假设</th><th>目标</th><th>维度</th><th>优先分</th><th>成熟度</th><th>状态</th><th>来源</th></tr></thead><tbody id="hypothesesBody"></tbody></table></div>
-    </div>
-  </section>
-
-  <!-- ========== 资产 ========== -->
-  <section id="view-assets" data-view="assets" hidden>
-    <div class="page-head">
-      <h1>资产与画像 <span id="assetInventoryBadge" class="pill" hidden></span></h1>
-      <div class="import-row">
-        <input id="assetInventoryFile" type="file" accept=".csv,.tsv,.txt,.json,.xlsx" class="input-sm">
-        <input id="assetLogicalSource" maxlength="240" placeholder="来源名称" class="input-sm">
-        <button id="importAssetInventoryButton" class="btn" type="button">导入</button>
-      </div>
-    </div>
-    <div class="metric-row">
-      <div class="metric"><b id="assetInventoryTotal">0</b><span>底座记录</span></div>
-      <div class="metric"><b id="assetInventoryPending">0</b><span>待画像</span></div>
-      <div class="metric"><b id="assetInventoryProfiled">0</b><span>已画像</span></div>
-      <div class="metric"><b id="assetInventoryOutOfScope">0</b><span>范围外</span></div>
-    </div>
-    <div class="table-wrap"><table class="dt"><thead><tr><th>资产</th><th>类型</th><th>状态</th><th>画像</th><th>URL</th><th>溯源</th></tr></thead><tbody id="assetInventoryBody"></tbody></table></div>
-    <div class="pager"><button id="assetPreviousPage" class="btn ghost sm">←</button><span id="assetPaginationText" class="text-dim"></span><button id="assetNextPage" class="btn ghost sm">→</button></div>
-    <p id="assetInventoryNote" class="text-dim"></p>
-
-    <div class="section">
-      <div class="sec-head">
-        <h2>技术画像 <span id="technologyProfileCount" class="text-dim"></span></h2>
-        <div class="btn-group">
-          <button id="expandTechnologyHosts" class="btn ghost sm">展开</button>
-          <button id="collapseTechnologyHosts" class="btn ghost sm">收起</button>
-          <button id="downloadTechnologyXlsx" class="btn sm">Excel</button>
-          <button id="downloadTechnologyCsv" class="btn ghost sm">CSV</button>
-          <button id="downloadTechnologyJson" class="btn ghost sm">JSON</button>
-        </div>
-      </div>
-      <p class="text-dim mb" id="technologyProfileSummary"></p>
-      <div id="technologyProfileList"></div>
-    </div>
-  </section>
-
-  <!-- ========== 运行 ========== -->
-  <section id="view-runs" data-view="runs" hidden>
-    <div class="page-head"><h1>运行与诊断</h1></div>
-    <div class="section">
-      <div class="sec-head"><h2>Job 队列</h2></div>
-      <div class="table-wrap"><table class="dt"><thead><tr><th>单元</th><th>职责</th><th>模型</th><th>当前</th><th>阶段</th><th>状态</th><th>尝试</th><th>信号</th></tr></thead><tbody id="jobsBody"></tbody></table></div>
-    </div>
-    <div class="section">
-      <div class="sec-head"><h2>事件流</h2><span id="eventsCountChip" class="text-dim"></span></div>
-      <div id="eventsList" class="event-feed"></div>
-    </div>
-    <div class="section">
-      <div class="sec-head"><h2>Prompt 审计</h2></div>
-      <div class="table-wrap"><table class="dt"><thead><tr><th>时间</th><th>单元</th><th>角色</th><th>Prompt</th><th>预算</th><th>裁剪</th><th></th></tr></thead><tbody id="promptSnapshotsBody"></tbody></table></div>
-      <pre id="promptSnapshotPreview" class="code-block">选择一次调用</pre>
-    </div>
-    <div class="grid-2col">
-      <div class="section">
-        <div class="sec-head"><h2>反事实与记忆</h2><span id="researchMemoryCountChip" class="text-dim"></span></div>
-        <div class="table-wrap"><table class="dt"><thead><tr><th>类型</th><th>目标</th><th>内容</th><th>条件</th><th>状态</th></tr></thead><tbody id="researchMemoryBody"></tbody></table></div>
-      </div>
-      <div class="section">
-        <div class="sec-head"><h2>WAF</h2><span id="wafCountChip" class="text-dim"></span></div>
-        <div class="table-wrap"><table class="dt"><thead><tr><th>目标</th><th>假设</th><th>状态</th><th>信号</th><th>预算</th></tr></thead><tbody id="wafAssessmentsBody"></tbody></table></div>
-      </div>
-      <div class="section">
-        <div class="sec-head"><h2>负向证据</h2><span id="negativeCountChip" class="text-dim"></span></div>
-        <div class="table-wrap"><table class="dt"><thead><tr><th>目标</th><th>假设</th><th>结果</th><th>有效期</th><th>作用</th></tr></thead><tbody id="negativeEvidenceBody"></tbody></table></div>
-      </div>
-      <div class="section">
-        <div class="sec-head"><h2>证据索引</h2><span id="evidenceCountChip" class="text-dim"></span></div>
-        <div class="table-wrap"><table class="dt"><thead><tr><th>Fact</th><th>路径</th><th>大小</th><th>SHA</th><th></th></tr></thead><tbody id="evidenceBody"></tbody></table></div>
-        <pre id="evidencePreview" class="code-block">选择证据</pre>
-      </div>
-    </div>
-  </section>
-
-  <!-- ========== 设置 ========== -->
-  <section id="view-settings" data-view="settings" hidden>
-    <div class="page-head"><h1>项目设置</h1><p class="desc">目标 · 模型团队 · 黑板</p></div>
-
-    <div class="section">
-      <div class="sec-head"><h2>测试目标</h2><span class="pill ok">authorized / *</span></div>
-      <div class="form-stack">
-        <label id="webTargetField" class="fld">目标（每行一个）<textarea id="targetTargets" rows="4" placeholder="https://app.example.com&#10;api.example.com"></textarea></label>
-        <div class="row-3">
-          <label id="localTargetPathField" class="fld">本地目录<input id="targetPath" placeholder="/path/to/source"></label>
-          <label class="fld">类型<select id="targetProjectType"><option value="Web渗透">Web</option><option value="客户端">客户端</option></select></label>
-          <label class="fld chk"><span><input id="targetMreconEnabled" type="checkbox" checked> mrecon 采集</span></label>
-        </div>
-        <div class="row-2">
-          <label class="fld">不收范围<textarea id="targetOutOfScope" rows="3"></textarea></label>
-          <label class="fld">成功条件<textarea id="targetSuccessCriteria" rows="3"></textarea></label>
-        </div>
-        <div id="clientUploadPanel" class="upload-box" hidden>
-          <input id="clientArtifactFile" type="file">
-          <button id="uploadClientArtifactButton" class="btn" type="button">上传</button>
-          <small id="clientUploadStatus" class="text-dim"></small>
-        </div>
-        <label class="fld">补充说明<textarea id="targetNotes" rows="2"></textarea></label>
-        <label class="fld">业务目标<textarea id="targetGoal" rows="2"></textarea></label>
-      </div>
-      <div id="newProjectBox" class="new-proj" hidden>
-        <input id="newProjectName" maxlength="80" placeholder="项目名称">
-        <select id="newProjectPreset"><option value="">默认预设</option><option value="__system__">系统模板</option></select>
-        <button id="createProjectButton" class="btn primary" type="button">创建</button>
-      </div>
-    </div>
-
-    <div class="section">
-      <div class="sec-head">
-        <h2>Agent 团队</h2>
-        <button id="addRoleButton" class="btn ghost sm" type="button">+ 添加</button>
-      </div>
-      <div class="preset-bar">
-        <select id="teamPresetSelect"><option value="">尚无预设</option></select>
-        <div class="btn-group">
-          <button id="applyTeamPresetButton" class="btn sm">应用</button>
-          <button id="saveAsTeamPresetButton" class="btn primary sm">另存</button>
-          <button id="updateTeamPresetButton" class="btn ghost sm">更新</button>
-          <button id="defaultTeamPresetButton" class="btn ghost sm">默认</button>
-          <button id="duplicateTeamPresetButton" class="btn ghost sm">复制</button>
-          <button id="renameTeamPresetButton" class="btn ghost sm">改名</button>
-          <button id="deleteTeamPresetButton" class="btn danger sm">删除</button>
-        </div>
-        <p class="text-dim" id="teamPresetStatus"></p>
-      </div>
-      <div class="split">
-        <div id="memberList" class="member-rows"></div>
-        <div class="member-detail">
-          <div id="memberPanelEmpty" class="placeholder">选择角色</div>
-          <div id="memberPanel" hidden>
-            <div class="sec-head"><strong id="memberPanelTitle"></strong><button id="removeMemberButton" class="btn danger sm" type="button">删除</button></div>
-            <div class="row-3">
-              <label class="fld">名称<input id="mName" placeholder="executor-primary"><small class="fld-err" id="eName" hidden></small></label>
-              <label class="fld">职责<select id="mRole"><option value="reason">推理</option><option value="metacog">盲点</option><option value="executor">执行</option><option value="reviewer">复核</option><option value="waf_analyst">WAF</option><option value="profile_mapper">画像</option></select></label>
-              <div class="row-2"><label class="fld">并发<input id="mMaxRunning" type="number" min="1"></label><label class="fld">优先级<input id="mPriority" type="number" min="0"></label></div>
-            </div>
-            <div class="row-3">
-              <label class="fld">后端<select id="mType"><option value="codex">codex</option><option value="claude-cli">claude-cli</option><option value="openai-compatible">openai</option><option value="ollama">ollama</option><option value="container">container</option></select></label>
-              <label class="fld" id="fModel">模型<input id="mModel"><small class="fld-err" id="eModel" hidden></small></label>
-              <label class="fld" id="fBaseUrl">地址<input id="mBaseUrl"><small class="fld-err" id="eBaseUrl" hidden></small></label>
-            </div>
-            <div class="row-3">
-              <label class="fld" id="fApiKeyEnv">密钥变量<input id="mApiKeyEnv"><small class="fld-err" id="eApiKeyEnv" hidden></small></label>
-              <label class="fld" id="fAuthMode">鉴权<select id="mAuthMode"><option value="auto">auto</option><option value="bearer">bearer</option><option value="x-api-key">x-api-key</option></select></label>
-              <label class="fld" id="fSecret">Key<input id="mSecret" type="password" placeholder="留空不变"><small id="mSecretStatus" class="text-dim"></small></label>
-            </div>
-            <div class="row-2">
-              <label class="fld">运行模式<select id="mRuntimeMode"><option value="local-docker">Docker</option><option value="agent-compose">agent-compose</option><option value="local-cli">本地 CLI</option></select><small id="localCliNote" hidden class="text-dim"></small></label>
-              <label class="fld">沙箱<select id="mSandbox"><option value="read-only">read-only</option><option value="workspace-write">workspace-write</option><option value="danger-full-access">danger-full-access</option></select></label>
-            </div>
-            <div id="containerGroup" hidden>
-              <label class="fld">镜像<input id="mContainerImage" placeholder="sorne-worker:latest"><small class="fld-err" id="eContainerImage" hidden></small></label>
-              <label class="fld">命令<textarea id="mContainerCommand" rows="2"></textarea><small class="fld-err" id="eContainerCommand" hidden></small></label>
-            </div>
-            <label class="fld">专属提示词<textarea id="mCustomPrompt" rows="5" maxlength="30000"></textarea><small id="mPromptCount" class="text-dim">0/30000</small></label>
-          </div>
-        </div>
-      </div>
-    </div>
-
-    <details id="project-blackboard" class="collapse">
-      <summary>项目黑板 <span class="text-dim">工作记忆</span></summary>
-      <div class="collapse-body"><button id="copyBoard" class="btn ghost sm">复制</button><pre id="blackboardText" class="code-block"></pre></div>
-    </details>
-
-    <div class="save-bar">
-      <span id="targetDirtyFlag" class="dirty" hidden>目标未保存</span>
-      <span id="teamDirtyFlag" class="dirty" hidden>团队未保存</span>
-      <span id="saveBarClean" class="text-dim">已保存</span>
-      <span class="spacer"></span>
-      <button id="saveTargetButton" class="btn" type="button">保存目标</button>
-      <button id="saveTeamButton" class="btn primary" type="button">保存团队</button>
-    </div>
-  </section>
-
-</main>
+</div>
 <div id="toast" class="toast"></div>
-<script type="module" src="/frontend/app.js?v=8.0"></script>
+<script type="module" src="/frontend/app.js?v=9.0"></script>
 </body>
 </html>
