@@ -34,6 +34,15 @@ function friendlyEvent(event) {
   if (type === "profile_work_dispatched") return { kind: "started", title: "画像工作项已派发", summary: `${data.work_item_count ?? 0} 个 URL 工作项` };
   if (type === "jev_shadow_recorded") return { kind: "completed", title: "JEV 影子分类已留档", summary: `${data.targets ?? 0} 个目标`, meta: data.skipped ? `跳过 ${data.skipped}` : "", detail: "影子数据只进评估记录 classification_provenance，不影响调度。" };
   if (type === "jev_shadow_failed") return { kind: "waiting", title: "JEV 影子调用失败", summary: member, detail: data.error };
+    if (type === "api:gate_approved") return { kind: "completed", title: "门禁已批准", summary: data.action === "stop_loss" ? "止损结束" : data.action === "continue" ? "继续执行" : data.action || "", detail: data.reason };
+  if (type === "api:automation_launched") return { kind: "started", title: "自动化运行已启动", summary: data.run_id || "" };
+  if (type === "api:automation_cancelled") return { kind: "failed", title: "运行已取消", summary: data.run_id || "" };
+  if (type === "api:finding_human_reviewed") return { kind: "completed", title: "人工结论已提交", summary: data.finding_id || "" };
+  if (type === "api:direction_human_dismissed") return { kind: "waiting", title: "方向已人工否决", summary: data.direction_id || "" };
+  if (type === "api:direction_human_restored") return { kind: "started", title: "方向已恢复", summary: data.direction_id || "" };
+  if (type === "api:target_updated") return { kind: "completed", title: "目标配置已更新" };
+  if (type === "api:project_initialized") return { kind: "completed", title: "项目已初始化" };
+  if (type === "api:config_updated") return { kind: "completed", title: "团队配置已保存" };
   return null;
 }
 function renderEvent(event) {

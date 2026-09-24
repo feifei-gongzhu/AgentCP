@@ -273,15 +273,13 @@ function updateTeamPresetState(payload, preferredId = null) {
 function renderRunStatus(data, automation, metrics) {
   const run = automation.run || null;
   $("phaseValue").textContent = phaseLabel(data.phase);
+  const display = resolveDisplayStatus(data.gate_status, run?.status);
   const rb = $("runBadge");
-  rb.textContent = run?.status || "idle";
-  rb.className = "status";
-  rb.setAttribute("data-state", run?.status || "idle");
+  rb.textContent = display.text;
+  rb.className = `pill ${display.tone}`;
   const gb = $("gateBadge");
-  const gateVal = data.gate_status === "awaiting_approval" ? "awaiting_approval" : run?.status || "idle";
-  gb.textContent = gateVal;
-  gb.className = "status";
-  gb.setAttribute("data-state", gateVal);
+  gb.textContent = display.text;
+  gb.className = `pill ${display.tone}`;
   $("sbElapsed").textContent = formatDuration(run?.elapsed_seconds);
   $("runSummary").textContent = run ? `${run.id} · ${run.team} · ${stageLabel(run.stage)} · 并发 ${run.max_workers} · wave ${run.wave ?? 1}/${run.max_waves ?? "?"}` : "暂无自动化运行";
   const jobs = automation.jobs || [];
@@ -304,8 +302,12 @@ function renderRunStatus(data, automation, metrics) {
   $("launchButton").disabled = !state.vendor || runActive;
   $("currentTaskBadge").textContent = phaseLabel(data.phase);
   $("currentTask").textContent = data.current_task || "尚未定义当前任务";
-  $("decisionValue").textContent = data.current_decision || "continue";
-  $("gateReason").textContent = data.gate_reason || "尚未触发强制节拍";
+  $("decisionValue").textContent = decisionCn(data.current_decision);
+  if (data.gate_status === "awaiting_approval") {
+    $("gateReason").textContent = data.gate_reason || "等待审批";
+  } else {
+    $("gateReason").textContent = "";
+  }
 }
 function renderMetrics(project, data, metrics) {
   const assetsBlock = metrics.assets || {};
@@ -336,7 +338,9 @@ function renderGateApproval(data, automation) {
   $("gateApprovalHighRisk").textContent = data.high_risk_fingerprint_count ?? 0;
   $("gateApprovalDiscovery").textContent = data.last_discovery_at ? formatEventTime(data.last_discovery_at) : "无";
   $("gateApprovalRun").textContent = run ? `${run.id} · ${run.status}` : "无可恢复运行";
-  setBadge($("gateApprovalRunBadge"), "awaiting_approval");
+  const gab = $("gateApprovalRunBadge");
+  gab.textContent = "等待审批";
+  gab.className = "pill warn";
   $("gateContinueButton").textContent = run?.status === "paused" ? "批准并恢复运行" : ["completed", "failed", "stopped", "cancelled"].includes(run?.status) ? "批准并开始下一轮" : "批准继续";
   $("gateStopButton").textContent = ["completed", "failed", "stopped", "cancelled"].includes(run?.status) ? "确认止损，不再续跑" : "止损并终止运行";
   $("gateContinueButton").disabled = state.gateSubmitting;
