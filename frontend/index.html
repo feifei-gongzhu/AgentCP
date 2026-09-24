@@ -101,19 +101,33 @@
         <!-- 阶段与耗时在下方运行摘要中展示 -->
       </div>
 
-      <div class="section">
-        <div class="sec-head"><h2>当前状态</h2><span class="pill" id="currentTaskBadge">—</span></div>
-        <div class="kv"><span>任务</span><b id="currentTask">—</b></div>
-        <div class="kv"><span>决策</span><b id="decisionValue">—</b><small class="text-dim" id="gateReason"></small></div>
-        <div class="kv"><span>阶段</span><b id="phaseValue">—</b></div>
-      <div class="kv"><span>运行时间</span><b id="sbElapsed">—</b></div>
-      <div class="kv"><span>Run</span><b id="runSummary" class="mono">—</b></div>
-        <div class="progress-wrap"><div class="progress"><i id="runProgressBar"></i></div><small id="runProgressText" class="text-dim"></small></div>
-      </div>
-
-      <div class="section">
-        <div class="sec-head"><h2>攻击面覆盖</h2><span class="text-dim" id="coverageSummaryChip"></span></div>
-        <div id="coverageList" class="coverage-grid"></div>
+      <div class="overview-workbench">
+        <!-- 左列：优先处理 + 最近事件 -->
+        <div class="overview-main">
+          <div class="section">
+            <div class="sec-head"><h2>当前状态</h2><span class="pill" id="currentTaskBadge">—</span></div>
+            <div class="kv"><span>任务</span><b id="currentTask">—</b></div>
+            <div class="kv"><span>决策</span><b id="decisionValue">—</b><small class="text-dim" id="gateReason"></small></div>
+          </div>
+          <div class="section">
+            <div class="sec-head"><h2>最近事件</h2></div>
+            <div id="recentEvents" class="event-feed compact"></div>
+          </div>
+        </div>
+        <!-- 右列：当前运行 + 攻击面覆盖 -->
+        <div class="overview-side">
+          <div class="section">
+            <div class="sec-head"><h2>当前运行</h2></div>
+            <div class="kv"><span>阶段</span><b id="phaseValue">—</b></div>
+            <div class="kv"><span>运行时间</span><b id="sbElapsed">—</b></div>
+            <div class="kv"><span>Run</span><b id="runSummary" class="mono">—</b></div>
+            <div class="progress-wrap"><div class="progress"><i id="runProgressBar"></i></div><small id="runProgressText" class="text-dim"></small></div>
+          </div>
+          <div class="section">
+            <div class="sec-head"><h2>攻击面覆盖</h2><span class="text-dim" id="coverageSummaryChip"></span></div>
+            <div id="coverageList" class="coverage-grid"></div>
+          </div>
+        </div>
       </div>
 
       <details id="directivePanel" class="collapse">
@@ -128,11 +142,6 @@
           <button id="hintButton" class="btn" type="button">提交指令</button>
         </div>
       </details>
-
-      <div class="section">
-        <div class="sec-head"><h2>最近事件</h2></div>
-        <div id="recentEvents" class="event-feed compact"></div>
-      </div>
     </section>
 
     <!-- 发现 -->
