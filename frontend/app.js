@@ -71,6 +71,8 @@ function applyRoute(requested) {
   document.querySelectorAll("[data-view]").forEach(node => { node.hidden = node.dataset.view !== route; });
   document.querySelectorAll("[data-route-link]").forEach(link => {
     link.classList.toggle("active", link.dataset.routeLink === route);
+    const isProjectOnly = link.hasAttribute("data-project-only");
+    if (isProjectOnly) link.classList.toggle("disabled", !state.vendor && !state.newTaskMode);
   });
   const meta = PAGE_META[route] || PAGE_META.projects;
   $("routeEyebrow").textContent = state.vendor ? `${state.vendor} · ${meta.eyebrow}` : meta.eyebrow;
