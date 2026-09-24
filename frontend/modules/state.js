@@ -22,6 +22,9 @@ export const ui = {
     leads: { q: "", severity: "", status: "", type: "" },
     surface: { q: "", severity: "", status: "", type: "" },
   },
+  // 证据阅读器：当前发现、选中文件、所在标签；内容按路径缓存（跨轮询稳定）。
+  evidenceReader: { factId: null, path: null, tab: "files" },
+  evidenceCache: new Map(),
   expandedTechnologyHosts: new Set(),
 };
 

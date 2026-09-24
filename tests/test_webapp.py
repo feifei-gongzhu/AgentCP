@@ -176,7 +176,11 @@ def test_frontend_assets_are_wired_to_control_api() -> None:
     assert "riskLeadLifecycle" in derived
     assert "deduplicateRiskLeads" in derived
     assert "direction_status" in derived
-    assert "复现方式" in script
+    # 0.0.4：漏洞详情证据改为石墨阅读器（证据/请求/响应/复现标签），
+    # 复现步骤由 reader 的 repro 标签渲染，不再有独立"复现方式"区块。
+    assert "buildEvidenceReader" in script
+    assert "splitHttpExchange" in script
+    assert "reproduction_steps" in script
     assert "evidenceForFact" in script
     assert "candidate_negative_evidence" in derived
     assert "evidence-open" in script

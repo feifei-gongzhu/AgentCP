@@ -608,6 +608,162 @@ function selectVulnerability(id, { switchTab = false } = {}) {
   renderVulnDetail();
   openFindingDetail("vulns");
 }
+
+/* ---------- 证据阅读器（石墨暗面：证据 / 请求 / 响应 / 复现） ---------- */
+const READER_TAB_LABELS = { files: "证据", request: "请求", response: "响应", repro: "复现" };
+// .http 交换格式：请求在前，响应从首个 HTTP/1.x 状态行开始。
+function splitHttpExchange(content) {
+  const lines = String(content).split("\n");
+  const index = lines.findIndex(line => /^HTTP\/[\d.]+\s+\d{3}/.test(line.trim()));
+  if (index === -1) return { request: String(content).trimEnd(), response: "" };
+  return {
+    request: lines.slice(0, index).join("\n").trimEnd(),
+    response: lines.slice(index).join("\n").trimEnd(),
+  };
+}
+async function loadEvidenceContent(path) {
+  const cached = ui.evidenceCache.get(path);
+  if (cached && !cached.loading) return cached;
+  if (!cached) ui.evidenceCache.set(path, { loading: true });
+  try {
+    const vendor = encodeURIComponent(state.vendor);
+    const result = await api(`/api/evidence/content?vendor=${vendor}&path=${encodeURIComponent(path)}`);
+    const entry = { content: result.content, truncated: Boolean(result.truncated) };
+    ui.evidenceCache.set(path, entry);
+    return entry;
+  } catch (error) {
+    if (ui.evidenceCache.get(path)?.loading) ui.evidenceCache.delete(path);
+    throw error;
+  }
+}
+function readerEmpty(text) { return el("div", "reader-empty", text); }
+function readerPre(text) {
+  const node = el("pre", "reader-pre", text || "（空）");
+  return node;
+}
+function evidenceBasename(path) { return String(path || "").split("/").filter(Boolean).pop() || String(path || ""); }
+function renderReaderBody(body, matches) {
+  const readerState = ui.evidenceReader;
+  body.replaceChildren();
+  const tab = readerState.tab;
+  if (tab === "repro") {
+    const fact = readerState.fact || {};
+    const steps = Array.isArray(fact.reproduction_steps) ? fact.reproduction_steps.filter(Boolean) : [];
+    if (!steps.length) { body.append(readerEmpty("缺少结构化复现步骤")); return; }
+    const ol = el("ol", "reader-steps");
+    steps.forEach(step => ol.append(el("li", "", step)));
+    body.append(ol);
+    return;
+  }
+  if (!matches.length) {
+    body.append(readerEmpty(ui.evidenceReader.fact?.evidence_path
+      ? `证据未进入索引：${ui.evidenceReader.fact.evidence_path}`
+      : "该发现未声明证据文件"));
+    return;
+  }
+  if (tab === "files") {
+    if (!readerState.path) {
+      const list = el("div", "reader-files");
+      matches.forEach(item => {
+        const row = el("button", "reader-file");
+        row.type = "button";
+        row.dataset.path = item.path;
+        row.title = item.path;
+        row.append(el("span", "reader-file-name", evidenceBasename(item.path)));
+        row.append(el("span", "reader-file-meta", item.sha256 ? item.sha256.slice(0, 10) : "未索引"));
+        list.append(row);
+      });
+      body.append(list);
+      return;
+    }
+    const entry = ui.evidenceCache.get(readerState.path);
+    const head = el("div", "reader-open-head");
+    const back = el("button", "reader-back", "‹ 文件列表");
+    back.type = "button";
+    head.append(el("span", "reader-open-path", evidenceBasename(readerState.path)), back);
+    body.append(head);
+    if (!entry || entry.loading) { body.append(readerEmpty("正在读取证据…")); return; }
+    if (entry.truncated) body.append(el("div", "reader-note", "仅显示前 64 KiB"));
+    body.append(readerPre(entry.content));
+    return;
+  }
+  // 请求 / 响应：基于当前选中文件解析
+  if (!readerState.path) { body.append(readerEmpty("先在「证据」中选择文件")); return; }
+  const entry = ui.evidenceCache.get(readerState.path);
+  if (!entry || entry.loading) { body.append(readerEmpty(entry?.loading ? "正在读取证据…" : "先在「证据」中选择文件")); return; }
+  const halves = splitHttpExchange(entry.content);
+  if (tab === "request") {
+    body.append(readerPre(halves.request || "（空）"));
+    return;
+  }
+  body.append(readerPre(halves.response || "未捕获响应（该文件只包含请求）"));
+}
+function buildEvidenceReader(fact, rawMatches) {
+  const readerState = ui.evidenceReader;
+  // 同一文件可能被多条发现引用（同路径同摘要只展示一行）
+  const seen = new Set();
+  const matches = rawMatches.filter(item => {
+    const key = `${item.path}|${item.sha256 || ""}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+  if (readerState.factId !== fact.id) {
+    readerState.factId = fact.id;
+    readerState.path = null;
+    readerState.tab = matches.length ? "files" : "repro";
+  }
+  readerState.fact = fact;
+  const reader = el("div", "evidence-reader");
+  const tabs = el("div", "reader-tabs");
+  ["files", "request", "response", "repro"].forEach(key => {
+    const button = el("button", "reader-tab");
+    button.type = "button";
+    button.dataset.tab = key;
+    button.append(el("span", "", READER_TAB_LABELS[key]));
+    if (key === "files" && matches.length) button.append(el("em", "", String(matches.length)));
+    tabs.append(button);
+  });
+  const body = el("div", "reader-body");
+  reader.append(tabs, body);
+  const syncTabs = () => tabs.querySelectorAll(".reader-tab").forEach(node => node.classList.toggle("active", node.dataset.tab === readerState.tab));
+  const renderBody = () => renderReaderBody(body, matches);
+  syncTabs();
+  renderBody();
+  // 若选中文件尚未加载（或加载中断），先取回再重绘（期间显示"正在读取"）
+  const warmSelected = async () => {
+    const path = readerState.path;
+    if (!path) return;
+    const entry = ui.evidenceCache.get(path);
+    if (entry && !entry.loading) return;
+    try { await loadEvidenceContent(path); } catch (error) { showToast(error.message, true); }
+    if (ui.evidenceReader.path === path) renderBody();
+  };
+  reader.addEventListener("click", async event => {
+    const tabButton = event.target.closest(".reader-tab");
+    if (tabButton) {
+      readerState.tab = tabButton.dataset.tab;
+      syncTabs();
+      renderBody();
+      void warmSelected();
+      return;
+    }
+    const fileButton = event.target.closest(".reader-file");
+    if (fileButton) {
+      readerState.path = fileButton.dataset.path;
+      renderBody();
+      try { await loadEvidenceContent(readerState.path); } catch (error) { showToast(error.message, true); }
+      if (ui.evidenceReader.path === fileButton.dataset.path) renderBody();
+      return;
+    }
+    if (event.target.closest(".reader-back")) {
+      readerState.path = null;
+      renderBody();
+    }
+  });
+  void warmSelected();
+  return reader;
+}
 function renderVulnDetail() {
   const info = $("vulnDetailInfo");
   const box = $("reviewBox");
@@ -615,7 +771,7 @@ function renderVulnDetail() {
   const fact = vulnerabilities.find(item => item.id === ui.selected.vulns) || null;
   if (!fact) {
     ui.selected.vulns = null;
-    info.replaceChildren(el("div", "empty-state", vulnerabilities.length ? "选择左侧漏洞查看完整信息。" : "暂无系统漏洞。"));
+    info.replaceChildren(el("div", "empty-state", vulnerabilities.length ? "选择列表中的漏洞查看完整信息。" : "暂无系统漏洞。"));
     box.hidden = true;
     return;
   }
@@ -628,27 +784,8 @@ function renderVulnDetail() {
   if (fact.__pending) chipsRow.append(chip(`候选 · 来自 ${fact.__member} · 尚未写入黑板`, "warn"));
   nodes.push(chipsRow);
   nodes.push(detailSection("已验证危害", el("p", "", fact.business_impact || "尚未形成漏洞闭环")));
-  const steps = Array.isArray(fact.reproduction_steps) ? fact.reproduction_steps.filter(Boolean) : [];
-  if (steps.length) {
-    const ol = document.createElement("ol");
-    steps.forEach(step => ol.append(el("li", "", step)));
-    nodes.push(detailSection(`复现方式（${steps.length} 步）`, ol));
-  } else {
-    nodes.push(detailSection("复现方式", el("p", "", "缺少结构化复现步骤")));
-  }
-  const matches = evidenceForFact(fact, indexedEvidence);
-  if (matches.length) {
-    const wrap = el("div", "detail-links");
-    matches.forEach(item => {
-      const button = el("button", "detail-link evidence-open", `查看证据 · ${item.path}`);
-      button.type = "button"; button.dataset.path = item.path;
-      button.title = `SHA-256 ${item.sha256 || "未索引"}`;
-      wrap.append(button);
-    });
-    nodes.push(detailSection(`证据（${matches.length} 份）`, wrap));
-  } else {
-    nodes.push(detailSection("证据", el("p", "", fact.evidence_path ? `证据未进入索引：${fact.evidence_path}` : "漏洞未声明证据路径")));
-  }
+  // 证据阅读器：合并证据文件与复现步骤（石墨暗面，证据/请求/响应/复现四个标签）
+  nodes.push(buildEvidenceReader(fact, evidenceForFact(fact, indexedEvidence)));
   const sourceLeads = sourceLeadsByVulnerability.get(fact.id) || [];
   if (sourceLeads.length) nodes.push(detailSection("来源", el("p", "", `由 ${sourceLeads.length} 条风险线索论证转化`)));
   info.replaceChildren(...nodes);

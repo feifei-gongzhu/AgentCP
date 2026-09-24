@@ -453,6 +453,53 @@ code { font-family: var(--s-mono); font-size: .9em; }
 }
 .detail-link:hover { color: var(--s-ink); }
 
+/* ---- 证据阅读器（石墨暗面） ---- */
+.evidence-reader {
+  background: var(--s-graphite); color: var(--s-on-graphite);
+  border-radius: var(--r-panel); overflow: hidden;
+}
+.reader-tabs { display: flex; border-bottom: 1px solid rgb(240 242 233 / 0.14); }
+.reader-tab {
+  appearance: none; background: none; border: none; cursor: pointer;
+  display: inline-flex; align-items: center; gap: 5px;
+  color: var(--s-on-graphite-muted); font: 500 12px/18px var(--s-font);
+  padding: 10px 14px 9px;
+}
+.reader-tab:hover { color: var(--s-on-graphite); }
+.reader-tab.active { color: var(--s-acid); box-shadow: inset 0 -2px var(--s-acid); }
+.reader-tab em { font-style: normal; font: 500 10px var(--s-mono); color: var(--s-on-graphite-muted); }
+.reader-tab.active em { color: var(--s-acid); }
+.reader-body { padding: 12px 14px; max-height: 400px; overflow: auto; }
+.reader-pre {
+  margin: 0; font: 400 11.5px/17px var(--s-mono);
+  color: var(--s-on-graphite); white-space: pre-wrap; word-break: break-word;
+}
+.reader-empty { padding: 26px 8px; text-align: center; color: var(--s-on-graphite-muted); font-size: 12px; }
+.reader-note { color: var(--s-on-graphite-muted); font: 400 11px var(--s-mono); margin-bottom: 8px; }
+.reader-files { display: flex; flex-direction: column; margin: -12px -14px; }
+.reader-file {
+  appearance: none; background: none; border: none; cursor: pointer;
+  display: flex; align-items: center; justify-content: space-between; gap: 10px;
+  padding: 9px 14px; border-bottom: 1px solid rgb(240 242 233 / 0.08);
+  color: var(--s-on-graphite); font: 400 12px var(--s-mono); text-align: left;
+}
+.reader-file:last-child { border-bottom: none; }
+.reader-file:hover { background: var(--s-graphite-raised); }
+.reader-file-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.reader-file-meta { flex-shrink: 0; color: var(--s-on-graphite-muted); font-size: 11px; }
+.reader-open-head {
+  display: flex; align-items: center; justify-content: space-between; gap: 10px;
+  margin-bottom: 10px;
+}
+.reader-open-path { font: 500 12px var(--s-mono); color: var(--s-acid); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.reader-back {
+  appearance: none; background: none; border: none; cursor: pointer; flex-shrink: 0;
+  color: var(--s-on-graphite-muted); font: 500 12px var(--s-font); padding: 2px 4px;
+}
+.reader-back:hover { color: var(--s-on-graphite); }
+.reader-steps { margin: 0; padding-left: 20px; display: flex; flex-direction: column; gap: 6px; }
+.reader-steps li { font: 400 12.5px/19px var(--s-font); color: var(--s-on-graphite); }
+
 .placeholder {
   display: grid; place-items: center; text-align: center;
   color: var(--s-ink-muted); font-size: 13px;
