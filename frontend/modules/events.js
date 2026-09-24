@@ -1,6 +1,6 @@
 // 运行事件流渲染：已知类型友好渲染，未知类型通用回退（开放集合不丢弃）。
 import { el } from "./dom.js";
-import { truncateText, formatEventTime, formatDuration } from "./format.js";
+import { truncateText, formatEventTime, formatDuration, formatEventShort } from "./format.js";
 
 function friendlyEvent(event) {
   const type = event.event_type || event.action || "event";
@@ -40,7 +40,7 @@ function renderEvent(event) {
   const friendly = friendlyEvent(event);
   const row = document.createElement("div");
   row.className = `event-row${friendly ? ` model-event kind-${friendly.kind}` : ""}`;
-  const time = el("time", "", formatEventTime(event.created_at));
+  const time = el("time", "", formatEventShort(event.created_at));
   if (!friendly) {
     row.append(time, el("strong", "", event.event_type || event.action), el("small", "", JSON.stringify(event.data || event.details || {})));
     return row;
