@@ -50,7 +50,7 @@
   --r-modal: 12px;
 
   /* 字体 */
-  --s-font: "Inter", "Noto Sans SC", "PingFang SC", "Microsoft YaHei", sans-serif;
+  --font: var(--s-font); --mono: var(--s-mono); --s-font: "Inter", "Noto Sans SC", "PingFang SC", "Microsoft YaHei", sans-serif;
   --s-mono: "IBM Plex Mono", "SFMono-Regular", Consolas, monospace;
 
   /* 阴影（仅浮层） */

@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
-  <meta name="color-scheme" content="dark">
+  <meta name="color-scheme" content="light">
   <title>Sorne</title>
   <link rel="preconnect" href="https://rsms.me">
   <link rel="stylesheet" href="https://rsms.me/inter/inter.css">
@@ -13,14 +13,14 @@
 <div class="app">
 
   <aside class="sidebar">
-    <div class="brand">
+    <div class="sidebar-brand">
       <span class="mark"><i></i><i></i></span>
       <strong>Sorne</strong><small>安全研究控制平面</small><span class="brand-version">0.0.4</span></div>
     <div class="project-switch">
       <label for="projectSelect">项目</label>
       <select id="projectSelect" aria-label="项目"></select>
     </div>
-    <button id="newTaskButton" class="btn primary" type="button" style="width:100%">新建审计任务</button>
+    <button id="newTaskButton" class="sidebar-new" type="button">新建审计任务</button>
     <nav class="nav" aria-label="工作台">
       <a class="nav-item" data-route-link="projects" href="#projects">项目中心</a>
       <div class="nav-group" id="projectNav" hidden>
@@ -53,7 +53,7 @@
 
     <!-- 项目中心 -->
     <section id="view-projects" data-view="projects" hidden>
-      <div class="page-head"><div><h1 style="font-size:20px">项目中心</h1><p class="desc">选择项目开始工作</p></div></div>
+      <div class="page-head"><div><h1>项目中心</h1><p class="desc">选择项目开始工作</p></div></div>
       <div class="inline-stats">
         <span><b id="hubFalsePositiveRate">—</b> 长期误报率</span>
         <span><b id="hubReviewedCount">0</b> 已复核</span>
@@ -90,7 +90,7 @@
       <div id="runFailure" class="alert-error" hidden></div>
 
       <div class="page-head">
-        <div><h1 style="font-size:20px">总览</h1><p class="desc" id="goalText">—</p></div>
+        <div><h1>总览</h1><p class="desc" id="goalText">—</p></div>
         <div class="run-controls">
           <input id="teamInput" value="default" class="input-sm" title="团队">
           <input id="workersInput" type="number" min="1" value="5" class="input-sm" title="并发">
@@ -144,7 +144,7 @@
 
     <!-- 发现 -->
     <section id="view-findings" data-view="findings" hidden>
-      <div class="page-head"><h1 style="font-size:20px">发现</h1></div>
+      <div class="page-head"><h1>发现</h1></div>
       <div class="tab-bar" style="display:flex;gap:0;border-bottom:1px solid var(--border);overflow-x:auto" role="tablist">
         <button class="tab-btn active" data-tab="vulns" type="button">漏洞 <em id="vulnerabilitiesCount">0</em></button>
         <button class="tab-btn" data-tab="leads" type="button">线索 <em id="riskLeadsCount">0</em></button>
@@ -197,7 +197,7 @@
 
     <!-- 方向 -->
     <section id="view-directions" data-view="directions" hidden>
-      <div class="page-head"><h1 style="font-size:20px">方向</h1><p class="desc" id="directionsSummary"></p></div>
+      <div class="page-head"><h1>方向</h1><p class="desc" id="directionsSummary"></p></div>
       <div class="split">
         <div id="directionList" class="row-list"></div>
         <div id="directionDetail" class="detail-pane"><div class="placeholder">选择方向</div></div>
@@ -211,7 +211,7 @@
     <!-- 资产 -->
     <section id="view-assets" data-view="assets" hidden>
       <div class="page-head">
-        <h1 style="font-size:20px">资产与画像 <span id="assetInventoryBadge" class="pill" hidden></span></h1>
+        <h1>资产与画像 <span id="assetInventoryBadge" class="pill" hidden></span></h1>
         <div class="import-row">
           <input id="assetInventoryFile" type="file" accept=".csv,.tsv,.txt,.json,.xlsx" class="input-sm">
           <input id="assetLogicalSource" maxlength="240" placeholder="来源名称" class="input-sm">
@@ -245,7 +245,7 @@
 
     <!-- 运行 -->
     <section id="view-runs" data-view="runs" hidden>
-      <div class="page-head"><h1 style="font-size:20px">运行与诊断</h1></div>
+      <div class="page-head"><h1>运行与诊断</h1></div>
       <div class="section">
         <div class="sec-head"><h2>Job 队列</h2></div>
         <div class="table-scroll"><table class="dt"><thead><tr><th>单元</th><th>职责</th><th>模型</th><th>当前</th><th>阶段</th><th>状态</th><th class="num">尝试</th><th>信号</th></tr></thead><tbody id="jobsBody"></tbody></table></div>
@@ -282,7 +282,7 @@
 
     <!-- 设置 -->
     <section id="view-settings" data-view="settings" hidden>
-      <div class="page-head"><h1 style="font-size:20px">团队与设置</h1><p class="desc">目标 · 模型团队 · 黑板</p></div>
+      <div class="page-head"><h1>团队与设置</h1><p class="desc">目标 · 模型团队 · 黑板</p></div>
       <div class="section">
         <div class="sec-head"><h2>测试目标</h2><span class="pill ok">authorized / *</span></div>
         <div class="form-stack">
