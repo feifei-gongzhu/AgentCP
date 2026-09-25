@@ -290,6 +290,58 @@ const DECISION_CN = {
   switch_phase: "切换阶段", request_confirmation: "等待确认",
 };
 function decisionCn(value) { return DECISION_CN[value] || value || "—"; }
+/* ---------- 优先处理（总览左列） ---------- */
+// 从真实状态计算下一步该做什么：待复核漏洞、失败任务、待验证方向、覆盖缺口。
+function computePriorities(data, automation) {
+  const derived = state.derived || {};
+  const verdicts = derived.verdicts || {};
+  const items = [];
+  const pendingReview = (derived.vulnerabilities || []).filter(fact => !fact.__pending && !verdicts[fact.id]).length;
+  if (pendingReview) items.push({ text: "漏洞待人工复核", count: pendingReview, route: "findings", tone: "warn" });
+  const failedJobs = (automation.jobs || []).filter(job => ["failed", "cancelled"].includes(job.status)).length;
+  if (failedJobs) items.push({ text: "失败/取消任务可重跑", count: failedJobs, route: "runs", tone: "danger" });
+  const awaitingDirections = (derived.directionRows || []).filter(intent =>
+    ["open", "released", "claimed"].includes(intent.direction_status) && !intent.confirmed_vulnerabilities.length
+  ).length;
+  if (awaitingDirections) items.push({ text: "验证方向等待结论", count: awaitingDirections, route: "directions", tone: "info" });
+  const pendingLeads = (derived.riskLeads || []).filter(lead => !lead.__pending && !lead.__confirmedVulnerabilities?.length).length;
+  if (pendingLeads) items.push({ text: "线索待转验证", count: pendingLeads, route: "findings", tone: "info" });
+  const coverageGap = metricsCoverageGap();
+  if (coverageGap) items.push({ text: "攻击面维度未观察", count: coverageGap, route: "assets", tone: "muted" });
+  return items;
+}
+function metricsCoverageGap() {
+  const coverage = state.metricsCache?.coverage;
+  if (!coverage) return 0;
+  return Math.max(0, Number(coverage.dimensions || 0) - Number(coverage.covered || 0));
+}
+function renderPriorityActions(data, automation) {
+  const list = $("priorityList");
+  if (!list) return;
+  const items = computePriorities(data, automation);
+  $("prioritySummary").textContent = items.length ? `${items.length} 类待处理` : "";
+  if (!items.length) {
+    list.replaceChildren(el("div", "empty-state", "暂无待处理事项。"));
+    return;
+  }
+  list.replaceChildren(...items.map(item => {
+    const row = el("button", "priority-item");
+    row.type = "button";
+    // 纯圆点承载语义色，文字由条目本身表达
+    const dot = el("span", "status");
+    dot.setAttribute("data-state", { warn: "awaiting_approval", danger: "failed", info: "running", muted: "" }[item.tone] || "");
+    row.append(dot);
+    row.append(el("span", "", item.text));
+    row.append(el("span", "priority-count", String(item.count)));
+    row.append(el("span", "priority-arrow", "›"));
+    row.addEventListener("click", () => {
+      navigate(item.route);
+      if (item.route === "findings") selectTab("vulns");
+      void refresh();
+    });
+    return row;
+  }));
+}
 function renderRunStatus(data, automation, metrics) {
   const run = automation.run || null;
   $("phaseValue").textContent = phaseLabel(data.phase);
@@ -424,11 +476,12 @@ const FINDING_STATUS_LABELS = {
   pending_commit: "待收敛", queued: "待关联验证", unscheduled: "待转验证", confirmed: "已证实漏洞",
   committed: "已提交",
 };
-// 状态 → .status 圆点语义（复用既有双色状态语言）
+// 状态 → .status 圆点语义（复用既有双色状态语言）。
+// refuted 是人工裁决结论而非系统失败，保持中性灰；红色只留给执行失败。
 const FINDING_STATUS_STATE = {
   pending: "paused", pending_commit: "paused", unreviewed: "awaiting_approval", retest_requested: "awaiting_approval",
   accepted: "completed", adjusted: "completed", same_root: "completed", reclassified: "completed",
-  confirmed: "completed", committed: "completed", refuted: "failed",
+  confirmed: "completed", committed: "completed",
 };
 const FINDING_TABLE_HEADERS = ["严重度", "标题", "资产", "状态", "置信度", "更新时间"];
 function vulnStatusKey(fact, verdict) {
@@ -512,6 +565,7 @@ function findingsTable(rows, { selectedId, cellFor }) {
     rows.forEach(fact => {
       const tr = document.createElement("tr");
       tr.dataset.id = fact.id;
+      tr.tabIndex = 0;
       if (selectedId === fact.id) tr.className = "selected";
       if (fact.__pending) tr.classList.add("pending");
       cellFor(fact).forEach(node => tr.append(node));
@@ -564,17 +618,38 @@ function renderSurfaceList() { renderFindingTable("surface"); }
 // 发现页详情抽屉/全屏视图（≤1439px 生效；≥1440px 为固定侧栏）
 const FINDING_PANES = { vulns: "vulnDetail", leads: "leadDetail", surface: "surfaceDetail" };
 const detailDrawerQuery = window.matchMedia("(max-width: 1439.98px)");
+let detailReturnFocus = null;
+function rememberReturnFocus(listId, rowId) {
+  // 行点击后列表会整体重建，直接存元素会失联；存可重查的引用
+  detailReturnFocus = { list: listId, id: rowId };
+}
+function restoreReturnFocus() {
+  const ref = detailReturnFocus;
+  detailReturnFocus = null;
+  let target = null;
+  if (ref instanceof HTMLElement) target = ref;
+  else if (ref && ref.list && ref.id) target = document.querySelector(`#${ref.list} tr[data-id="${CSS.escape(ref.id)}"]`);
+  if (target?.isConnected && target.offsetParent !== null) target.focus({ preventScroll: true });
+}
 function openFindingDetail(key) {
   if (!detailDrawerQuery.matches) return;
-  document.querySelectorAll(".detail-pane.open").forEach(pane => pane.classList.remove("open"));
   const pane = $(FINDING_PANES[key]);
-  if (!pane) return;
+  if (!pane || pane.classList.contains("open")) return;
+  // 抽屉打开：记录来源焦点并交给面板标题；关闭时归还
+  if (detailReturnFocus == null && document.activeElement instanceof HTMLElement) {
+    detailReturnFocus = document.activeElement;
+  }
+  document.querySelectorAll(".detail-pane.open").forEach(node => node.classList.remove("open"));
   pane.classList.add("open");
   $("detailBackdrop").hidden = false;
+  pane.querySelector(".detail-pane-head")?.focus({ preventScroll: true });
 }
 function closeFindingDetail() {
-  document.querySelectorAll(".detail-pane.open").forEach(pane => pane.classList.remove("open"));
-  $("detailBackdrop").hidden = true;
+  let closed = false;
+  document.querySelectorAll(".detail-pane.open").forEach(pane => { pane.classList.remove("open"); closed = true; });
+  if ($("detailBackdrop").hidden === false) $("detailBackdrop").hidden = true;
+  if (!closed) return;
+  restoreReturnFocus();
 }
 function initFindingsPage() {
   Object.entries(FINDING_TAB_CONFIG).forEach(([key, config]) => {
@@ -587,6 +662,8 @@ function initFindingsPage() {
     $(config.list).addEventListener("click", event => {
       const row = event.target.closest("tr[data-id]");
       if (!row) return;
+      rememberReturnFocus(config.list, row.dataset.id);
+      row.focus();
       if (key === "vulns") selectVulnerability(row.dataset.id);
       else {
         ui.selected[key] = row.dataset.id;
@@ -594,6 +671,13 @@ function initFindingsPage() {
         if (key === "leads") renderLeadDetail(); else renderSurfaceDetail();
       }
       openFindingDetail(key);
+    });
+    $(config.list).addEventListener("keydown", event => {
+      if (event.key !== "Enter" && event.key !== " ") return;
+      const row = event.target.closest("tr[data-id]");
+      if (!row) return;
+      event.preventDefault();
+      row.click();
     });
   });
   $("detailBackdrop").addEventListener("click", closeFindingDetail);
@@ -1470,6 +1554,7 @@ function renderProject(project, metrics, automation, config, evidenceResult, aud
   const { vulnerabilities, riskLeads, directionRows, attackIntel, rawRiskLeads } = state.derived;
   renderRunStatus(data, automation, metrics);
   renderMetrics(project, data, metrics, automation);
+  renderPriorityActions(data, automation);
   renderGateApproval(data, automation);
   renderRunFailure(automation);
   $("goalText").textContent = project.target.goal || `授权模式：${project.target.authorization_mode} · scope ${JSON.stringify(project.target.scope)}`;
@@ -1568,6 +1653,7 @@ async function refreshRunTelemetry() {
     state.runStatus = automation.run?.status || null;
     renderRunStatus(state.projectData.state, automation, metricsResult.metrics);
     renderMetrics(state.projectData, state.projectData.state, metricsResult.metrics, automation);
+    renderPriorityActions(state.projectData.state, automation);
     renderGateApproval(state.projectData.state, automation);
     renderRunFailure(automation);
     renderDiagnostics(state.projectData, automation, state.auditCache || { audit: [] }, state.promptCache || { snapshots: [] });
@@ -1761,7 +1847,12 @@ async function deleteProject(vendor) {
 function selectTab(tab) {
   ui.tab = tab;
   closeFindingDetail();
-  document.querySelectorAll(".tab-btn").forEach(node => node.classList.toggle("active", node.dataset.tab === tab));
+  document.querySelectorAll(".tab-btn").forEach(node => {
+    const active = node.dataset.tab === tab;
+    node.classList.toggle("active", active);
+    node.setAttribute("aria-selected", active ? "true" : "false");
+    node.tabIndex = active ? 0 : -1;
+  });
   document.querySelectorAll("[data-tab-panel]").forEach(node => { node.hidden = node.dataset.tabPanel !== tab; });
 }
 
@@ -1810,6 +1901,20 @@ $("projectList").addEventListener("click", async event => {
 document.querySelector(".tab-bar").addEventListener("click", event => {
   const tab = event.target.closest(".tab-btn");
   if (tab) selectTab(tab.dataset.tab);
+});
+// 标签键盘切换：左右箭头 / Home / End（roving tabindex）
+document.querySelector(".tab-bar").addEventListener("keydown", event => {
+  const tabs = [...document.querySelectorAll(".tab-btn")];
+  const currentIndex = tabs.findIndex(node => node.dataset.tab === ui.tab);
+  let next = null;
+  if (event.key === "ArrowRight") next = tabs[(currentIndex + 1) % tabs.length];
+  else if (event.key === "ArrowLeft") next = tabs[(currentIndex - 1 + tabs.length) % tabs.length];
+  else if (event.key === "Home") next = tabs[0];
+  else if (event.key === "End") next = tabs[tabs.length - 1];
+  if (!next) return;
+  event.preventDefault();
+  selectTab(next.dataset.tab);
+  next.focus();
 });
 initFindingsPage();
 // 证据与 Prompt 预览（事件委托）

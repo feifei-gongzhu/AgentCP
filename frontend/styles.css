@@ -236,6 +236,25 @@ code { font-family: var(--s-mono); font-size: .9em; }
 .overview-side { display: flex; flex-direction: column; gap: 16px; }
 @media (max-width: 1100px) { .overview-workbench { grid-template-columns: 1fr; } }
 
+/* ---- 优先处理 ---- */
+.priority-list { display: flex; flex-direction: column; }
+.priority-item {
+  appearance: none; background: none; border: none; cursor: pointer;
+  display: flex; align-items: center; gap: 10px; width: 100%;
+  padding: 9px 2px; border-bottom: 1px solid var(--s-rule);
+  color: var(--s-ink); font: 400 13px/20px var(--s-font); text-align: left;
+}
+.priority-item:last-child { border-bottom: none; }
+.priority-item:hover { background: var(--s-paper-hover); }
+.priority-item .status { flex-shrink: 0; }
+.priority-item .priority-count {
+  margin-left: auto; flex-shrink: 0;
+  font: 500 12px/18px var(--s-font); font-variant-numeric: tabular-nums;
+  color: var(--s-ink-secondary); background: var(--s-paper-hover);
+  border-radius: var(--r-tag); padding: 0 7px;
+}
+.priority-item .priority-arrow { flex-shrink: 0; color: var(--s-ink-muted); }
+
 /* ---- 门禁 ---- */
 .gate {
   display: flex; align-items: center; justify-content: space-between;
@@ -505,28 +524,6 @@ code { font-family: var(--s-mono); font-size: .9em; }
   color: var(--s-ink-muted); font-size: 13px;
   padding: 48px 16px; border: 1px dashed var(--s-control-border);
   border-radius: var(--r-btn);
-}
-
-/* ---- 证据阅读器（石墨暗面） ---- */
-.evidence-reader {
-  background: var(--s-graphite); border-radius: var(--r-btn);
-  overflow: hidden;
-}
-.evidence-reader .reader-tabs {
-  display: flex; gap: 0; border-bottom: 1px solid var(--s-graphite-raised);
-  padding: 0 12px;
-}
-.evidence-reader .reader-tab {
-  appearance: none; background: none; border: none;
-  border-bottom: 2px solid transparent; cursor: pointer;
-  color: var(--s-on-graphite-muted); font: 500 12px/32px var(--s-font);
-  padding: 0 10px; white-space: nowrap;
-}
-.evidence-reader .reader-tab.active { color: var(--s-on-graphite); border-bottom-color: var(--s-acid); }
-.evidence-reader pre {
-  padding: 12px 14px; font: 400 12px/1.7 var(--s-mono);
-  color: var(--s-on-graphite); white-space: pre; overflow-x: auto;
-  max-height: 280px;
 }
 
 /* ---- 表单 ---- */
