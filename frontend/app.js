@@ -76,7 +76,12 @@ function applyRoute(requested) {
   });
   const meta = PAGE_META[route] || PAGE_META.projects;
   $("routeEyebrow").textContent = state.vendor ? `${state.vendor} · ${meta.eyebrow}` : meta.eyebrow;
-  $("pageTitle").textContent = state.newTaskMode && route === "settings" ? "新建审计任务" : meta.title;
+  const crumbView = state.newTaskMode && route === "settings" ? "新建审计任务" : meta.title;
+  $("ctxCrumb").replaceChildren(
+    el("b", "", state.vendor || "未选择项目"),
+    el("span", "crumb-sep", "/"),
+    el("span", "", crumbView),
+  );
   $("projectNav").hidden = !state.vendor && !state.newTaskMode;
   $("projectSelect").disabled = !state.projects.length;
   const runActive = ["running", "paused", "awaiting_approval", "stopping"].includes(state.runStatus);
@@ -291,23 +296,21 @@ const DECISION_CN = {
 };
 function decisionCn(value) { return DECISION_CN[value] || value || "—"; }
 /* ---------- 优先处理（总览左列） ---------- */
-// 从真实状态计算下一步该做什么：待复核漏洞、失败任务、待验证方向、覆盖缺口。
+// 从真实状态计算下一步该做什么；每条待办携带明确目标（页面 + 筛选）。
 function computePriorities(data, automation) {
   const derived = state.derived || {};
   const verdicts = derived.verdicts || {};
   const items = [];
-  const pendingReview = (derived.vulnerabilities || []).filter(fact => !fact.__pending && !verdicts[fact.id]).length;
-  if (pendingReview) items.push({ text: "漏洞待人工复核", count: pendingReview, route: "findings", tone: "warn" });
   const failedJobs = (automation.jobs || []).filter(job => ["failed", "cancelled"].includes(job.status)).length;
-  if (failedJobs) items.push({ text: "失败/取消任务可重跑", count: failedJobs, route: "runs", tone: "danger" });
+  if (failedJobs) items.push({ text: "失败/取消任务可重跑", count: failedJobs, route: "runs", tone: "danger", jump: () => jumpToFailedJobs() });
   const awaitingDirections = (derived.directionRows || []).filter(intent =>
     ["open", "released", "claimed"].includes(intent.direction_status) && !intent.confirmed_vulnerabilities.length
   ).length;
-  if (awaitingDirections) items.push({ text: "验证方向等待结论", count: awaitingDirections, route: "directions", tone: "info" });
+  if (awaitingDirections) items.push({ text: "验证方向等待结论", count: awaitingDirections, route: "directions", tone: "info", jump: () => navigate("directions") });
   const pendingLeads = (derived.riskLeads || []).filter(lead => !lead.__pending && !lead.__confirmedVulnerabilities?.length).length;
-  if (pendingLeads) items.push({ text: "线索待转验证", count: pendingLeads, route: "findings", tone: "info" });
+  if (pendingLeads) items.push({ text: "线索待转验证", count: pendingLeads, tone: "info", jump: () => jumpToFindings("leads", "unscheduled") });
   const coverageGap = metricsCoverageGap();
-  if (coverageGap) items.push({ text: "攻击面维度未观察", count: coverageGap, route: "assets", tone: "muted" });
+  if (coverageGap) items.push({ text: "攻击面维度未观察", count: coverageGap, route: "assets", tone: "muted", jump: () => navigate("assets") });
   return items;
 }
 function metricsCoverageGap() {
@@ -315,32 +318,67 @@ function metricsCoverageGap() {
   if (!coverage) return 0;
   return Math.max(0, Number(coverage.dimensions || 0) - Number(coverage.covered || 0));
 }
+function pendingReviewFindings() {
+  const derived = state.derived || {};
+  return (derived.vulnerabilities || []).filter(fact => !fact.__pending && !derived.verdicts?.[fact.id]);
+}
+function jumpToFindings(tab, statusFilter) {
+  navigate("findings");
+  selectTab(tab);
+  const filters = ui.findingFilters[tab];
+  filters.status = statusFilter || "";
+  $(FINDING_TAB_CONFIG[tab].status).value = filters.status;
+  renderFindingTable(tab);
+  void refresh();
+}
+function jumpToFailedJobs() {
+  navigate("runs");
+  ui.jobStatusFilter = "failed";
+  $("jobStatusFilter").value = "failed";
+  renderJobsPanel(state.automationCache || { jobs: [] });
+}
 function renderPriorityActions(data, automation) {
   const list = $("priorityList");
   if (!list) return;
+  const featured = pendingReviewFindings()[0] || null;
   const items = computePriorities(data, automation);
-  $("prioritySummary").textContent = items.length ? `${items.length} 类待处理` : "";
-  if (!items.length) {
+  const counts = [featured ? 1 : 0, ...items.map(item => item.count)];
+  const total = counts.reduce((sum, value) => sum + value, 0);
+  $("prioritySummary").textContent = total ? `${total} 项待处理` : "";
+  if (!featured && !items.length) {
     list.replaceChildren(el("div", "empty-state", "暂无待处理事项。"));
     return;
   }
-  list.replaceChildren(...items.map(item => {
+  list.replaceChildren();
+  if (featured) {
+    // 第一位是最高优先级的实际发现：严重度 + 标题 + 资产 + 开始复核
+    const card = el("div", "priority-featured");
+    const top = el("div", "pf-top");
+    top.append(severityChip(featured.severity));
+    top.append(el("span", "pf-title", featured.title));
+    card.append(top);
+    card.append(el("div", "pf-meta", `${featured.id} · ${firstAssetText(featured)}`));
+    const action = el("button", "btn primary sm pf-action", "开始复核");
+    action.type = "button";
+    action.addEventListener("click", () => {
+      jumpToFindings("vulns", "unreviewed");
+      selectVulnerability(featured.id);
+    });
+    card.append(action);
+    list.append(card);
+  }
+  items.forEach(item => {
     const row = el("button", "priority-item");
     row.type = "button";
-    // 纯圆点承载语义色，文字由条目本身表达
     const dot = el("span", "status");
     dot.setAttribute("data-state", { warn: "awaiting_approval", danger: "failed", info: "running", muted: "" }[item.tone] || "");
     row.append(dot);
     row.append(el("span", "", item.text));
     row.append(el("span", "priority-count", String(item.count)));
     row.append(el("span", "priority-arrow", "›"));
-    row.addEventListener("click", () => {
-      navigate(item.route);
-      if (item.route === "findings") selectTab("vulns");
-      void refresh();
-    });
-    return row;
-  }));
+    row.addEventListener("click", item.jump);
+    list.append(row);
+  });
 }
 function renderRunStatus(data, automation, metrics) {
   const run = automation.run || null;
@@ -392,7 +430,15 @@ function renderMetrics(project, data, metrics) {
   $("factMetric").textContent = metrics.quality.facts;
   $("factMetricNote").textContent = pendingFacts ? `${pendingFacts} 条候选待提交` : "全部已提交到黑板";
   $("vulnMetric").textContent = metrics.quality.vulnerabilities;
-  $("vulnMetricNote").textContent = `系统漏洞池 · ${project.quality_metrics?.pending ?? 0} 待人工复核`;
+  const derivedVulns = state.derived?.vulnerabilities || [];
+  const derivedVerdicts = state.derived?.verdicts || {};
+  const unreviewedCount = derivedVulns.filter(fact => !fact.__pending && !derivedVerdicts[fact.id]).length;
+  const retestCount = derivedVulns.filter(fact => derivedVerdicts[fact.id]?.action === "retest_requested").length;
+  const reviewNote = [
+    unreviewedCount ? `${unreviewedCount} 待复核` : "",
+    retestCount ? `${retestCount} 待复验` : "",
+  ].filter(Boolean).join(" · ") || "全部已裁决";
+  $("vulnMetricNote").textContent = `系统漏洞池 · ${reviewNote}`;
   $("coverageMetric").textContent = `${Math.round(metrics.coverage.coverage_rate * 100)}%`;
   $("coverageMetricNote").textContent = `${metrics.coverage.covered}/${metrics.coverage.dimensions} 个维度已观察`;
 }
@@ -447,13 +493,9 @@ function renderCoverage(data) {
   $("coverageSummaryChip").textContent = `${verified}/${entries.length} 已验证`;
   entries.forEach(([name, statusValue]) => {
     const row = el("div", `coverage-row ${statusValue}`);
-    const track = el("div", "coverage-track");
-    track.append(document.createElement("i"));
-    row.append(
-      el("span", "", coverageLabels[name] || name),
-      track,
-      el("small", "", coverageStatusLabels[statusValue] || statusValue),
-    );
+    const status = el("small", `coverage-status cov-${statusValue}`, coverageStatusLabels[statusValue] || statusValue);
+    status.title = statusValue === "verified" ? "该维度已有验证结论" : statusValue === "observed" ? "该维度已有观察记录，尚无验证结论" : "该维度尚未观察";
+    row.append(el("span", "", coverageLabels[name] || name), status);
     $("coverageList").append(row);
   });
 }
@@ -484,6 +526,30 @@ const FINDING_STATUS_STATE = {
   confirmed: "completed", committed: "completed",
 };
 const FINDING_TABLE_HEADERS = ["严重度", "标题", "资产", "状态", "置信度", "更新时间"];
+const FINDING_SORTABLE = { 0: "severity", 4: "confidence", 5: "time" };
+const SEVERITY_RANK = { critical: 0, high: 1, medium: 2, low: 3, info: 4, unknown: 5 };
+const SORT_DEFAULT_DIR = { severity: 1, confidence: -1, time: -1 };
+function toggleFindingSort(key, sortKey) {
+  const sort = ui.findingSort[key];
+  if (sort.key === sortKey) sort.dir *= -1;
+  else { sort.key = sortKey; sort.dir = SORT_DEFAULT_DIR[sortKey] || 1; }
+  renderFindingTable(key);
+}
+function sortFindings(rows, sort) {
+  if (!sort?.key) return rows;
+  const dir = sort.dir;
+  return [...rows].sort((a, b) => {
+    if (sort.key === "severity") {
+      return ((SEVERITY_RANK[String(a.severity || "unknown").toLowerCase()] ?? 9)
+        - (SEVERITY_RANK[String(b.severity || "unknown").toLowerCase()] ?? 9)) * dir;
+    }
+    if (sort.key === "confidence") return ((a.confidence ?? 0) - (b.confidence ?? 0)) * dir;
+    if (sort.key === "time") {
+      return String(a.updated_at || a.created_at || "").localeCompare(String(b.updated_at || b.created_at || "")) * dir;
+    }
+    return 0;
+  });
+}
 function vulnStatusKey(fact, verdict) {
   if (fact.__pending) return "pending";
   return verdict ? String(verdict.action) : "unreviewed";
@@ -545,14 +611,28 @@ function statusCellNode(key) {
   td.append(findingStatusNode(key));
   return td;
 }
-function findingsTable(rows, { selectedId, cellFor }) {
+function findingsTable(rows, { selectedId, cellFor, sort }) {
   const table = document.createElement("table");
   table.className = "data-table findings-table";
   const colgroup = document.createElement("colgroup");
   ["col-sev", "col-title", "col-asset", "col-status", "col-conf", "col-time"].forEach(name => colgroup.append(document.createElement("col")));
   const thead = document.createElement("thead");
   const headRow = document.createElement("tr");
-  FINDING_TABLE_HEADERS.forEach(text => headRow.append(el("th", "", text)));
+  FINDING_TABLE_HEADERS.forEach((text, index) => {
+    const th = el("th");
+    const sortKey = FINDING_SORTABLE[index];
+    if (!sortKey) {
+      th.textContent = text;
+    } else {
+      const active = sort?.key === sortKey;
+      const button = el("button", `sort-btn${active ? " active" : ""}`);
+      button.type = "button";
+      button.dataset.sortKey = sortKey;
+      button.append(el("span", "", text), el("span", "sort-ind", active ? (sort.dir === 1 ? "▲" : "▼") : "↕"));
+      th.append(button);
+    }
+    headRow.append(th);
+  });
   thead.append(headRow);
   const tbody = document.createElement("tbody");
   if (!rows.length) {
@@ -605,11 +685,14 @@ function renderFindingTable(key) {
   const rows = config.rows();
   if (!rows) return;
   syncTypeFilterOptions($(config.type), rows, filters);
-  const visible = applyFindingFilters(config.newestFirst ? [...rows].reverse() : rows, filters, config.statusKey);
+  const filtered = applyFindingFilters(config.newestFirst ? [...rows].reverse() : rows, filters, config.statusKey);
+  const visible = sortFindings(filtered, ui.findingSort[key]);
   $(config.count).textContent = rows.length ? `${visible.length} / ${rows.length} 条` : "";
+  const clearBtn = document.querySelector(`.toolbar-clear[data-clear-tab="${key}"]`);
+  if (clearBtn) clearBtn.hidden = !(filters.q || filters.severity || filters.status || filters.type);
   const list = $(config.list);
   preserveScroll(list, () => {
-    list.replaceChildren(findingsTable(visible, { selectedId: ui.selected[key], cellFor: config.cellFor }));
+    list.replaceChildren(findingsTable(visible, { selectedId: ui.selected[key], cellFor: config.cellFor, sort: ui.findingSort[key] }));
   });
 }
 function renderVulnList() { renderFindingTable("vulns"); }
@@ -617,7 +700,7 @@ function renderLeadList() { renderFindingTable("leads"); }
 function renderSurfaceList() { renderFindingTable("surface"); }
 // 发现页详情抽屉/全屏视图（≤1439px 生效；≥1440px 为固定侧栏）
 const FINDING_PANES = { vulns: "vulnDetail", leads: "leadDetail", surface: "surfaceDetail" };
-const detailDrawerQuery = window.matchMedia("(max-width: 1439.98px)");
+const detailDrawerQuery = window.matchMedia("(max-width: 1639.98px)");
 let detailReturnFocus = null;
 function rememberReturnFocus(listId, rowId) {
   // 行点击后列表会整体重建，直接存元素会失联；存可重查的引用
@@ -660,16 +743,17 @@ function initFindingsPage() {
     $(config.type).addEventListener("change", event => { filters.type = event.target.value; renderFindingTable(key); });
     // 事件委托：整个列表一个监听器，行点击按 data-id 分发
     $(config.list).addEventListener("click", event => {
+      const sortButton = event.target.closest(".sort-btn");
+      if (sortButton) { toggleFindingSort(key, sortButton.dataset.sortKey); return; }
       const row = event.target.closest("tr[data-id]");
       if (!row) return;
-      rememberReturnFocus(config.list, row.dataset.id);
       row.focus();
-      if (key === "vulns") selectVulnerability(row.dataset.id);
-      else {
-        ui.selected[key] = row.dataset.id;
-        renderFindingTable(key);
-        if (key === "leads") renderLeadDetail(); else renderSurfaceDetail();
-      }
+      if (key === "vulns") { selectVulnerability(row.dataset.id); openFindingDetail(key); return; }
+      ui.selected[key] = row.dataset.id;
+      // 只更新选中样式：不重建表格，保留滚动位置与行焦点
+      $(config.list).querySelectorAll("tr.selected").forEach(node => node.classList.remove("selected"));
+      row.classList.add("selected");
+      if (key === "leads") renderLeadDetail(); else renderSurfaceDetail();
       openFindingDetail(key);
     });
     $(config.list).addEventListener("keydown", event => {
@@ -681,14 +765,37 @@ function initFindingsPage() {
     });
   });
   $("detailBackdrop").addEventListener("click", closeFindingDetail);
-  document.addEventListener("keydown", event => { if (event.key === "Escape") closeFindingDetail(); });
+  document.addEventListener("keydown", event => {
+    if (event.key !== "Escape") return;
+    // 展开的阅读器先收起，再关抽屉
+    const expanded = document.querySelector(".evidence-reader.expanded");
+    if (expanded) { expanded.classList.remove("expanded"); ui.readerExpanded = false; return; }
+    closeFindingDetail();
+  });
+  // 抽屉打开时 Tab 在面板内循环
+  document.addEventListener("keydown", event => {
+    if (event.key !== "Tab" || !detailDrawerQuery.matches) return;
+    const pane = document.querySelector(".detail-pane.open");
+    if (!pane) return;
+    const focusables = [...pane.querySelectorAll("button, input, select, textarea, [tabindex]")].filter(node =>
+      !node.disabled && node.tabIndex >= 0 && node.offsetParent !== null);
+    if (!focusables.length) return;
+    const first = focusables[0];
+    const last = focusables[focusables.length - 1];
+    if (!pane.contains(document.activeElement)) { event.preventDefault(); first.focus(); return; }
+    if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); }
+    else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
+  });
   document.addEventListener("click", event => { if (event.target.closest(".detail-close")) closeFindingDetail(); });
   detailDrawerQuery.addEventListener("change", event => { if (!event.matches) closeFindingDetail(); });
 }
 function selectVulnerability(id, { switchTab = false } = {}) {
   ui.selected.vulns = id;
   if (switchTab) selectTab("vulns");
-  renderVulnList();
+  // 只更新选中样式：不重建表格，保留滚动位置与行焦点
+  const list = $("vulnList");
+  list.querySelectorAll("tr.selected").forEach(node => node.classList.remove("selected"));
+  list.querySelector(`tr[data-id="${CSS.escape(id)}"]`)?.classList.add("selected");
   renderVulnDetail();
   openFindingDetail("vulns");
 }
@@ -726,9 +833,40 @@ function readerPre(text) {
   return node;
 }
 function evidenceBasename(path) { return String(path || "").split("/").filter(Boolean).pop() || String(path || ""); }
-function renderReaderBody(body, matches) {
+function buildReaderToolbar(rawText, reader, body) {
+  const bar = el("div", "reader-toolbar");
+  const copyButton = el("button", "reader-tool", "复制内容");
+  copyButton.type = "button";
+  copyButton.addEventListener("click", async () => {
+    try {
+      await navigator.clipboard.writeText(rawText);
+      showToast("已复制当前内容（复制原始文本，与换行设置无关）");
+    } catch {
+      showToast("复制失败：浏览器未授权剪贴板访问", true);
+    }
+  });
+  const wrapButton = el("button", `reader-tool${ui.readerWrap ? " active" : ""}`, "自动换行");
+  wrapButton.type = "button";
+  wrapButton.addEventListener("click", () => {
+    ui.readerWrap = !ui.readerWrap;
+    body.classList.toggle("no-wrap", !ui.readerWrap);
+    wrapButton.classList.toggle("active", ui.readerWrap);
+  });
+  const expandButton = el("button", `reader-tool${ui.readerExpanded ? " active" : ""}`, ui.readerExpanded ? "收起" : "展开阅读");
+  expandButton.type = "button";
+  expandButton.addEventListener("click", () => {
+    ui.readerExpanded = !ui.readerExpanded;
+    reader.classList.toggle("expanded", ui.readerExpanded);
+    expandButton.textContent = ui.readerExpanded ? "收起" : "展开阅读";
+    expandButton.classList.toggle("active", ui.readerExpanded);
+  });
+  bar.append(copyButton, wrapButton, expandButton);
+  return bar;
+}
+function renderReaderBody(reader, body, matches) {
   const readerState = ui.evidenceReader;
   body.replaceChildren();
+  body.classList.toggle("no-wrap", !ui.readerWrap);
   const tab = readerState.tab;
   if (tab === "repro") {
     const fact = readerState.fact || {};
@@ -768,6 +906,7 @@ function renderReaderBody(body, matches) {
     body.append(head);
     if (!entry || entry.loading) { body.append(readerEmpty("正在读取证据…")); return; }
     if (entry.truncated) body.append(el("div", "reader-note", "仅显示前 64 KiB"));
+    body.append(buildReaderToolbar(entry.content, reader, body));
     body.append(readerPre(entry.content));
     return;
   }
@@ -777,9 +916,11 @@ function renderReaderBody(body, matches) {
   if (!entry || entry.loading) { body.append(readerEmpty(entry?.loading ? "正在读取证据…" : "先在「证据」中选择文件")); return; }
   const halves = splitHttpExchange(entry.content);
   if (tab === "request") {
+    body.append(buildReaderToolbar(halves.request, reader, body));
     body.append(readerPre(halves.request || "（空）"));
     return;
   }
+  body.append(buildReaderToolbar(halves.response, reader, body));
   body.append(readerPre(halves.response || "未捕获响应（该文件只包含请求）"));
 }
 function buildEvidenceReader(fact, rawMatches) {
@@ -794,7 +935,8 @@ function buildEvidenceReader(fact, rawMatches) {
   });
   if (readerState.factId !== fact.id) {
     readerState.factId = fact.id;
-    readerState.path = null;
+    // 有证据时默认选中首个文件：请求 / 响应标签可直接打开
+    readerState.path = matches.length ? matches[0].path : null;
     readerState.tab = matches.length ? "files" : "repro";
   }
   readerState.fact = fact;
@@ -811,7 +953,7 @@ function buildEvidenceReader(fact, rawMatches) {
   const body = el("div", "reader-body");
   reader.append(tabs, body);
   const syncTabs = () => tabs.querySelectorAll(".reader-tab").forEach(node => node.classList.toggle("active", node.dataset.tab === readerState.tab));
-  const renderBody = () => renderReaderBody(body, matches);
+  const renderBody = () => renderReaderBody(reader, body, matches);
   syncTabs();
   renderBody();
   // 若选中文件尚未加载（或加载中断），先取回再重绘（期间显示"正在读取"）
@@ -851,38 +993,120 @@ function buildEvidenceReader(fact, rawMatches) {
 function renderVulnDetail() {
   const info = $("vulnDetailInfo");
   const box = $("reviewBox");
+  const pane = $("vulnDetail");
+  const split = pane.closest(".split");
   const { vulnerabilities, verdicts, indexedEvidence, sourceLeadsByVulnerability } = state.derived;
   const fact = vulnerabilities.find(item => item.id === ui.selected.vulns) || null;
+  // 未选中时不保留大面积占位：整列隐藏，表格占满可用宽度
+  split.classList.toggle("no-selection", !fact);
+  pane.hidden = !fact;
   if (!fact) {
     ui.selected.vulns = null;
     info.replaceChildren(el("div", "empty-state", vulnerabilities.length ? "选择列表中的漏洞查看完整信息。" : "暂无系统漏洞。"));
     box.hidden = true;
     return;
   }
+  const verdict = verdicts[fact.id];
   const nodes = [];
   nodes.push(el("div", "detail-title", fact.title));
+  // 元信息只突出严重度与裁决状态；ID/置信度等归入次级文字
   const chipsRow = el("div", "detail-chips");
   chipsRow.append(severityChip(fact.severity));
-  [fact.id, `置信度 ${percent(fact.confidence)}`, `影响力 ${percent(fact.impact_score)}`]
-    .forEach(text => chipsRow.append(chip(text)));
-  if (fact.__pending) chipsRow.append(chip(`候选 · 来自 ${fact.__member} · 尚未写入黑板`, "warn"));
+  chipsRow.append(verdictBadgeNode(verdict, fact));
   nodes.push(chipsRow);
-  nodes.push(detailSection("已验证危害", el("p", "", fact.business_impact || "尚未形成漏洞闭环")));
+  nodes.push(el("div", "detail-meta",
+    `${fact.id} · 置信度 ${percent(fact.confidence)} · 影响力 ${percent(fact.impact_score)} · ${firstAssetText(fact)}`));
+  if (fact.__pending) nodes.push(el("div", "detail-meta", `候选结果 · 来自 ${fact.__member} · 尚未写入黑板`));
+  // 驳斥记录不无条件标"已验证"：展示原始结论及其裁决结果
+  const impactLabel = verdict?.action === "refuted"
+    ? "原始结论 · 已被人工驳斥"
+    : ["reclassified", "same_root"].includes(verdict?.action) ? "原始结论 · 裁决已调整" : "已验证危害";
+  nodes.push(detailSection(impactLabel, el("p", "", fact.business_impact || "尚未形成漏洞闭环")));
   // 证据阅读器：合并证据文件与复现步骤（石墨暗面，证据/请求/响应/复现四个标签）
   nodes.push(buildEvidenceReader(fact, evidenceForFact(fact, indexedEvidence)));
+  nodes.push(verdictSummarySection(verdict, fact, () => { box.hidden = !box.hidden; }));
   const sourceLeads = sourceLeadsByVulnerability.get(fact.id) || [];
   if (sourceLeads.length) nodes.push(detailSection("来源", el("p", "", `由 ${sourceLeads.length} 条风险线索论证转化`)));
   info.replaceChildren(...nodes);
   if (fact.__pending) { box.hidden = true; $("submitFindingReview").disabled = true; return; }
-  box.hidden = false;
+  // 表单默认折叠（已有裁决只读展示），点"修改裁决"展开；切换记录恢复对应草稿
+  box.hidden = !ui.reviewFormOpen;
   $("submitFindingReview").disabled = false;
   $("reviewFindingName").textContent = ` · ${fact.id}`;
-  const verdict = verdicts[fact.id];
-  if (["info", "low", "medium", "high", "critical"].includes(verdict?.final_severity || fact.severity)) {
-    $("reviewSeverity").value = verdict?.final_severity || fact.severity;
-  }
+  restoreReviewDraft(fact, verdict);
   syncDuplicateReviewOptions();
 }
+// 已有裁决只读摘要；"修改裁决"按钮展开表单
+function verdictSummarySection(verdict, fact, onToggleForm) {
+  if (fact.__pending) return detailSection("人工裁决", el("p", "", "候选结果提交后才能人工裁决。"));
+  if (!verdict) return detailSection("人工裁决", el("p", "", "待人工复核。"));
+  const actionText = ({ accepted: "已认可", adjusted: "已调级", same_root: "同源漏洞", refuted: "已驳斥", reclassified: "已降级", retest_requested: "要求复验" })[verdict.action] || verdict.action;
+  const lines = [`${actionText} · ${classificationLabelOf(verdict.final_classification)} · ${verdict.final_severity || "unknown"}`];
+  if (verdict.duplicate_of_finding_id) lines.push(`主漏洞 ${verdict.duplicate_of_finding_id}`);
+  if (verdict.reason) lines.push(`理由：${verdict.reason}`);
+  const wrap = el("div", "");
+  wrap.append(el("p", "", lines.filter(Boolean).join(" · ")));
+  const toggle = el("button", "btn ghost sm", "修改裁决");
+  toggle.type = "button";
+  toggle.addEventListener("click", onToggleForm);
+  return detailSection("人工裁决", wrap, toggle);
+}
+function classificationLabelOf(value) {
+  return ({ vulnerability: "漏洞", same_root_vulnerability: "同源漏洞", risk_lead: "线索", attack_surface: "攻击面", inconclusive: "证据不足" })[value] || value || "—";
+}
+function verdictBadgeNode(verdict, fact) {
+  if (fact.__pending) return chip("候选", "warn");
+  if (!verdict) return chip("待人工复核", "warn");
+  const tone = { accepted: "ok", adjusted: "ok", same_root: "ok", refuted: "", reclassified: "", retest_requested: "warn" }[verdict.action] || "";
+  const label = ({ accepted: "已认可", adjusted: "已调级", same_root: "同源", refuted: "已驳斥", reclassified: "已降级", retest_requested: "要求复验" })[verdict.action] || verdict.action;
+  return chip(label, tone);
+}
+// 草稿按 finding ID 保存；切换记录恢复对应草稿或从该记录已有裁决初始化干净表单
+function restoreReviewDraft(fact, verdict) {
+  const reset = () => {
+    $("reviewAction").value = "accepted";
+    $("reviewClassification").value = "vulnerability";
+    $("reviewSeverity").value = ["info", "low", "medium", "high", "critical"].includes(fact.severity) ? fact.severity : "medium";
+    $("reviewDuplicateOf").value = "";
+    $("reviewReason").value = "";
+    $("reviewReasonCodes").value = "";
+    $("reviewScope").value = "current_finding";
+  };
+  reset();
+  const draft = ui.reviewDrafts[fact.id];
+  if (draft) {
+    $("reviewAction").value = draft.action;
+    $("reviewClassification").value = draft.classification;
+    $("reviewSeverity").value = draft.severity;
+    $("reviewDuplicateOf").value = draft.duplicateOf || "";
+    $("reviewReason").value = draft.reason;
+    $("reviewReasonCodes").value = draft.codes;
+    $("reviewScope").value = draft.scope;
+  } else if (verdict) {
+    // 已有裁决的记录从其结论出发，不再无条件回到"认可"
+    $("reviewAction").value = verdict.action;
+    $("reviewClassification").value = verdict.final_classification || "vulnerability";
+    if (["info", "low", "medium", "high", "critical"].includes(verdict.final_severity)) $("reviewSeverity").value = verdict.final_severity;
+  }
+  syncDuplicateReviewOptions();
+  if (draft?.duplicateOf) $("reviewDuplicateOf").value = draft.duplicateOf;
+  else if (verdict?.duplicate_of_finding_id) $("reviewDuplicateOf").value = verdict.duplicate_of_finding_id;
+}
+function saveReviewDraft() {
+  const id = ui.selected.vulns;
+  if (!id) return;
+  ui.reviewDrafts[id] = {
+    action: $("reviewAction").value,
+    classification: $("reviewClassification").value,
+    severity: $("reviewSeverity").value,
+    duplicateOf: $("reviewDuplicateOf").value,
+    reason: $("reviewReason").value,
+    codes: $("reviewReasonCodes").value,
+    scope: $("reviewScope").value,
+  };
+}
+["reviewAction", "reviewClassification", "reviewSeverity", "reviewDuplicateOf", "reviewReason", "reviewReasonCodes", "reviewScope"]
+  .forEach(id => $(id).addEventListener("change", saveReviewDraft));
 function syncDuplicateReviewOptions() {
   const vulnerabilities = (state.derived?.vulnerabilities || []).filter(fact => !fact.__pending);
   const selected = ui.selected.vulns;
@@ -901,7 +1125,10 @@ function syncDuplicateReviewOptions() {
 }
 function renderLeadDetail() {
   const panel = $("leadDetailBody");
+  const pane = $("leadDetail");
   const item = (state.derived?.riskLeads || []).find(lead => lead.id === ui.selected.leads) || null;
+  pane.closest(".split").classList.toggle("no-selection", !item);
+  pane.hidden = !item;
   if (!item) {
     ui.selected.leads = null;
     panel.replaceChildren(el("div", "empty-state", "选择列表中的线索查看完整信息。"));
@@ -911,10 +1138,11 @@ function renderLeadDetail() {
   const nodes = [el("div", "detail-title", item.title)];
   const chipsRow = el("div", "detail-chips");
   chipsRow.append(severityChip(item.severity));
-  [item.id, lifecycle.label, `置信度 ${percent(item.confidence)}`, `影响力 ${percent(item.impact_score)}`, `创建于 ${formatEventTime(item.created_at || item.updated_at)}`]
-    .forEach(text => chipsRow.append(chip(text)));
-  if (item.__pending) chipsRow.append(chip(`候选 · 来自 ${item.__member}`, "warn"));
+  chipsRow.append(chip(lifecycle.label, item.__confirmedVulnerabilities?.length ? "ok" : "warn"));
   nodes.push(chipsRow);
+  nodes.push(el("div", "detail-meta",
+    `${item.id} · 置信度 ${percent(item.confidence)} · 影响力 ${percent(item.impact_score)} · ${firstAssetText(item)} · 创建于 ${formatEventTime(item.created_at || item.updated_at)}`));
+  if (item.__pending) nodes.push(el("div", "detail-meta", `候选结果 · 来自 ${item.__member} · 尚未写入黑板`));
   nodes.push(detailSection("待验证危害", el("p", "", item.business_impact || "尚未形成漏洞闭环")));
   nodes.push(detailSection("验证状态", el("p", "", `${lifecycle.label} · ${lifecycle.detail}`)));
   const confirmed = item.__confirmedVulnerabilities || [];
@@ -936,7 +1164,10 @@ function renderLeadDetail() {
 }
 function renderSurfaceDetail() {
   const panel = $("surfaceDetailBody");
+  const pane = $("surfaceDetail");
   const fact = (state.derived?.attackIntel || []).find(item => item.id === ui.selected.surface) || null;
+  pane.closest(".split").classList.toggle("no-selection", !fact);
+  pane.hidden = !fact;
   if (!fact) {
     ui.selected.surface = null;
     panel.replaceChildren(el("div", "empty-state", "选择列表中的条目查看完整信息。"));
@@ -944,9 +1175,11 @@ function renderSurfaceDetail() {
   }
   const nodes = [el("div", "detail-title", fact.title)];
   const chipsRow = el("div", "detail-chips");
-  [fact.id, fact.category].forEach(text => chipsRow.append(chip(text)));
-  if (fact.__pending) chipsRow.append(chip(`候选 · 来自 ${fact.__member}`, "warn"));
+  chipsRow.append(severityChip(fact.severity));
+  chipsRow.append(chip(fact.__pending ? "候选" : "已提交", fact.__pending ? "warn" : "ok"));
   nodes.push(chipsRow);
+  nodes.push(el("div", "detail-meta", `${fact.id} · ${fact.category || "未分类"} · ${firstAssetText(fact)}`));
+  if (fact.__pending) nodes.push(el("div", "detail-meta", `候选结果 · 来自 ${fact.__member} · 尚未写入黑板`));
   nodes.push(detailSection("观察说明", el("p", "", fact.evidence || "暂无观察说明")));
   nodes.push(detailSection("业务影响", el("p", "", fact.business_impact || "尚未评估业务影响")));
   const matches = evidenceForFact(fact, state.derived.indexedEvidence);
@@ -1128,9 +1361,10 @@ function jobSignalText(job, event) {
 }
 function renderJobsPanel(automation) {
   const jobs = automation.jobs || [];
+  const visibleJobs = ui.jobStatusFilter ? jobs.filter(job => job.status === ui.jobStatusFilter) : jobs;
   const automationEvents = automation.events || [];
   preserveScroll($("jobsBody").closest(".table-wrap"), () => {
-    renderRows($("jobsBody"), jobs, 8, job => {
+    renderRows($("jobsBody"), visibleJobs, 8, job => {
       const row = document.createElement("tr");
       const model = modelInfoForJob(job);
       const modelCell = cell(model.model, "job-model");
@@ -1917,6 +2151,19 @@ document.querySelector(".tab-bar").addEventListener("keydown", event => {
   next.focus();
 });
 initFindingsPage();
+document.addEventListener("click", event => {
+  const clearButton = event.target.closest(".toolbar-clear");
+  if (!clearButton) return;
+  const key = clearButton.dataset.clearTab;
+  const filters = ui.findingFilters[key];
+  if (!filters) return;
+  Object.assign(filters, { q: "", severity: "", status: "", type: "" });
+  const config = FINDING_TAB_CONFIG[key];
+  $(config.search).value = "";
+  $(config.severity).value = "";
+  $(config.status).value = "";
+  renderFindingTable(key);
+});
 // 证据与 Prompt 预览（事件委托）
 document.addEventListener("click", async event => {
   const evidenceButton = event.target.closest(".evidence-open");
@@ -1977,6 +2224,10 @@ $("directionDetail").addEventListener("click", async event => {
   if (!window.confirm("确认恢复该方向并允许重新排队？")) return;
   await post("/api/directions/restore", { direction_id: restoreButton.dataset.directionId, reason: restoreReason.trim() }, () => "方向已恢复，重新开放调度");
 });
+$("jobStatusFilter").addEventListener("change", event => {
+  ui.jobStatusFilter = event.target.value;
+  renderJobsPanel(state.automationCache || { jobs: [] });
+});
 // 人工漏洞裁决
 $("reviewAction").addEventListener("change", event => {
   const action = event.target.value;
@@ -2008,6 +2259,8 @@ $("submitFindingReview").addEventListener("click", async () => {
       reason_codes: reasonCodes,
       applicable_scope: $("reviewScope").value,
     }, result => `人工结论已保存，长期误报率 ${percent(result.global_quality_metrics.false_positive_rate)}`);
+    delete ui.reviewDrafts[findingId];
+    ui.reviewFormOpenFor = null;
     $("reviewReason").value = "";
     $("reviewReasonCodes").value = "";
   } finally { button.classList.remove("busy"); }

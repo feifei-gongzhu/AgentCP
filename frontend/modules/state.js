@@ -25,6 +25,15 @@ export const ui = {
   // 证据阅读器：当前发现、选中文件、所在标签；内容按路径缓存（跨轮询稳定）。
   evidenceReader: { factId: null, path: null, tab: "files" },
   evidenceCache: new Map(),
+  readerWrap: true, readerExpanded: false,
+  jobStatusFilter: "",
+  // 人工裁决：草稿按 finding ID 隔离；表单展开状态跟随对应记录
+  reviewDrafts: {}, reviewFormOpenFor: null,
+  findingSort: {
+    vulns: { key: null, dir: 1 },
+    leads: { key: null, dir: 1 },
+    surface: { key: null, dir: 1 },
+  },
   expandedTechnologyHosts: new Set(),
 };
 
