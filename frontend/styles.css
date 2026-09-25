@@ -363,10 +363,10 @@ code { font-family: var(--s-mono); font-size: .9em; }
 .findings-table td { height: 40px; }
 .findings-table col:nth-child(1) { width: 84px; }
 .findings-table col:nth-child(2) { width: auto; }
-.findings-table col:nth-child(3) { width: 190px; }
+.findings-table col:nth-child(3) { width: 180px; }
 .findings-table col:nth-child(4) { width: 122px; }
 .findings-table col:nth-child(5) { width: 68px; }
-.findings-table col:nth-child(6) { width: 96px; }
+.findings-table col:nth-child(6) { width: 110px; }
 .findings-table .num { text-align: left; font-variant-numeric: tabular-nums; color: var(--s-ink-secondary); }
 .cell-sub { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--s-ink-muted); font: 400 11px/14px var(--s-mono); }
 .t-asset, .t-time { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--s-ink-secondary); font: 400 11px var(--s-mono); }
