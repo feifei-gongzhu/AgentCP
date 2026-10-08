@@ -254,6 +254,18 @@ def test_run_stop_cancels_analysis_jobs(
     assert database.list_analysis_jobs("R1")[0]["status"] == "cancelled"
 
 
+def test_team_member_cannot_impersonate_analysis(project: ProjectStore) -> None:
+    """§13.1-17：研判记录不能由七角色的一段附加输出冒充。"""
+    from src.sorne.worker import WorkerError, apply_worker_output
+
+    with pytest.raises(WorkerError, match="独立研判服务"):
+        apply_worker_output(project, {
+            "kind": "analysis_record",
+            "analyzer_kind": "poc",
+            "observations": [{"text": "x", "evidence_ref": "y", "kind": "observed"}],
+        })
+
+
 def test_domain_input_includes_engine_and_evidence_refs(project: ProjectStore) -> None:
     scan = _scan_result(project)
     domain = build_domain_input("poc", scan, evidence_loader=lambda p: "EXCERPT")
