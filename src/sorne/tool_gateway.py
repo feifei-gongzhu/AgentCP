@@ -53,10 +53,12 @@ WORKSPACE_READ_LIMIT = 64_000
 WORKSPACE_WRITE_LIMIT = 256_000
 
 # 模型参数中出现即被丢弃并覆盖为服务端绑定值（P0-契约设计 §3.6）。
+# vendor/project 是 project_id 的同义服务端字段（P5 MCP 跨项目探测用例：
+# 一律丢弃并审计，而不是让调用方选择项目）。
 SERVER_AUTHORITY_ARGUMENT_FIELDS = (
-    "project_id", "run_id", "job_id", "task_id", "control_version",
-    "idempotency_key", "input_hash", "params_digest", "proposed_by",
-    "claim_worker", "claim_version", "session",
+    "project_id", "vendor", "project", "run_id", "job_id", "task_id",
+    "control_version", "idempotency_key", "input_hash", "params_digest",
+    "proposed_by", "claim_worker", "claim_version", "session", "role",
 )
 
 _ALLOWED_READ_PREFIXES = (
@@ -370,6 +372,7 @@ class ToolGateway:
             "workspace_list": self._tool_workspace_list,
             "workspace_write": self._tool_workspace_write,
             "helper_recipe": self._tool_helper_recipe,
+            "external_mcp_call": self._tool_external_mcp_call,
             "compat_bash": self._tool_compat_bash,
         }
         executor = executors.get(capability_id)
@@ -1318,6 +1321,31 @@ class ToolGateway:
             )
         output, is_error = self._compat_executor(command)
         return {"output": output, "is_error": is_error}
+
+    # ── 外部 MCP 代理（§9，P5；注册表强制 visible_roles）──────────────
+    def _tool_external_mcp_call(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        from .mcp_registry import McpRegistryError, call_external_tool
+
+        server_id = str(arguments.get("server_id") or "").strip()
+        tool_name = str(arguments.get("tool_name") or "").strip()
+        if not server_id or not tool_name:
+            raise ToolGatewayError("external_mcp_call 需要 server_id 与 tool_name")
+        try:
+            return call_external_tool(
+                self.store,
+                # 角色只来自会话身份（服务端绑定）；参数中的角色字段被
+                # Schema（additionalProperties: false）直接拒绝。
+                role=self.identity.role,
+                server_id=server_id,
+                tool_name=tool_name,
+                arguments=arguments.get("arguments")
+                if isinstance(arguments.get("arguments"), dict) else {},
+                cancel_check=self.cancel_check,
+            )
+        except McpRegistryError as exc:
+            # 消息前缀（permission_denied/capability_missing/…）原样保留：
+            # dispatch 统一加 tool_error: 外壳，这里不再二次包装。
+            raise ToolGatewayError(str(exc)) from exc
 
     # ── 采集扫描：nuclei 组件验证（§6.6-2，P2）────────────────────────
     def _tool_poc_scan(self, arguments: dict[str, Any]) -> dict[str, Any]:

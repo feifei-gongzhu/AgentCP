@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import time
 from pathlib import Path
 
@@ -323,6 +324,90 @@ def cmd_serve(args: argparse.Namespace) -> None:
     serve(host=args.host, port=args.port)
 
 
+# ── MCP（方案 §9、§12-P5）：stdio/HTTP 服务入口 + 外部 MCP 注册入口 ─────
+
+def cmd_mcp_stdio(args: argparse.Namespace) -> None:
+    from .mcp_server import run_stdio
+
+    run_stdio(args.project, args.role, log_level=args.log_level)
+
+
+def cmd_mcp_serve(args: argparse.Namespace) -> None:
+    from .mcp_server import serve as serve_mcp
+
+    serve_mcp(
+        host=args.host,
+        port=args.port,
+        token=args.token or os.environ.get("SORNE_MCP_TOKEN", ""),
+        allowed_origins=tuple(
+            item for item in (
+                piece.strip() for origin in args.allowed_origin
+                for piece in origin.split(",")
+            ) if item
+        ),
+        session_ttl_minutes=args.session_ttl_minutes,
+    )
+
+
+def cmd_mcp_register(args: argparse.Namespace) -> None:
+    from .mcp_registry import register_server
+
+    store = ProjectStore(args.vendor)
+    entry = register_server(
+        store,
+        server_id=args.id,
+        name=args.name,
+        transport=args.transport,
+        visible_roles=list(args.visible_role),
+        command=args.command or "",
+        args=list(args.arg or []),
+        url=args.url or "",
+        enabled=not args.disabled,
+    )
+    print(json.dumps(entry, ensure_ascii=False, indent=2))
+    print(f"提示: 先执行 sorne mcp health {args.vendor} --id {args.id} 完成真实握手并缓存工具清单")
+
+
+def cmd_mcp_list(args: argparse.Namespace) -> None:
+    from .mcp_registry import list_servers
+
+    print(json.dumps(
+        {"vendor": args.vendor, "servers": list_servers(ProjectStore(args.vendor))},
+        ensure_ascii=False, indent=2,
+    ))
+
+
+def cmd_mcp_health(args: argparse.Namespace) -> None:
+    from .mcp_registry import list_servers, refresh_health
+
+    store = ProjectStore(args.vendor)
+    targets = (
+        [args.id] if args.id else [str(item.get("id")) for item in list_servers(store)]
+    )
+    if not targets:
+        print(f"项目 {args.vendor} 没有已注册的外部 MCP 服务器")
+        return
+    for server_id in targets:
+        entry = refresh_health(store, server_id)
+        health = entry["health"]
+        cache = entry.get("tool_cache") or {}
+        print(
+            f"{server_id}: {health['status']}（{health.get('latency_ms')}ms，"
+            f"工具 {len(cache.get('tools') or [])} 个，"
+            f"server={cache.get('server_name')} {cache.get('server_version')}）"
+            f" {health.get('detail') or ''}"
+        )
+
+
+def cmd_mcp_remove(args: argparse.Namespace) -> None:
+    from .mcp_registry import remove_server
+
+    print(json.dumps(
+        remove_server(ProjectStore(args.vendor), args.id),
+        ensure_ascii=False, indent=2,
+    ))
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="sorne")
     sub = parser.add_subparsers(required=True)
@@ -502,6 +587,69 @@ def build_parser() -> argparse.ArgumentParser:
     web.add_argument("--host", default="127.0.0.1")
     web.add_argument("--port", type=int, default=8765)
     web.set_defaults(func=cmd_serve)
+
+    mcp = sub.add_parser(
+        "mcp",
+        help="MCP 入口（方案 §9）：对外 stdio/Streamable HTTP 服务共用 tool_gateway；外部 MCP 服务器注册与健康检查",
+    )
+    mcp_sub = mcp.add_subparsers(required=True)
+
+    mcp_stdio = mcp_sub.add_parser(
+        "stdio",
+        help="以 stdio transport 暴露一个（项目, 角色）会话的工具；stdout 只输出协议，日志走 stderr",
+    )
+    mcp_stdio.add_argument("--project", required=True, help="显式绑定的项目名（无默认项目）")
+    mcp_stdio.add_argument(
+        "--role", required=True,
+        choices=[*role_registry.role_ids(origin="seven_role")],
+        help="会话绑定的七角色之一（工具集 = 角色白名单 ∩ 已实现能力）",
+    )
+    mcp_stdio.add_argument("--log-level", default="info", choices=["debug", "info", "warning", "error"])
+    mcp_stdio.set_defaults(func=cmd_mcp_stdio)
+
+    mcp_serve = mcp_sub.add_parser(
+        "serve",
+        help="以 Streamable HTTP 暴露 MCP 端点 /mcp/{vendor}?role={role}（默认只监听本机）",
+    )
+    mcp_serve.add_argument("--host", default="127.0.0.1")
+    mcp_serve.add_argument("--port", type=int, default=8790)
+    mcp_serve.add_argument("--token", help="Bearer Token（缺省读 SORNE_MCP_TOKEN；不设则不鉴权）")
+    mcp_serve.add_argument(
+        "--allowed-origin", action="append", default=[],
+        help="放行的浏览器 Origin（可重复/逗号分隔；默认拒绝所有 Origin 头）",
+    )
+    mcp_serve.add_argument("--session-ttl-minutes", type=float, default=120.0)
+    mcp_serve.set_defaults(func=cmd_mcp_serve)
+
+    mcp_register = mcp_sub.add_parser("register", help="注册外部 MCP 服务器（transport/连接配置/enabled/visible_roles）")
+    mcp_register.add_argument("vendor")
+    mcp_register.add_argument("--id", required=True)
+    mcp_register.add_argument("--name", required=True)
+    mcp_register.add_argument("--transport", required=True, choices=["stdio", "http"])
+    mcp_register.add_argument("--command", help="stdio：外部服务器启动命令")
+    mcp_register.add_argument("--arg", action="append", default=[], help="stdio：命令参数（可重复）")
+    mcp_register.add_argument("--url", help="http：外部服务器 MCP 端点 URL")
+    mcp_register.add_argument(
+        "--visible-role", action="append", required=True,
+        choices=[*role_registry.role_ids()],
+        help="对该角色可见（服务端强制；可重复）",
+    )
+    mcp_register.add_argument("--disabled", action="store_true", help="注册但默认停用")
+    mcp_register.set_defaults(func=cmd_mcp_register)
+
+    mcp_list = mcp_sub.add_parser("list", help="列出外部 MCP 服务器注册（含健康/工具缓存/版本）")
+    mcp_list.add_argument("vendor")
+    mcp_list.set_defaults(func=cmd_mcp_list)
+
+    mcp_health = mcp_sub.add_parser("health", help="对外部 MCP 服务器做真实握手并刷新健康/工具缓存")
+    mcp_health.add_argument("vendor")
+    mcp_health.add_argument("--id", help="只检查该服务器；缺省检查全部")
+    mcp_health.set_defaults(func=cmd_mcp_health)
+
+    mcp_remove = mcp_sub.add_parser("remove", help="移除外部 MCP 服务器注册")
+    mcp_remove.add_argument("vendor")
+    mcp_remove.add_argument("--id", required=True)
+    mcp_remove.set_defaults(func=cmd_mcp_remove)
 
     return parser
 

@@ -1342,6 +1342,18 @@ class AgentControlHandler(SimpleHTTPRequestHandler):
             except Exception as exc:
                 self._json({"ok": False, "error": str(exc)}, status=_error_status(exc))
             return
+        if parsed.path == "/api/mcp/servers":
+            try:
+                vendor = parse_qs(parsed.query).get("vendor", [DEFAULT_VENDOR])[0]
+                store = _safe_project(vendor)
+                from . import mcp_registry
+                from .role_registry import role_ids
+
+                self._json({"ok": True, "vendor": vendor, "servers": mcp_registry.list_servers(store),
+                            "callable_roles": list(role_ids(origin="seven_role"))})
+            except Exception as exc:
+                self._json({"ok": False, "error": str(exc)}, status=_error_status(exc))
+            return
         if parsed.path == "/api/findings/chain":
             try:
                 query = parse_qs(parsed.query)
@@ -1922,6 +1934,101 @@ class AgentControlHandler(SimpleHTTPRequestHandler):
                     raise WebAppError(str(exc)) from exc
                 _audit(store, "resource_rolled_back", {"resource_id": entry.get("id")})
                 self._json({"ok": True, "entry": entry})
+                return
+
+            # ── 外部 MCP 服务器注册（方案 §9、§12-P5；与资源导入同一入口风格）──
+            if parsed.path == "/api/mcp/servers":
+                payload = self._read_json()
+                store = _safe_project(payload.get("vendor", DEFAULT_VENDOR))
+                from . import mcp_registry
+
+                try:
+                    entry = mcp_registry.register_server(
+                        store,
+                        server_id=str(payload.get("id") or ""),
+                        name=str(payload.get("name") or ""),
+                        transport=str(payload.get("transport") or ""),
+                        visible_roles=list(payload.get("visible_roles") or []),
+                        command=str(payload.get("command") or ""),
+                        args=list(payload.get("args") or []),
+                        url=str(payload.get("url") or ""),
+                        enabled=bool(payload.get("enabled", True)),
+                    )
+                except mcp_registry.McpRegistryError as exc:
+                    raise WebAppError(str(exc)) from exc
+                _audit(store, "mcp_server_registered", {
+                    "id": entry.get("id"), "transport": entry.get("transport"),
+                    "visible_roles": entry.get("visible_roles"),
+                })
+                self._json({"ok": True, "entry": entry})
+                return
+
+            if parsed.path == "/api/mcp/servers/health":
+                payload = self._read_json()
+                store = _safe_project(payload.get("vendor", DEFAULT_VENDOR))
+                from . import mcp_registry
+
+                try:
+                    entry = mcp_registry.refresh_health(
+                        store, str(payload.get("id") or ""),
+                    )
+                except mcp_registry.McpRegistryError as exc:
+                    raise WebAppError(str(exc)) from exc
+                _audit(store, "mcp_server_health_checked", {
+                    "id": entry.get("id"), "status": (entry.get("health") or {}).get("status"),
+                })
+                self._json({"ok": True, "entry": entry})
+                return
+
+            if parsed.path == "/api/mcp/servers/enabled":
+                payload = self._read_json()
+                store = _safe_project(payload.get("vendor", DEFAULT_VENDOR))
+                from . import mcp_registry
+
+                try:
+                    entry = mcp_registry.set_enabled(
+                        store, str(payload.get("id") or ""),
+                        enabled=bool(payload.get("enabled")),
+                    )
+                except mcp_registry.McpRegistryError as exc:
+                    raise WebAppError(str(exc)) from exc
+                _audit(store, "mcp_server_enabled_changed", {
+                    "id": entry.get("id"), "enabled": entry.get("enabled"),
+                })
+                self._json({"ok": True, "entry": entry})
+                return
+
+            if parsed.path == "/api/mcp/servers/visible-roles":
+                payload = self._read_json()
+                store = _safe_project(payload.get("vendor", DEFAULT_VENDOR))
+                from . import mcp_registry
+
+                try:
+                    entry = mcp_registry.set_visible_roles(
+                        store, str(payload.get("id") or ""),
+                        list(payload.get("visible_roles") or []),
+                    )
+                except mcp_registry.McpRegistryError as exc:
+                    raise WebAppError(str(exc)) from exc
+                _audit(store, "mcp_server_visible_roles_changed", {
+                    "id": entry.get("id"), "visible_roles": entry.get("visible_roles"),
+                })
+                self._json({"ok": True, "entry": entry})
+                return
+
+            if parsed.path == "/api/mcp/servers/remove":
+                payload = self._read_json()
+                store = _safe_project(payload.get("vendor", DEFAULT_VENDOR))
+                from . import mcp_registry
+
+                try:
+                    output = mcp_registry.remove_server(
+                        store, str(payload.get("id") or ""),
+                    )
+                except mcp_registry.McpRegistryError as exc:
+                    raise WebAppError(str(exc)) from exc
+                _audit(store, "mcp_server_removed", {"id": payload.get("id")})
+                self._json({"ok": True, **output})
                 return
 
             self._json({"ok": False, "error": "unknown endpoint"}, status=404)

@@ -30,6 +30,7 @@ import { renderPlanView, initPlanView } from "./modules/plan-view.js";
 import { renderAnalysisPanel } from "./modules/analysis-panel.js";
 import { renderToolsPanel, initRoutingPlayground } from "./modules/tools-panel.js";
 import { renderResourcesPanel, initResourceImport } from "./modules/resources-panel.js";
+import { renderMcpServersPanel, initMcpRegister } from "./modules/mcp-servers.js";
 import { buildEvidenceChainSection, loadEvidenceChain } from "./modules/evidence-chain.js";
 import { routeFromHash } from "./modules/router.js";
 
@@ -1935,6 +1936,7 @@ function renderP4Panels() {
   renderAnalysisPanel(p4.analysis, () => refreshP4(true));
   renderToolsPanel(p4.tools);
   renderResourcesPanel(p4.resources, () => refreshP4(true));
+  renderMcpServersPanel(p4.mcpServers, () => refreshP4(true));
   renderPlanView(p4.plan, {
     openFinding: result => {
       // 从计划任务跳到发现页对应记录（含证据链）
@@ -1987,12 +1989,13 @@ async function refreshP4(force) {
       api(`/api/tools/health?vendor=${vendor}`),
       api(`/api/analysis?vendor=${vendor}&limit=30`),
       api(`/api/resources?vendor=${vendor}`),
+      api(`/api/mcp/servers?vendor=${vendor}`),
       api(`/api/team/migration?vendor=${vendor}`),
       api(`/api/run/tools?vendor=${vendor}`),
     ];
-    const [health, plan, tools, analysis, resources, migration, toolProgress] = await Promise.all(requests);
+    const [health, plan, tools, analysis, resources, mcpServers, migration, toolProgress] = await Promise.all(requests);
     if (generation !== state.p4Generation || requestedVendor !== state.vendor) return;
-    state.p4 = { health, plan, tools, analysis, resources, migration, toolProgress };
+    state.p4 = { health, plan, tools, analysis, resources, mcpServers, migration, toolProgress };
     renderP4Panels();
   } catch (error) {
     if (generation !== state.p4Generation || requestedVendor !== state.vendor) return;
@@ -2026,7 +2029,7 @@ function renderEmptyWorkspace() {
   ["vulnList", "leadList", "directionList", "surfaceList", "coverageList", "recentEvents",
     "roleCards", "migrationPanel", "runRoleBreakdown", "runBlockPanel", "analyzerConfigPanel",
     "analysisRecordsBody", "enginesBody", "toolsBody", "skillsBody", "routingExplanation",
-    "resourcesBody", "planBatchesBody", "planTasksBody", "runToolProgressBody"].forEach(id => { if ($(id)) $(id).replaceChildren(); });
+    "resourcesBody", "mcpServersBody", "planBatchesBody", "planTasksBody", "runToolProgressBody"].forEach(id => { if ($(id)) $(id).replaceChildren(); });
   $("migrationSection").hidden = true;
   $("planTaskDetail").replaceChildren(el("div", "empty-state", "请先创建项目。"));
   $("plansSummary").textContent = "—";
@@ -2639,6 +2642,7 @@ initPlanView({
 });
 initRoutingPlayground();
 initResourceImport(() => refreshP4(true));
+initMcpRegister(() => refreshP4(true));
 ROLE_OPTIONS.forEach(option => {
   const optionNode = document.createElement("option");
   optionNode.value = option.value;

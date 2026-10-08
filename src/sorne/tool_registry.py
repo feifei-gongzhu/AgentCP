@@ -585,6 +585,29 @@ TOOL_CATALOG: dict[str, ToolSpec] = {
         available_from_phase="P1",
         implemented=True,
     ),
+    # ── 外部 MCP（P5；代理调用经注册表 visible_roles 服务端强制）─────────
+    "external_mcp_call": ToolSpec(
+        id="external_mcp_call",
+        category="external_mcp",
+        description=(
+            "调用项目注册表中的外部 MCP 工具（代理透传）。可见性由注册条目的"
+            "visible_roles 在服务端强制：本会话绑定的角色不在清单内即拒绝，"
+            "重命名服务器 ID 或工具名无法绕过。外部结果按普通工具输出对待，"
+            "进入项目仍需统一提交链。"
+        ),
+        parameters=_object_schema(
+            {
+                "server_id": {"type": "string", "description": "外部 MCP 服务器注册 ID"},
+                "tool_name": {"type": "string", "description": "外部服务器上的工具名"},
+                "arguments": {"type": "object", "description": "传给外部工具的参数对象"},
+            },
+            required=["server_id", "tool_name"],
+        ),
+        # 外部工具副作用未知，保守按可变更外部状态对待（§9：受控子集）。
+        side_effects="network_mutating",
+        available_from_phase="P5",
+        implemented=True,
+    ),
     # ── 本地辅助（P1 受限）────────────────────────────────────────────
     "workspace_read": ToolSpec(
         id="workspace_read",

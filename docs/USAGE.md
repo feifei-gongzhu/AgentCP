@@ -1197,3 +1197,43 @@ executor→operator（主要）/recon/crack/poc（一对多，Prompt 归档）�
 waf_analyst→operator＋planner 重规划、profile_mapper→recon
 （画像服务已内置）、reviewer→reviewer（同职责域，Prompt 复制）。
 orchestrator 优先继承 reason 的兼容后端。
+
+## 33. MCP 入口（P5：外部 MCP 与扩展入口）
+
+Sorne 对外提供 MCP 服务（stdio 与 Streamable HTTP 两种 transport），与
+GUI/内部角色共用同一 `tool_gateway` 与提交链；同时可把外部 MCP 服务器
+登记进项目注册表，供执行角色按 `visible_roles` 受控调用。
+
+### 33.1 对外 MCP 服务
+
+```bash
+# stdio（客户端配置示例见 docs/MCP.md；stdout 只输出协议，日志走 stderr）
+python3 sorne mcp stdio --project production-security --role recon
+
+# Streamable HTTP（默认只监听本机；端点 /mcp/{vendor}?role={role}）
+python3 sorne mcp serve --host 127.0.0.1 --port 8790 --token "$SORNE_MCP_TOKEN"
+```
+
+要点（docs/MCP.md 有完整客户端配置示例与 curl 演示）：
+
+- 会话显式绑定（项目, 角色）；无默认项目、不受 GUI 当前选中项目影响。
+- 跨项目写入被拒绝：参数夹带 `project_id`/`vendor` 一律丢弃并审计，写入
+  只落绑定项目。
+- 角色可见性服务端强制：不在角色能力集内的工具直接 `-32602 Unknown tool`；
+  不对外暴露无限制 shell（旧角色的 Bash 兼容通路不提供 MCP 会话）。
+- 工具描述面向调用者写明用途/前置/副作用/参数/返回/失败类别六要素。
+
+### 33.2 外部 MCP 服务器注册（统一工具导入入口）
+
+```bash
+python3 sorne mcp register production-security \
+  --id nmap-helper --name "Nmap 辅助" --transport stdio \
+  --command "nmap-mcp-server" --visible-role recon --visible-role operator
+python3 sorne mcp health production-security --id nmap-helper   # 真实握手+工具缓存
+python3 sorne mcp list production-security
+```
+
+注册条目含 transport、连接配置引用（秘密只允许环境变量名引用）、
+enabled、visible_roles、健康状态、工具缓存与版本；`visible_roles` 在
+服务端强制，重命名服务器 ID/工具名或参数注入角色都无法绕过。设置页
+"外部 MCP"面板提供同一入口（`/api/mcp/servers*`）。

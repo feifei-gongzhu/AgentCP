@@ -548,6 +548,29 @@
           </div>
         </details>
       </div>
+      <div class="section">
+        <div class="sec-head"><h2>外部 MCP 服务器</h2><span class="text-dim" id="mcpServersPanelNote"></span></div>
+        <div class="table-scroll"><table class="dt"><thead><tr>
+          <th>服务器</th><th>Transport</th><th>名称</th><th>可见角色</th><th>健康</th><th>工具缓存 / 版本</th><th></th>
+        </tr></thead><tbody id="mcpServersBody"></tbody></table></div>
+        <details class="collapse">
+          <summary>注册外部 MCP 服务器 <span class="text-dim">stdio 命令或 http 端点；秘密只允许环境变量名引用</span></summary>
+          <div class="collapse-body form-stack">
+            <div class="row-3">
+              <input id="mcpServerIdInput" class="input-sm" placeholder="服务器 ID（字母数字._-，2-64）">
+              <input id="mcpServerNameInput" class="input-sm" placeholder="名称">
+              <select id="mcpTransportSelect" class="input-sm"><option value="stdio">stdio</option><option value="http">http</option></select>
+            </div>
+            <div class="row-3">
+              <input id="mcpCommandInput" class="input-sm" placeholder="stdio：启动命令（如 nmap-mcp-server）">
+              <input id="mcpArgsInput" class="input-sm" placeholder="stdio：参数（空格分隔）">
+              <input id="mcpUrlInput" class="input-sm" placeholder="http：端点 URL（如 http://127.0.0.1:9876/mcp）">
+            </div>
+            <input id="mcpVisibleRolesInput" class="input-sm" placeholder="可见角色（逗号分隔，如 recon, operator；服务端强制）">
+            <button id="mcpRegisterButton" class="btn primary sm" type="button">注册</button>
+          </div>
+        </details>
+      </div>
       <details id="project-blackboard" class="collapse">
         <summary>项目黑板 <span class="text-dim">工作记忆</span></summary>
         <div class="collapse-body"><button id="copyBoard" class="btn ghost sm">复制</button><pre id="blackboardText" class="code-block"></pre></div>
