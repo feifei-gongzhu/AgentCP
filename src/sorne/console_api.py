@@ -399,9 +399,12 @@ def analysis_panel(store, *, record_limit: int = 30) -> dict[str, Any]:
             "configured": model_config is not None,
         })
     jobs = service.database.list_analysis_jobs()
+    # 分析任务状态机是 queued→running→completed/failed/cancelled（database.
+    # enqueue_analysis_job/claim_analysis_job）；"pending" 不是合法值，写错过
+    # 一次导致面板永远显示不出排队中的分析进度。
     queued = [
         job for job in jobs
-        if str(job.get("status")) in {"pending", "running"}
+        if str(job.get("status")) in {"queued", "running"}
     ]
     return {
         "schema_version": ANALYSIS_SCHEMA_VERSION,
