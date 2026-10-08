@@ -29,7 +29,15 @@ from typing import Any, Callable
 ENGINE_AVAILABILITY: dict[str, Callable[[], tuple[bool, str]]] = {}
 
 # 引擎能力 → 适配层模块（惰性导入；导入即注册 ENGINE_AVAILABILITY 提供者）。
-_ENGINE_ADAPTER_MODULES = {"poc_scan": ".engine_adapters"}
+_ENGINE_ADAPTER_MODULES = {
+    "poc_scan": ".engine_adapters",
+    "url_scan": ".engine_adapters",
+    "ip_scan": ".engine_adapters",
+    "subdomain_scan": ".engine_adapters",
+    "dir_scan": ".engine_adapters",
+    "js_scan": ".engine_adapters",
+    "pwd_crack": ".engine_adapters",
+}
 
 
 def register_engine_availability(
@@ -341,59 +349,82 @@ TOOL_CATALOG: dict[str, ToolSpec] = {
     "url_scan": ToolSpec(
         id="url_scan",
         category="scan_collect",
-        description="URL/服务侦察扫描。",
+        description=(
+            "Web 存活/标题/指纹侦察扫描（fscan 适配，固定 argv 容器执行，"
+            "禁爆破/禁 POC 的侦察模式）。命中端口/标题/指纹是采集观察，"
+            "不构成漏洞结论。"
+        ),
         parameters=_object_schema({"targets": {"type": "array", "items": {"type": "string"}}}, required=["targets"]),
         side_effects="network_readonly",
         available_from_phase="P3",
-        implemented=False,
+        # 适配层已实现（engine_adapters/fscan_adapter.py）；镜像可用性动态判定。
+        implemented=True,
     ),
     "ip_scan": ToolSpec(
         id="ip_scan",
         category="scan_collect",
-        description="主机/端口侦察扫描。",
+        description=(
+            "主机/端口/服务识别侦察扫描（fscan 适配；目标须为授权范围内"
+            "主机/IP/CIDR）。开放端口是采集观察，服务利用属其他工具。"
+        ),
         parameters=_object_schema({"targets": {"type": "array", "items": {"type": "string"}}}, required=["targets"]),
         side_effects="network_readonly",
         available_from_phase="P3",
-        implemented=False,
+        implemented=True,
     ),
     "subdomain_scan": ToolSpec(
         id="subdomain_scan",
         category="scan_collect",
-        description="子域名枚举。",
+        description=(
+            "子域名枚举（原生 DNS 字典解析；字典来自资源仓库）。只对授权"
+            "根域执行；解析记录不自动扩张攻击面。"
+        ),
         parameters=_object_schema({"targets": {"type": "array", "items": {"type": "string"}}}, required=["targets"]),
         side_effects="network_readonly",
         available_from_phase="P3",
-        implemented=False,
+        implemented=True,
     ),
     "dir_scan": ToolSpec(
         id="dir_scan",
         category="scan_collect",
-        description="Web 目录采集。",
+        description=(
+            "Web 目录采集（原生受控请求；字典来自资源仓库，逐目标带随机路径"
+            "基线对照与内容指纹）。与基线同形的记录是 catch-all/统一错误页"
+            "候选，判别由目录研判分析器完成。"
+        ),
         parameters=_object_schema({"targets": {"type": "array", "items": {"type": "string"}}}, required=["targets"]),
         side_effects="network_readonly",
         available_from_phase="P3",
-        implemented=False,
+        implemented=True,
     ),
     "js_scan": ToolSpec(
         id="js_scan",
         category="scan_collect",
-        description="JS 资产采集。",
+        description=(
+            "JS 资产采集（原生受控抓取入口页脚本；按资源仓库 JS 线索规则"
+            "提取端点/凭据形状/source map 线索，全部为观察值，真伪由 JS"
+            "研判分析器判别）。"
+        ),
         parameters=_object_schema({"targets": {"type": "array", "items": {"type": "string"}}}, required=["targets"]),
         side_effects="network_readonly",
         available_from_phase="P3",
-        implemented=False,
+        implemented=True,
     ),
     "pwd_crack": ToolSpec(
         id="pwd_crack",
         category="scan_collect",
-        description="已授权服务上的口令验证。",
+        description=(
+            "已授权服务上的口令验证（原生凭据验证；凭据一律 credential_ref"
+            "引用，不接受明文口令参数）。命中仅构成 risk_lead 候选；证据中"
+            "口令自动脱敏。"
+        ),
         parameters=_object_schema(
             {"targets": {"type": "array", "items": {"type": "string"}}, "credential_ref": {"type": "string"}},
-            required=["targets"],
+            required=["targets", "credential_ref"],
         ),
         side_effects="network_readonly",
         available_from_phase="P3",
-        implemented=False,
+        implemented=True,
     ),
     # ── 受控验证（P1）─────────────────────────────────────────────────
     "http_request": ToolSpec(

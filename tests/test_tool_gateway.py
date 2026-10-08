@@ -82,16 +82,28 @@ def test_model_visible_tools_exclude_bash_for_new_roles(project: ProjectStore) -
 def test_capability_missing_for_unimplemented_engines(
     project: ProjectStore, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # P3 引擎保持 capability_missing + 目标阶段说明。
+    # P3 起六个采集/验证工具适配层均已实现：缺口只来自运行环境（如
+    # fscan 镜像未预取）——与 poc_scan 同一 ENGINE_AVAILABILITY 语义。
     cases = [
-        ("crack", "pwd_crack", {"targets": ["https://fixture.invalid"]}, "P3"),
-        ("recon", "dir_scan", {"targets": ["https://fixture.invalid"]}, "P3"),
+        ("crack", "pwd_crack", {"targets": ["https://fixture.invalid"], "credential_ref": "x"}),
+        ("recon", "dir_scan", {"targets": ["https://fixture.invalid"]}),
+        ("recon", "url_scan", {"targets": ["https://fixture.invalid"]}),
+        ("recon", "ip_scan", {"targets": ["127.0.0.1"]}),
+        ("recon", "subdomain_scan", {"targets": ["fixture.invalid"]}),
+        ("recon", "js_scan", {"targets": ["https://fixture.invalid"]}),
     ]
-    for role, capability, arguments, phase in cases:
-        output, is_error = _gateway(project, role).dispatch(capability, arguments)
-        assert is_error
-        assert "capability_missing" in output, output
-        assert phase in output, f"{capability} 缺口说明应包含目标阶段 {phase}"
+    from src.sorne import tool_registry as _tr
+    saved = dict(_tr.ENGINE_AVAILABILITY)
+    try:
+        for role, capability, arguments in cases:
+            _tr.register_engine_availability(capability, lambda: (False, "测试：运行环境缺失"))
+            output, is_error = _gateway(project, role).dispatch(capability, arguments)
+            assert is_error
+            assert "capability_missing" in output, output
+            assert "适配层已实现" in output, f"{capability} 应说明真实环境缺口"
+    finally:
+        _tr.ENGINE_AVAILABILITY.clear()
+        _tr.ENGINE_AVAILABILITY.update(saved)
     # P2 起 poc_scan 适配层已实现：运行环境（Docker 镜像）缺失时返回
     # capability_missing 并说明真实缺口（不再是“计划于 P2 提供”）。
     monkeypatch.setattr(

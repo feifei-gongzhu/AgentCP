@@ -1573,6 +1573,9 @@ class ControlDatabase:
             db.execute("COMMIT")
             result = dict(row)
             result["intent"] = json.loads(result.pop("intent_json"))
+            # V8 任务胶囊：认领结果与 get_direction/list_directions 一样解码
+            # tool_ref（调度侧自动执行读取该字段，方案 §4.3）。
+            result["tool_ref"] = self._decode_tool_ref(result.get("tool_ref"))
             result.update({
                 "status": "claimed",
                 "claimed_by": worker_id,

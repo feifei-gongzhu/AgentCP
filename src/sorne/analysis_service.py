@@ -25,6 +25,7 @@ from uuid import uuid4
 from .analysis_registry import (
     ANALYSIS_SCHEMA_VERSION,
     AnalyzerSpec,
+    analyzer_enabled,
     build_domain_input,
     get_analyzer,
     validate_model_output,
@@ -144,8 +145,9 @@ class AnalysisService:
         spec = get_analyzer(analyzer_kind)
         if spec is None:
             raise AnalysisServiceError(f"未知分析器: {analyzer_kind}")
-        if not spec.enabled:
-            return {"skipped": True, "reason": f"分析器 {analyzer_kind} 已停用"}
+        enabled, disabled_reason = analyzer_enabled(self.store, analyzer_kind)
+        if not enabled:
+            return {"skipped": True, "reason": disabled_reason}
         if tool_id not in spec.trigger_tools:
             return {
                 "skipped": True,
@@ -153,7 +155,11 @@ class AnalysisService:
             }
         targets = [str(t) for t in (result.get("targets") or []) if str(t)]
         evidence_refs: list[str] = []
-        for path in [result.get("evidence_path"), *(result.get("hit_evidence_paths") or [])]:
+        for path in [
+            result.get("evidence_path"),
+            *(result.get("hit_evidence_paths") or []),
+            *(result.get("evidence_paths") or []),
+        ]:
             if path:
                 evidence_refs.append(str(path))
         digests = [
@@ -321,6 +327,13 @@ class AnalysisService:
         try:
             if spec is None:
                 raise AnalysisServiceError(f"未知分析器: {kind}")
+            enabled, disabled_reason = analyzer_enabled(self.store, kind)
+            if not enabled:
+                status = self.database.finish_analysis_job(
+                    job_id, worker_id, status="cancelled",
+                    error=f"analyzer_disabled:{disabled_reason}",
+                )
+                return f"[{kind}] 分析任务 {job_id} 已取消（{disabled_reason}）"
             model_config, _version = self.resolve_model_config(kind)
             if model_config is None:
                 raise AnalysisServiceError(
@@ -352,7 +365,13 @@ class AnalysisService:
                 type=str(model_config.get("type") or "openai-compatible"),
                 model=model_config.get("model"),
                 base_url=model_config.get("base_url"),
-                api_key_env=model_config.get("api_key_env") or api_key_env or "OPENAI_API_KEY",
+                # 与 execution.run_member 相同的优先级：运行时秘密（按分析
+                # 成员名引用解析）优先于继承配置里的 api_key_env——继承的
+                # 环境变量名在分析会话里通常未设置，反之秘密已解析则直接
+                # 注入 SORNE_RUNTIME_API_KEY。
+                api_key_env=api_key_env
+                or str(model_config.get("api_key_env") or "")
+                or "OPENAI_API_KEY",
                 env=env,
                 extra={
                     "runtime_mode": "local-cli",

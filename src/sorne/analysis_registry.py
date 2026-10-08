@@ -112,6 +112,35 @@ def get_analyzer(kind: str) -> AnalyzerSpec | None:
     return ANALYZERS.get(str(kind or "").strip().casefold())
 
 
+def analyzer_enabled(store, kind: str) -> tuple[bool, str]:
+    """分析器启停（§7A.4：三个分析器分别启停）。
+
+    项目 ``analysis_config.json`` 的 ``analyzers.<kind>.enabled`` 覆盖注册
+    表默认；未配置时取注册表默认（三分析器默认启用）。
+    """
+    spec = get_analyzer(kind)
+    if spec is None:
+        return False, f"未知分析器: {kind}"
+    override = None
+    config_path = store.path / "analysis_config.json"
+    if config_path.is_file():
+        try:
+            import json
+
+            config = json.loads(config_path.read_text(encoding="utf-8"))
+            analyzers = config.get("analyzers") if isinstance(config, dict) else {}
+            entry = analyzers.get(kind) if isinstance(analyzers, dict) else None
+            if isinstance(entry, dict) and "enabled" in entry:
+                override = bool(entry["enabled"])
+        except (OSError, ValueError):
+            override = None
+    enabled = spec.enabled if override is None else override
+    if enabled:
+        return True, ""
+    source = "analysis_config" if override is not None else "registry_default"
+    return False, f"分析器 {kind} 已停用（{source}）"
+
+
 def analyzer_status() -> list[dict[str, Any]]:
     return [spec.meta() for spec in ANALYZERS.values()]
 

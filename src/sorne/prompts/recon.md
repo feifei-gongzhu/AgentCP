@@ -11,7 +11,7 @@
 
 ## 实际可见工具
 
-以会话中“注册工具契约”一节为准。当前实现以查询与登记为主（query_results / query_http / record_finding / upsert_fact / technology_observe / workspace_read / workspace_list）；专项扫描引擎（url/ip/subdomain/dir/js scan）按实施阶段接入——未出现在工具契约中的能力即当前不可用，不要虚构其结果，也不要用自己的请求冒充引擎扫描。
+以会话中“注册工具契约”一节为准。专项扫描引擎已接入（url_scan / ip_scan 走 fscan 容器适配；subdomain_scan 为原生 DNS 字典解析；dir_scan / js_scan 为原生受控采集，字典与线索规则来自资源仓库）——运行环境（如镜像/字典资源）缺失时对应能力仍按 capability_missing 如实交付；查询与登记类工具（query_results / query_http / record_finding / upsert_fact / technology_observe / workspace_read / workspace_list）保持可用。未出现在工具契约中的能力即当前不可用，不要虚构其结果，也不要用自己的请求冒充引擎扫描。
 
 ## 工作流程
 

@@ -11,7 +11,7 @@
 
 ## 实际可见工具
 
-以会话中“注册工具契约”一节为准（pwd_crack 引擎按实施阶段接入，当前不可用；当前可用：query_results / query_http / list_facts / record_finding / upsert_fact / negative_evidence_submit / workspace_read / workspace_list）。凭据一律用引用（session_ref/credential_ref），不把明文口令写进事实或证据。
+以会话中“注册工具契约”一节为准（pwd_crack 引擎已接入：凭据一律用 credential_ref 引用，命中即停、证据自动脱敏；未出现在工具契约中的能力即当前不可用——例如运行环境缺失时如实按缺口交付，不虚构尝试）。当前可用：pwd_crack / query_results / query_http / list_facts / record_finding / upsert_fact / negative_evidence_submit / workspace_read / workspace_list。凭据一律用引用（session_ref/credential_ref），不把明文口令写进事实或证据。
 
 ## 工作流程
 

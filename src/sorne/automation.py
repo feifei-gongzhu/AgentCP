@@ -18,7 +18,7 @@ from . import role_registry
 from .database import ControlDatabase
 from .dashboard import render_dashboard
 from .evidence import freeze_worker_result_evidence
-from .directives import authoritative_directives, missing_directive_ids
+from .directives import authoritative_directives, directive_ids, missing_directive_ids
 from .lifecycle import project_execution_lock, require_executable_target, require_initialized_project
 from .memory import active_negative_evidence, matching_negative_evidence
 from .methodology import ensure_methodology, seed_methodology_portfolio
@@ -40,7 +40,7 @@ def _member_claim_filter(role: str, intent: dict[str, Any]) -> bool:
     if assigned and assigned != role:
         return False
     return member_can_claim(role, intent)
-from .schemas import GateStatus, normalize_role
+from .schemas import GateStatus, normalize_role, now_iso
 from .scheduler import Scheduler
 from .store import ProjectStore
 from .execution import run_member as _run_member
@@ -88,6 +88,14 @@ NON_RETRYABLE_MODEL_ERRORS = {
 EXECUTION_BUDGET_EXHAUSTED = "execution_budget_exhausted"
 MAX_MODEL_ATTEMPTS_PER_STAGE = 3
 IMMEDIATE_CANDIDATE_KINDS = {"fact", "negative_evidence", "target_profile_batch"}
+
+# tool_ref 可自动执行的引擎能力（P3，§6.6）：全部为采集/验证类工具；
+# 提交类（record_finding 等）与协调类工具不经此路径——它们需要模型判断，
+# 由对应角色在工具循环内调用。
+_AUTO_EXECUTABLE_TOOL_IDS = {
+    "url_scan", "ip_scan", "subdomain_scan", "dir_scan", "js_scan",
+    "pwd_crack", "poc_scan",
+}
 
 _CANDIDATE_LOCKS_GUARD = threading.Lock()
 _CANDIDATE_LOCKS: dict[str, threading.RLock] = {}
@@ -1561,6 +1569,114 @@ class AutomationEngine:
         self._pause_for_execution_budget(latest, next_stage, remaining)
         return False
 
+    def _execute_bound_engine_tool(
+        self,
+        run: dict[str, Any],
+        job: dict[str, Any],
+        member: "TeamMember | dict[str, Any]",
+        direction: dict[str, Any] | None,
+        tool_id: str,
+        arguments: dict[str, Any],
+    ) -> str:
+        """任务胶囊 tool_ref 的调度侧自动执行（P3）。
+
+        与模型工具循环共用同一网关：角色白名单、参数校验、目标授权、
+        动作审批票据、证据落盘、研判入队与审计全部由网关强制。执行身份
+        由服务端绑定（run/job/direction/control_version），绝不取自参数。
+        """
+        from .team import TeamMember
+        from .tool_gateway import GatewayIdentity, ToolGateway
+
+        if isinstance(member, dict):
+            member = TeamMember(**{k: v for k, v in member.items() if k in TeamMember.__dataclass_fields__})
+
+        def _cancelled() -> bool:
+            return (
+                (self.db.get_run(run["id"]) or {}).get("status") in {
+                    "stopping", "stopped", "cancelled",
+                }
+                or self.db.job_status(job["id"]) in {"cancelling", "cancelled"}
+            )
+
+        identity = GatewayIdentity(
+            vendor=self.store.vendor,
+            member_name=member.name,
+            role=member.role,
+            run_id=str(run["id"]),
+            job_id=str(job["id"]),
+            task_id=str(direction.get("id")) if direction else None,
+            claim_worker=str(direction.get("claimed_by")) if direction else None,
+            claim_version=(int(direction["claim_version"]) if direction and direction.get("claim_version") is not None else None),
+            control_version=int(job["control_version"]),
+        )
+        started = time.monotonic()
+        try:
+            gateway = ToolGateway(self.store, identity, cancel_check=_cancelled)
+            output, is_error = gateway.dispatch(tool_id, arguments)
+        except Exception as exc:  # noqa: BLE001 —— 网关构造失败按执行失败处理
+            output, is_error = f"engine_tool_error: {type(exc).__name__}: {exc}", True
+        duration = round(time.monotonic() - started, 1)
+        compact = output[:2000]
+        if is_error:
+            retryable = not (
+                output.startswith("capability_missing")
+                or output.startswith("approval_required")
+                or output.startswith("permission_denied")
+                or output.startswith("invalid_arguments")
+            )
+            status = self.db.fail_job(
+                job["id"], str(job.get("worker_id") or f"worker-{member.name}"), _compact_error(output, 4000),
+                retryable=retryable, control_version=int(job["control_version"]),
+            )
+            self.db.add_event(run["id"], job["id"], "engine_tool_failed", {
+                "member": member.name, "role": member.role, "tool_id": tool_id,
+                "duration_seconds": duration, "status": status,
+                "error": compact,
+            })
+            if direction and status != "queued":
+                authorized, claim_version = self._bound_direction_claim_version(
+                    self.db, direction,
+                )
+                if authorized:
+                    self.db.finish_direction(
+                        str(direction["id"]), str(direction.get("claimed_by") or ""),
+                        outcome="blocked", reason=compact,
+                        claim_version=claim_version,
+                    )
+                    self._after_direction_finished(str(direction["id"]), "blocked")
+            return f"[{member.name}] 引擎工具 {tool_id} 执行失败（{status}）: {compact[:300]}"
+        result_payload = {
+            "kind": "none",
+            "reason": f"engine scan executed via tool_ref ({tool_id})",
+            "tool_id": tool_id,
+            "tool_output_excerpt": compact,
+        }
+        result = {
+            "member": member.name,
+            "role": member.role,
+            "status": "ok",
+            "payload": result_payload,
+            "control_context": {"human_directive_ids": directive_ids(authoritative_directives(self.store))},
+            "created_at": now_iso(),
+        }
+        with self._candidate_lock:
+            self.db.complete_job(
+                job["id"], str(job.get("worker_id") or f"worker-{member.name}"), result,
+                control_version=int(job["control_version"]),
+            )
+            self.db.mark_job_committed(job["id"])
+        self.db.add_event(run["id"], job["id"], "engine_tool_executed", {
+            "member": member.name, "role": member.role, "tool_id": tool_id,
+            "duration_seconds": duration, "output_excerpt": compact[:600],
+        })
+        if direction:
+            self._finish_bound_direction(
+                direction,
+                outcome="completed",
+                reason=f"engine_scan_via_tool_ref:{tool_id}",
+            )
+        return f"[{member.name}] 引擎工具 {tool_id} 已按任务胶囊执行（{duration}s）"
+
     def _worker_loop(self, run: dict[str, Any], stage: str, index: int) -> list[str]:
         worker_id = f"local-{index}-{uuid4().hex[:6]}"
         outputs: list[str] = []
@@ -1581,6 +1697,21 @@ class AutomationEngine:
             # 磁盘上的历史 Payload 与 CommitPlan 保持原样不改写。
             member.role = normalize_role(member.role)
             activity = _model_activity(member, direction)
+            # ── tool_ref 自动执行（P3，§4.3 任务胶囊）───────────────────
+            # 计划图把 tool_id+arguments 固化进方向（入库时已校验角色白名单
+            # 与授权范围）；调度侧直接驱动网关执行引擎调用，不经模型循环。
+            # 权限/审批/证据/研判入队全部复用网关既有路径——本分支不绕过
+            # 任何门禁，只是省去一次不必要的模型往返。
+            bound_tool_ref = (direction or {}).get("tool_ref") or {}
+            bound_tool_id = str(bound_tool_ref.get("tool_id") or "").strip()
+            if bound_tool_id in _AUTO_EXECUTABLE_TOOL_IDS:
+                outputs.append(
+                    self._execute_bound_engine_tool(
+                        run, job, member, direction, bound_tool_id,
+                        dict(bound_tool_ref.get("arguments") or {}),
+                    )
+                )
+                continue
             timeout_limits = [
                 int(run["timeout_seconds"]),
                 self.store.load_state().gate_interval_minutes * 60,

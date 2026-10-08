@@ -67,6 +67,8 @@ _ALLOWED_READ_PREFIXES = (
     # P2：计划任务图/覆盖账本/review 回流（只读）
     "plan_graphs.jsonl", "coverage_ledger.jsonl", "review_records.jsonl",
     "review_flags.jsonl",
+    # P3：双轨指纹匹配/冲突账本（只读）
+    "fingerprint_matches.jsonl",
 )
 _DENIED_READ_PREFIXES = (
     "control_plane.db", ".sorne-runtime/", "team_config.json",
@@ -349,6 +351,12 @@ class ToolGateway:
             "query_execution": self._tool_query_execution,
             "finish_task": self._tool_finish_task,
             "poc_scan": self._tool_poc_scan,
+            "url_scan": self._tool_url_scan,
+            "ip_scan": self._tool_ip_scan,
+            "subdomain_scan": self._tool_subdomain_scan,
+            "dir_scan": self._tool_dir_scan,
+            "js_scan": self._tool_js_scan,
+            "pwd_crack": self._tool_pwd_crack,
             "http_request": self._tool_http_request,
             "session_ref": self._tool_session_ref,
             "record_finding": self._tool_record_finding,
@@ -1356,6 +1364,252 @@ class ToolGateway:
         if ticket is not None:
             result["approved_via_ticket"] = ticket["id"]
         return result
+
+    # ── 采集扫描：P3 侦察/目录/JS/口令（§6.6-3/4，§12-P3）────────────
+    def _collect_targets(self, arguments: dict[str, Any], *, tool_id: str) -> list[str]:
+        raw_targets = [
+            str(item).strip() for item in (arguments.get("targets") or [])
+            if str(item).strip()
+        ]
+        if not raw_targets:
+            raise ToolGatewayError(f"{tool_id} 需要至少一个目标（targets: string[]）")
+        # 无 scheme 的主机按 http:// 归一后再做授权校验（子域根域等场景）
+        targets = [
+            target if "://" in target else f"http://{target}"
+            for target in raw_targets
+        ]
+        for target in targets:
+            self._check_target_authorization(target)
+        return targets
+
+    def _authorized_fetcher(self):
+        """带授权复核的采集请求器：每次请求都校验目标在授权范围内。"""
+        from .engine_adapters import web_collect
+
+        def _fetch(url: str, **kwargs):
+            self._check_target_authorization(url)
+            if self.cancel_check():
+                raise ToolGatewayError("任务已被调度器取消")
+            return web_collect.fetch_url(url, **kwargs)
+
+        return _fetch
+
+    def _fingerprint_evidence_writer(self, subdir: str):
+        """把指纹探针/基线响应落盘为证据（返回相对路径）。"""
+
+        def _write(url: str, kind: str, response: dict[str, Any]) -> str:
+            import hashlib as _hashlib
+
+            headers_text = "\r\n".join(
+                f"{key}: {value}" for key, value in (response.get("headers") or {}).items()
+            )
+            transcript = (
+                f"# sorne fingerprint {kind}\n# url: {url}\n"
+                f"HTTP/1.1 {response.get('status')}\r\n{headers_text}\r\n\r\n"
+            ).encode("utf-8") + (response.get("body") or b"")[:64_000]
+            root = self.store.path / "evidence" / subdir
+            root.mkdir(parents=True, exist_ok=True)
+            digest = _hashlib.sha256(transcript).hexdigest()
+            destination = root / f"{digest}.{kind}.http"
+            if not destination.exists():
+                destination.write_bytes(transcript)
+            destination.with_name(destination.name + ".sha256").write_text(
+                f"{digest}  {destination.name}\n", encoding="utf-8",
+            )
+            return f"evidence/{subdir}/{destination.name}"
+
+        return _write
+
+    def _submit_fingerprint_observations(self, evaluation: dict[str, Any]) -> list[dict[str, Any]]:
+        """指纹匹配经统一提交链登记为技术观察（候选，不确认漏洞）。
+
+        走 technology_observe 同一提交通路；失败不阻断采集结果返回
+        （观察缺失在结果里显式可见）。
+        """
+        from .fingerprint import to_technology_observations
+
+        rows = to_technology_observations(evaluation)
+        submitted: list[dict[str, Any]] = []
+        for start in range(0, len(rows), 8):
+            chunk = rows[start:start + 8]
+            payload = {
+                "kind": "none",
+                "reason": "dual-track fingerprint observations via tool gateway (§7.1)",
+                "technology_observations": chunk,
+                "proposed_by": self.identity.member_name,
+            }
+            try:
+                self._submit_through_commit_chain(payload)
+                submitted.extend(chunk)
+            except Exception:  # noqa: BLE001 —— 提交失败不影响采集主结果
+                continue
+        return submitted
+
+    def _run_fingerprint_for(self, targets: list[str], *, evidence_subdir: str,
+                             extra_observations=None) -> dict[str, Any]:
+        from . import fingerprint
+
+        try:
+            evaluation = fingerprint.evaluate(
+                self.store, targets,
+                fetcher=self._authorized_fetcher(),
+                evidence_writer=self._fingerprint_evidence_writer(evidence_subdir),
+                extra_observations=extra_observations,
+                cancel_check=self.cancel_check,
+            )
+        except fingerprint.FingerprintError as exc:
+            return {"unavailable": True, "reason": str(exc)}
+        except Exception as exc:  # noqa: BLE001 —— 指纹失败不吞采集结果
+            return {"unavailable": True, "reason": f"{type(exc).__name__}: {exc}"}
+        # §7.1 匹配/冲突账本（规则 ID/版本/片段/证据/时间/状态/置信来源；
+        # 冲突保留双方证据）。失败不影响采集主结果。
+        try:
+            evaluation["ledger_records"] = fingerprint.persist_matches(
+                self.store, evaluation, targets=targets,
+            )
+        except Exception:  # noqa: BLE001
+            evaluation["ledger_records"] = 0
+        submitted = self._submit_fingerprint_observations(evaluation)
+        evaluation["observations_submitted"] = len(submitted)
+        return evaluation
+
+    def _tool_url_scan(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        targets = self._collect_targets(arguments, tool_id="url_scan")
+        from .engine_adapters import fscan_adapter
+
+        result = fscan_adapter.run_recon_scan(
+            self.store, {"targets": targets}, mode="url",
+            cancel_check=self.cancel_check,
+        )
+        result["fingerprints"] = self._run_fingerprint_for(
+            targets, evidence_subdir="fingerprint",
+        )
+        return result
+
+    def _tool_ip_scan(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        targets = self._collect_targets(arguments, tool_id="ip_scan")
+        from .engine_adapters import fscan_adapter
+
+        return fscan_adapter.run_recon_scan(
+            self.store, {"targets": targets}, mode="ip",
+            cancel_check=self.cancel_check,
+        )
+
+    def _tool_subdomain_scan(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        targets = self._collect_targets(arguments, tool_id="subdomain_scan")
+        from .engine_adapters import web_collect
+
+        return web_collect.run_subdomain_scan(
+            self.store, {"targets": targets}, cancel_check=self.cancel_check,
+        )
+
+    def _tool_dir_scan(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        targets = self._collect_targets(arguments, tool_id="dir_scan")
+        from .engine_adapters import web_collect
+
+        result = web_collect.run_dir_scan(
+            self.store, {"targets": targets}, cancel_check=self.cancel_check,
+        )
+        # 目录响应里的 server 头等被动指纹证据（同源观察，无新请求）。
+        extra = []
+        for record in (result.get("records") or [])[:32]:
+            headers = f"content-type: {record.get('content_type') or ''}\n"
+            if record.get("location"):
+                headers += f"location: {record.get('location')}\n"
+            extra.append({
+                "url": record.get("url"),
+                "evidence_ref": (result.get("evidence_paths") or [None])[0],
+                "transcript": f"HTTP/1.1 {record.get('status')}\n{headers}\n\n",
+                "source_kind": "dir_scan",
+            })
+        result["fingerprints"] = self._run_fingerprint_for(
+            targets, evidence_subdir="fingerprint", extra_observations=extra,
+        )
+        result["analysis_enqueued"] = self._enqueue_analysis(
+            analyzer_kind="directory", tool_id="dir_scan", result=result,
+        )
+        return result
+
+    def _tool_js_scan(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        targets = self._collect_targets(arguments, tool_id="js_scan")
+        from .engine_adapters import web_collect
+
+        allowed = self._authorized_fetcher()
+        result = web_collect.run_js_scan(
+            self.store, {"targets": targets}, cancel_check=self.cancel_check,
+            fetcher=allowed,
+        )
+        # JS 内容已脱敏落盘；被动指纹匹配消费这些证据（无新请求）。
+        def _reader(ref: str) -> str:
+            try:
+                return (self.store.path / str(ref)).read_text(encoding="utf-8", errors="replace")[:120_000]
+            except OSError:
+                return ""
+
+        from . import fingerprint as fingerprint_module
+
+        try:
+            rules, rules_meta = fingerprint_module.load_rules(self.store)
+            observations = [
+                {"url": item.get("source_url"), "evidence_ref": item.get("evidence_ref"),
+                 "source_kind": "js_scan"}
+                for item in (result.get("files") or [])[:24]
+                if item.get("evidence_ref")
+            ]
+            passive = fingerprint_module.passive_from_observations(
+                rules, observations, evidence_reader=_reader,
+            )
+            evaluation = {
+                "rules": rules_meta, "passive_matches": passive,
+                "active_matches": [], "conflicts": [], "captured_at": None,
+            }
+            submitted = self._submit_fingerprint_observations(evaluation)
+            evaluation["observations_submitted"] = len(submitted)
+            result["fingerprints"] = evaluation
+        except fingerprint_module.FingerprintError as exc:
+            result["fingerprints"] = {"unavailable": True, "reason": str(exc)}
+        result["analysis_enqueued"] = self._enqueue_analysis(
+            analyzer_kind="js", tool_id="js_scan", result=result,
+        )
+        return result
+
+    def _tool_pwd_crack(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        targets = self._collect_targets(arguments, tool_id="pwd_crack")
+        credential_ref = str(arguments.get("credential_ref") or "").strip()
+        ticket = self._enforce_action_approval("pwd_crack", arguments)
+        from .engine_adapters import pwdcrack_adapter
+        from .runtime_secrets import RuntimeSecretStore
+
+        result = pwdcrack_adapter.run_credential_check(
+            self.store,
+            {"targets": targets, "credential_ref": credential_ref},
+            resolve_secret=lambda ref: RuntimeSecretStore.get(self.store.vendor, ref),
+            cancel_check=self.cancel_check,
+        )
+        if ticket is not None:
+            result["approved_via_ticket"] = ticket["id"]
+        return result
+
+    def _enqueue_analysis(
+        self, *, analyzer_kind: str, tool_id: str, result: dict[str, Any],
+    ) -> dict[str, Any]:
+        """独立研判异步入队（§7A.2）：不阻塞原始结果；失败只登记缺口。"""
+        try:
+            from .analysis_service import AnalysisService
+
+            return AnalysisService(self.store).enqueue_from_tool_result(
+                analyzer_kind=analyzer_kind,
+                tool_id=tool_id,
+                tool_call_id=f"{self.identity.task_id or self.identity.member_name}:{tool_id}",
+                result=result,
+                run_id=self.identity.run_id,
+                source_task_id=self.identity.task_id,
+            )
+        except Exception as exc:  # noqa: BLE001 —— 原始结果优先；研判缺失显式可见
+            return {
+                "skipped": True,
+                "reason": f"研判入队失败（原始结果不受影响）: {type(exc).__name__}: {exc}",
+            }
 
     def _enforce_action_approval(
         self,
