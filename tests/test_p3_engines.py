@@ -371,3 +371,50 @@ def test_pwd_crack_cancellation_marks_unknown_outcome_not_retried(
         status == "unknown_outcome" and key in retried
         for key, status in record["targets"].items()
     )
+
+
+def test_js_scan_offscope_script_is_skipped_not_fatal(
+    project: ProjectStore, server: LocalFixtureServer,
+) -> None:
+    """外链脚本（授权范围外）被跳过并显式标注，不拖垮整个目标采集。"""
+    page = (b"<html><head>"
+            b'<script src="http://127.0.0.1:1/evil.js"></script>'
+            b'<script src="/js/app.js"></script></head></html>')
+
+    class _ScopedServer(LocalFixtureServer):
+        pass
+
+    import http.server
+    import threading
+
+    handler = type("H", (http.server.BaseHTTPRequestHandler,), {
+        "do_GET": lambda self: (
+            self.send_response(200),
+            self.send_header("Content-Length", str(len(page))),
+            self.end_headers(),
+            self.wfile.write(page),
+        ),
+        "log_message": lambda *a: None,
+    })
+    httpd = http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler)
+    port = httpd.server_address[1]
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    try:
+        base = f"http://127.0.0.1:{port}"
+
+        def fetcher(url: str, **kwargs):
+            if not url.startswith(base):
+                raise RuntimeError("目标 example.com 不在授权范围内（scope 测试注入）")
+            return web_collect.fetch_url(url, **kwargs)
+
+        result = web_collect.run_js_scan(project, {"targets": [base]}, fetcher=fetcher)
+        assert result["file_count"] == 2  # 外链 + 本站脚本都有记录
+        by_url = {f["source_url"]: f for f in result["files"]}
+        offscope = by_url["http://127.0.0.1:1/evil.js"]
+        assert offscope["fetch_error"] and offscope.get("skipped_out_of_scope") is True
+        assert offscope["leads"] == []
+        # 本站脚本照常采集
+        assert (project.path / by_url[f"{base}/js/app.js"]["evidence_path"]).is_file()
+    finally:
+        httpd.shutdown()
+        httpd.server_close()

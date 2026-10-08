@@ -425,7 +425,18 @@ def run_js_scan(
             if cancel():
                 interrupted = True
                 break
-            response = fetch(script_url, max_bytes=MAX_JS_BYTES)
+            # 单个脚本抓取失败（含授权范围外的外链脚本被网关拒绝）只记录
+            # 该脚本的错误，不让整个目标的采集失败。
+            try:
+                response = fetch(script_url, max_bytes=MAX_JS_BYTES)
+            except Exception as exc:  # noqa: BLE001 —— 外链脚本越权/网络错误跳过
+                target_files.append({
+                    "source_url": script_url, "source_page": target,
+                    "fetch_error": f"{type(exc).__name__}: {exc}"[:200],
+                    "skipped_out_of_scope": "授权范围" in str(exc) or "permission" in str(exc).casefold(),
+                    "content_sha256": None, "size": None, "leads": [],
+                })
+                continue
             if not response.get("ok"):
                 target_files.append({
                     "source_url": script_url, "source_page": target,
