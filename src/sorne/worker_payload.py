@@ -53,9 +53,16 @@ def require_json_object(payload: Any) -> dict[str, Any]:
     return payload
 
 
+def valid_kind(value: object) -> bool:
+    """kind 必须先确认是字符串再做集合成员判断：列表/字典不可哈希，
+    直接 ``in VALID_WORKER_KINDS`` 会抛 TypeError 而非业务错误，逃出
+    drivers 的 WorkerPayloadError→DriverError 转换通道。"""
+    return isinstance(value, str) and value in VALID_WORKER_KINDS
+
+
 def require_worker_kind(payload: Any) -> dict[str, Any]:
     require_json_object(payload)
-    if payload.get("kind") not in VALID_WORKER_KINDS:
+    if not valid_kind(payload.get("kind")):
         raise WorkerPayloadError("模型未返回带合法 kind 的 Sorne Worker JSON")
     return payload
 
@@ -68,7 +75,7 @@ def extract_worker_json(text: str) -> dict[str, Any]:
         raise WorkerPayloadError("模型输出为空")
     candidates = find_json_objects(stripped)
     for value in candidates:
-        if isinstance(value, dict) and value.get("kind") in VALID_WORKER_KINDS:
+        if isinstance(value, dict) and valid_kind(value.get("kind")):
             return value
     if not candidates:
         raise WorkerPayloadError(f"模型输出不是合法 JSON: {stripped}")

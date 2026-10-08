@@ -66,6 +66,16 @@ _PROJECT_ACTIVITY: dict[str, int] = {}
 _PROJECTS_BEING_DELETED: set[str] = set()
 
 
+class ControlPlaneHTTPServer(ThreadingHTTPServer):
+    """socketserver 默认监听 backlog=5：32 路并发新连接突发会被直接 RST。
+
+    前端一轮轮询即并行拉取多个 /api/*，足以瞬时超过默认队列（压测对照：
+    backlog=5 时约八成突发连接无任何 HTTP 响应被重置；≥64 后为 0）。
+    """
+
+    request_queue_size = 128
+
+
 def _error_status(exc: Exception) -> int:
     return 404 if isinstance(exc, ProjectNotFound) else 400
 
@@ -1725,7 +1735,7 @@ def serve(host: str = "127.0.0.1", port: int = 8765) -> None:
             refresh_asset_count(_safe_project(vendor))
         except Exception:
             continue
-    httpd = ThreadingHTTPServer((host, port), AgentControlHandler)
+    httpd = ControlPlaneHTTPServer((host, port), AgentControlHandler)
     print(f"Sorne running at http://{host}:{port}/")
     try:
         httpd.serve_forever()

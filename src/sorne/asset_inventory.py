@@ -91,7 +91,13 @@ def _default_port(scheme: str) -> int:
 
 
 def _safe_url(raw: str) -> tuple[str, str, int, str]:
-    parsed = urlsplit(raw)
+    try:
+        parsed = urlsplit(raw)
+    except ValueError as exc:
+        # 未闭合 IPv6 括号等畸形输入：必须转成 AssetImportError，
+        # 调用方按契约捕获后返回 None，而不是让 ValueError 逃逸
+        # 导致整份资产导入失败。
+        raise AssetImportError("URL 无法解析") from exc
     scheme = parsed.scheme.casefold()
     if scheme not in {"http", "https"} or not parsed.hostname:
         raise AssetImportError("只支持 HTTP(S) URL")
@@ -150,7 +156,9 @@ def normalize_asset_candidate(value: object) -> NormalizedCandidate | None:
     port: int | None = None
     if candidate.count(":") == 1:
         host_part, port_text = candidate.rsplit(":", 1)
-        if not port_text.isdigit():
+        # Unicode No 类字符（①、² 等）isdigit() 为 True 但 int() 会抛
+        # ValueError；端口必须是 ASCII 数字。
+        if not (port_text.isascii() and port_text.isdigit()):
             return None
         port = int(port_text)
         if not 1 <= port <= 65535:
@@ -409,14 +417,24 @@ def _scope_roots(store: ProjectStore) -> tuple[set[str], set[str]]:
     target = store.read_json("target.json")
     roots: set[str] = set()
     excluded: set[str] = set()
+
+    def _hostname(value: object) -> str | None:
+        raw = str(value)
+        try:
+            parsed = urlsplit(raw if "://" in raw else f"https://{raw}")
+        except ValueError:
+            # 畸形目标（如未闭合 IPv6 括号）不能让范围判定整体崩溃。
+            return None
+        return parsed.hostname.casefold().rstrip(".") if parsed.hostname else None
+
     for value in target.get("targets", []):
-        parsed = urlsplit(str(value) if "://" in str(value) else f"https://{value}")
-        if parsed.hostname:
-            roots.add(parsed.hostname.casefold().rstrip("."))
+        host = _hostname(value)
+        if host:
+            roots.add(host)
     for value in target.get("out_of_scope", []):
-        parsed = urlsplit(str(value) if "://" in str(value) else f"https://{value}")
-        if parsed.hostname:
-            excluded.add(parsed.hostname.casefold().rstrip("."))
+        host = _hostname(value)
+        if host:
+            excluded.add(host)
     return roots, excluded
 
 

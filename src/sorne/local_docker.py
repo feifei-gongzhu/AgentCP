@@ -453,7 +453,7 @@ class LocalDockerRuntime:
                 + "\n... [tool output truncated] ...\n"
                 + combined[-OPENAI_TOOL_OUTPUT_LIMIT // 2 :]
             )
-        return _redact(combined, self.profile.api_key), process.returncode != 0
+        return _redact(combined, self.profile.api_key), completed.returncode != 0
 
     def _command(self, input_root: Path, runtime_root: Path) -> tuple[list[str], dict[str, str]]:
         mount_mode = "ro" if self.profile.sandbox == "read-only" else "rw"

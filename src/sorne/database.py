@@ -627,18 +627,35 @@ class ControlDatabase:
                     ON directions(status, lease_expires_at, created_at);
                 """
             )
-            meta_rows = db.execute("SELECT version FROM schema_meta").fetchall()
-            if not meta_rows:
-                db.execute("INSERT INTO schema_meta(version) VALUES (3)")
-                current_version = 3
-            elif len(meta_rows) != 1:
-                raise RuntimeError("schema_meta 必须且只能包含一条版本记录")
-            else:
-                current_version = int(meta_rows[0]["version"])
-            if current_version > SCHEMA_VERSION:
-                raise RuntimeError(f"不支持的数据库版本: {current_version}")
-
             scrubbed_sensitive_data = False
+            # schema_meta 的读-写必须处于写事务内：自动提交下的
+            # SELECT→INSERT 在并发冷初始化时会写出重复版本行，令该库此后
+            # 每次初始化都失败（原实现无修复路径）。事务刻意保持极短，
+            # 只覆盖检查-插入-修复；重迁移在下方原有事务中串行执行。
+            db.execute("BEGIN IMMEDIATE")
+            try:
+                meta_rows = db.execute("SELECT version FROM schema_meta").fetchall()
+                if not meta_rows:
+                    db.execute("INSERT INTO schema_meta(version) VALUES (3)")
+                    current_version = 3
+                elif len(meta_rows) != 1:
+                    # 历史竞态残留自愈：重复行全部来自同值 INSERT，
+                    # 保留最大版本的一行即可恢复一致性。
+                    current_version = max(int(row["version"]) for row in meta_rows)
+                    db.execute("DELETE FROM schema_meta")
+                    db.execute(
+                        "INSERT INTO schema_meta(version) VALUES (?)",
+                        (current_version,),
+                    )
+                else:
+                    current_version = int(meta_rows[0]["version"])
+                if current_version > SCHEMA_VERSION:
+                    raise RuntimeError(f"不支持的数据库版本: {current_version}")
+                db.execute("COMMIT")
+            except Exception:
+                db.execute("ROLLBACK")
+                raise
+
             db.execute("BEGIN IMMEDIATE")
             try:
                 self._ensure_column(db, "automation_runs", "control_version", "INTEGER NOT NULL DEFAULT 1")

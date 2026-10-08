@@ -918,7 +918,11 @@ def _target_requirement(value: object) -> dict[str, str | None] | None:
         return None
     explicit_url = "://" in raw
     candidate = raw if explicit_url else f"https://{raw}"
-    parsed = urlsplit(candidate)
+    try:
+        parsed = urlsplit(candidate)
+    except ValueError:
+        # 畸形目标（如未闭合 IPv6 括号）按不可解析处理，不崩溃基线判定。
+        return None
     if not parsed.hostname:
         return None
     canonical_url: str | None = None

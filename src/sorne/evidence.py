@@ -55,7 +55,10 @@ def freeze_worker_result_evidence(
     def freeze_if_valid(reference: str) -> str:
         try:
             return freezer.freeze_reference(reference)
-        except EvidenceReferenceError:
+        except (EvidenceReferenceError, ValueError, OSError):
+            # ValueError：NUL 字符等非法路径；OSError：ENAMETOOLONG 等
+            # 文件系统层失败。模型输出不可信，两者都按"非法引用原样
+            # 保留"降级，不让异常逃出到候选冻结调用点。
             return reference
 
     primary = payload.get("evidence_path")
@@ -223,9 +226,15 @@ def _write_once(path: Path, data: bytes) -> None:
 def validated_evidence_file(path: Path, evidence_root: Path) -> bool:
     """Return whether an evidence file is non-empty and digest-consistent."""
 
-    if path.name.endswith(".sha256") or not path.is_file() or path.stat().st_size <= 0:
+    try:
+        # Python 3.9 的 pathlib 只吞 ENOENT 等四类 errno：ENAMETOOLONG
+        # 等会从 is_file/stat 抛出。本函数契约是返回 bool，畸形路径
+        # 一律按"不是有效证据"处理。
+        if path.name.endswith(".sha256") or not path.is_file() or path.stat().st_size <= 0:
+            return False
+        resolved = path.resolve()
+    except (OSError, ValueError):
         return False
-    resolved = path.resolve()
     allowed = evidence_root.resolve()
     try:
         relative = resolved.relative_to(allowed)
@@ -247,7 +256,10 @@ def validated_evidence_file(path: Path, evidence_root: Path) -> bool:
         return False
     if not _SHA256.fullmatch(declared):
         return False
-    actual = hashlib.sha256(resolved.read_bytes()).hexdigest()
+    try:
+        actual = hashlib.sha256(resolved.read_bytes()).hexdigest()
+    except (OSError, ValueError):
+        return False
     if actual != declared:
         return False
     if frozen_layout:
@@ -319,19 +331,21 @@ class EvidenceNormalizer:
             return []
         allowed = (project_root / "evidence").resolve()
         candidate = Path(fact.evidence_path)
-        resolved = candidate.resolve() if candidate.is_absolute() else (project_root / candidate).resolve()
         try:
+            resolved = candidate.resolve() if candidate.is_absolute() else (project_root / candidate).resolve()
             resolved.relative_to(allowed)
-        except ValueError:
+            if resolved.is_file() and validated_evidence_file(resolved, allowed):
+                return [resolved]
+            if resolved.is_dir():
+                return [
+                    item
+                    for item in resolved.rglob("*")
+                    if validated_evidence_file(item, allowed)
+                ]
+        except (OSError, ValueError):
+            # 模型给的 evidence_path 可能含 NUL/超长名等畸形形态，
+            # stat 层抛错时按"无有效证据"处理。
             return []
-        if resolved.is_file() and validated_evidence_file(resolved, allowed):
-            return [resolved]
-        if resolved.is_dir():
-            return [
-                item
-                for item in resolved.rglob("*")
-                if validated_evidence_file(item, allowed)
-            ]
         return []
 
     @staticmethod
@@ -347,13 +361,13 @@ class EvidenceNormalizer:
             accepted: list[str] = []
             for ref in refs if isinstance(refs, list) else []:
                 path = Path(str(ref))
-                resolved = path.resolve() if path.is_absolute() else (project_root / path).resolve()
                 try:
+                    resolved = path.resolve() if path.is_absolute() else (project_root / path).resolve()
                     resolved.relative_to(allowed_root)
-                except ValueError:
+                    if resolved.is_file() and validated_evidence_file(resolved, allowed_root):
+                        accepted.append(resolved.relative_to(project_root).as_posix())
+                except (OSError, ValueError):
                     continue
-                if resolved.is_file() and validated_evidence_file(resolved, allowed_root):
-                    accepted.append(resolved.relative_to(project_root).as_posix())
             if accepted:
                 result[str(claim)] = accepted
         return result

@@ -18,7 +18,6 @@ from typing import Any, Callable
 
 from . import worker_payload
 from .provider_auth import normalize_base_url, resolve_anthropic_auth_mode
-from .schemas import VALID_WORKER_KINDS
 from .platform_process import (
     process_group_options,
     process_matches_executable,
@@ -844,7 +843,9 @@ def _extract_worker_result(detail: dict[str, Any]) -> dict[str, Any]:
 
     # New agent-compose builds expose finalText in result_json. Keep accepting a
     # direct Worker payload for compatibility with tests and external runtimes.
-    if metadata.get("kind") in VALID_WORKER_KINDS:
+    # kind 为列表/字典时不可哈希，直接做集合成员判断会抛 TypeError 逃出
+    # 错误转换通道（与 worker_payload.require_worker_kind 同一契约）。
+    if worker_payload.valid_kind(metadata.get("kind")):
         return metadata
     for text in candidates:
         if not text:
@@ -853,7 +854,7 @@ def _extract_worker_result(detail: dict[str, Any]) -> dict[str, Any]:
             payload = _extract_json(text)
         except AgentComposeError:
             continue
-        if payload.get("kind") in VALID_WORKER_KINDS:
+        if worker_payload.valid_kind(payload.get("kind")):
             return payload
 
     raise AgentComposeError(

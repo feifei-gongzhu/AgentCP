@@ -41,6 +41,18 @@ class QualityLedger:
     ) -> HumanVerdict:
         from .commits import CommitCoordinator, CommitPlanner, new_source_id
 
+        # 提交前先完成全部输入校验：非法请求不得冻结提交事件。否则校验
+        # 要到投影器才失败，事件进入 retry_wait 并按 aggregate 阻塞同一
+        # finding 的全部后续合法裁决（毒事件，重试期间返回旧错误）。
+        self._validate_review_inputs(
+            store,
+            finding_id=finding_id,
+            action=action,
+            final_classification=final_classification,
+            final_severity=final_severity,
+            reason=reason,
+            duplicate_of_finding_id=duplicate_of_finding_id,
+        )
         source_id = new_source_id("REVIEW")
         payload = {
             "finding_id": finding_id,
@@ -83,8 +95,8 @@ class QualityLedger:
             raise RuntimeError("人工裁决已提交但无法读取对应投影")
         return result
 
-    def _review_legacy(
-        self,
+    @staticmethod
+    def _validate_review_inputs(
         store: ProjectStore,
         *,
         finding_id: str,
@@ -92,11 +104,13 @@ class QualityLedger:
         final_classification: str,
         final_severity: str,
         reason: str,
-        duplicate_of_finding_id: str | None = None,
-        reason_codes: list[str] | None = None,
-        applicable_scope: str = "current_finding",
-        reviewed_by: str = "project_owner",
-    ) -> HumanVerdict:
+        duplicate_of_finding_id: str | None,
+    ) -> dict[str, Any]:
+        """裁决输入的全部校验规则；提交前与投影时共用同一份实现。
+
+        返回被裁决的 fact。规则两边必须由同一份代码判定，否则提交侧
+        放行的输入会在投影侧失败并阻塞提交队列。
+        """
         action = action.strip()
         if action not in REVIEW_ACTIONS:
             raise ValueError(f"不支持的人工裁决动作: {action}")
@@ -129,6 +143,33 @@ class QualityLedger:
             raise ValueError("只有同源漏洞裁决可以使用 same_root_vulnerability 分类。")
         elif duplicate_of_finding_id:
             raise ValueError("只有同源漏洞裁决可以指定主漏洞。")
+        return fact
+
+    def _review_legacy(
+        self,
+        store: ProjectStore,
+        *,
+        finding_id: str,
+        action: str,
+        final_classification: str,
+        final_severity: str,
+        reason: str,
+        duplicate_of_finding_id: str | None = None,
+        reason_codes: list[str] | None = None,
+        applicable_scope: str = "current_finding",
+        reviewed_by: str = "project_owner",
+    ) -> HumanVerdict:
+        fact = self._validate_review_inputs(
+            store,
+            finding_id=finding_id,
+            action=action,
+            final_classification=final_classification,
+            final_severity=final_severity,
+            reason=reason,
+            duplicate_of_finding_id=duplicate_of_finding_id,
+        )
+        action = action.strip()
+        duplicate_of_finding_id = str(duplicate_of_finding_id or "").strip() or None
 
         previous = self.latest_verdicts(store).get(finding_id)
         verdict = HumanVerdict(
