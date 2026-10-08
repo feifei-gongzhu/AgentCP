@@ -1,0 +1,17 @@
+{
+  "id": "web-injection",
+  "version": "1.0.0",
+  "title": "注入类验证（SQL/模板/命令/SSRF）",
+  "description": "以受控探针与差异对照验证注入类假设：SQL 注入、模板注入、命令注入、SSRF 的判定证据与排除纪律。",
+  "roles": ["operator", "planner", "reviewer"],
+  "required_capabilities": ["http_request", "session_ref", "query_results", "record_finding", "negative_evidence_submit"],
+  "trigger_features": ["sql", "sql 注入", "sqli", "数据库错误", "syntax error", "模板注入", "ssti", "命令注入", "command injection", "ssrf", "内网请求", "回显", "联合查询", "order by", "搜索参数", "过滤参数"],
+  "exclusion_features": ["纯静态无参数页面"],
+  "preconditions": ["存在可控输入点（参数、头、体）", "目标在授权范围内且允许发送验证探针"],
+  "evidence_maturity": "observed",
+  "priority": 45,
+  "references": ["web-methods"],
+  "source": "Sorne 内置（注入类验证方法论）",
+  "license": "Sorne 仓库内置",
+  "body": "## 何时使用\n\n输入点回显数据库/模板/系统错误、参数影响查询结构、或功能语义上存在服务端发起请求（SSRF 候选）。本卡只覆盖判定证据的取得方法，不提供全量载荷字典。\n\n## 先看什么证据\n\n- query_http：输入点的既有响应基线（正常值行为）。\n- 技术观察：后端语言/框架/数据库指纹（错误格式是强线索）。\n- WAF 评估（若有）：已知拦截特征，避免误把 WAF 拦截当目标行为。\n\n## 调用哪个已注册能力\n\nhttp_request 发送最小化探针并保存请求/响应；record_finding 提交候选；negative_evidence_submit 登记排除（例如参数经服务端重算、错误被统一处理）。\n\n## 怎样解读结果\n\n- SQL：以“可区分的响应差异/时间差异归因于注入语法”为证据；报错回显、布尔差异、可重复时间差各算一类证据，标注证据类型。\n- 模板注入：探针表达式被求值（而非原样回显）才算命中。\n- 命令注入：输出中出现可控内容或可归因的执行副作用；不依赖破坏性命令。\n- SSRF：服务端向受控观察点发起请求（或明确内网特征响应）才算命中；仅参数接受 URL 不算。\n- WAF 干扰：探针被拦截时记录 blocked，不推断目标不受影响。\n\n## 怎样排除\n\n- 输入被规范化/参数化，探针与基线响应一致 → 排除该输入点。\n- 错误被统一错误页吞掉且无布尔/时间差异 → 排除并记录证据类型。\n- 同型参数已在其他入口排除且无新差异 → 引用既有负向证据。\n\n## 怎样交付\n\nfact 候选：探针与基线的两侧证据、差异归因说明、证据路径、影响（数据读取/写入/执行/内网穿透）。时间盲注需附时间差样本。\n\n## 何时停止\n\n该输入点各注入类型逐一有判定或排除；连续同质响应且覆盖已记录；或触发停止条件。不使用破坏性载荷，不尝试拖库式大量回传。"
+}

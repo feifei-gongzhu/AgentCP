@@ -1,0 +1,17 @@
+{
+  "id": "web-api",
+  "version": "1.0.0",
+  "title": "API 与业务逻辑验证",
+  "description": "接口枚举、参数篡改、对象级越权（IDOR）、批量与异步接口的业务逻辑验证方法。",
+  "roles": ["operator", "planner", "reviewer"],
+  "required_capabilities": ["http_request", "session_ref", "query_results", "query_http", "record_finding", "negative_evidence_submit"],
+  "trigger_features": ["api", "/api/", "/v1/", "/v2/", "json 接口", "graphql", "rest", "id 参数", "user_id", "order_id", "openid", "接口", "越权", "idor", "水平权限", "垂直权限", "批量", "导出"],
+  "exclusion_features": ["纯静态内容"],
+  "preconditions": ["已识别至少一个业务接口及其正常调用样本", "具备可对照的身份（至少匿名 + 一个已认证引用）"],
+  "evidence_maturity": "observed",
+  "priority": 40,
+  "references": ["web-methods"],
+  "source": "Sorne 内置（API 与业务逻辑验证方法论）",
+  "license": "Sorne 仓库内置",
+  "body": "## 何时使用\n\n采集或画像中出现 API 端点、结构化参数、对象 ID 引用、导出/批量/异步功能。重点：对象级与功能级授权、参数完整性、业务流程可跳步。\n\n## 先看什么证据\n\n- query_http / query_results：接口清单、方法、内容类型、既有响应样本。\n- JS/前端线索（若有）：路由与硬编码端点（配合 web-client-side）。\n- session_ref：可用身份集合——越权验证必须双身份对照。\n- 事实：已登记的对象 ID 与归属关系。\n\n## 调用哪个已注册能力\n\nhttp_request 逐请求对照（变更一个对象 ID/一个参数/一个身份维度）；record_finding / upsert_fact 提交或更新候选；negative_evidence_submit 登记排除。\n\n## 怎样解读结果\n\n- 越权：低权身份请求高权对象，与高权身份基线逐字段对比；仅状态码相同但内容泄露也算差异。\n- 参数篡改：价格/数量/状态字段的服务端重算缺失需以“篡改前后订单/支付结果差异”证明。\n- 批量接口：注意限速与副作用——一次只改一个对象，不做压测式循环。\n- GraphQL：先 introspection（若开放）再最小化查询，不拉全库。\n\n## 怎样排除\n\n- 对象 ID 随机且无枚举依据 → 记录排除而非穷举。\n- 接口对低权身份统一 403/404 且响应同质 → 排除该接口，继续下一个。\n- 副作用动作（下单、删除、转账）未经明确授权 → blocked，交人工决策。\n\n## 怎样交付\n\nfact 候选包含：两侧请求摘要（方法/路径/关键参数，不含凭据明文）、响应差异、对象归属证据、业务影响。接口行为结论用 upsert_fact 链接原事实。\n\n## 何时停止\n\n已识别接口逐个有结论或排除；同类接口抽样无差异且覆盖账本已记录；或触发停止条件。"
+}

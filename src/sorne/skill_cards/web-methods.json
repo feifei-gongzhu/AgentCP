@@ -1,0 +1,17 @@
+{
+  "id": "web-methods",
+  "version": "1.0.0",
+  "title": "Web 方法家族卡",
+  "description": "Web 目标验证的方法入口：认证与会话、API 与业务逻辑、注入、客户端四条方法线，以及它们共用的请求对照纪律。",
+  "roles": ["operator", "recon", "planner", "poc", "reviewer"],
+  "required_capabilities": ["http_request", "query_results", "query_http", "record_finding"],
+  "trigger_features": ["web 应用", "http", "https", "登录页", "web 目标", "网站"],
+  "exclusion_features": ["纯主机端口资产", "非 web 服务"],
+  "preconditions": ["目标在授权范围内", "已有基础采集（URL/入口清单或画像）"],
+  "evidence_maturity": "observed",
+  "priority": 10,
+  "references": ["research-pipeline"],
+  "source": "Sorne 内置（Web 验证方法论）",
+  "license": "Sorne 仓库内置",
+  "body": "## 何时使用\n\n目标是 Web 应用/HTTP 服务且需要选择验证方法线时。四条方法线：web-auth-session（认证与会话）、web-api（API 与业务逻辑）、web-injection（注入类）、web-client-side（客户端）。组件指纹明确时优先路由到 component-verification。\n\n## 先看什么证据\n\n- query_http / query_results：已采集 URL、状态码、内容类型、重定向行为。\n- target_profile_query：优先目标与功能分类。\n- 技术观察（technology_observations）：框架、语言、中间件线索。\n- 会话引用（session_ref）：可用身份，注意不同认证上下文不合并验证。\n\n## 调用哪个已注册能力\n\nhttp_request 做受控请求对照（同一目标、同身份、一次只变一个变量）；query_results / query_http 读取既有采集；record_finding 提交候选；negative_evidence_submit 登记排除依据。\n\n## 怎样解读结果\n\n请求对照以“基线 vs 变体”判读：差异必须能归因到被测变量。状态码本身不是漏洞；要结合响应体语义、业务上下文与身份差异。主动与被动指纹冲突时保留两方证据、补充验证，不强行二选一。\n\n## 怎样排除\n\n- 统一错误页/登录跳转/catch-all 造成的同质响应 → 用随机路径对照后再下结论。\n- 响应差异来自动态内容（时间戳、CSRF token）而非验证变量 → 排除。\n- 目标需要未持有身份 → 记录 blocked 而不是猜测行为。\n\n## 怎样交付\n\nfact 候选必须包含：做了什么（请求对照描述）、观察到什么（响应差异）、证据路径（工具自动落盘的请求/响应文件）。业务影响必须说明攻击者能造成的具体损失。\n\n## 何时停止\n\n该入口的四条方法线均已覆盖或已有依据排除；请求出现连续同质无差异且覆盖账本已记录；或触发任务声明的停止条件。"
+}

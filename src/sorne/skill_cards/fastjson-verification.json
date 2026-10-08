@@ -1,0 +1,17 @@
+{
+  "id": "fastjson-verification",
+  "version": "1.0.0",
+  "title": "FastJSON 组件验证短卡",
+  "description": "JSON 报错特征识别、autoType 行为受控探测与版本受影响范围判定的方法卡。",
+  "roles": ["poc", "operator", "planner", "reviewer"],
+  "required_capabilities": ["poc_scan", "http_request", "query_results", "query_evidence", "record_finding", "negative_evidence_submit"],
+  "trigger_features": ["fastjson", "autotype", "autoType", "@type", "json parse error", "fastjson version", "com.alibaba.fastjson"],
+  "exclusion_features": ["JSON 接口报错特征属于其他库（jackson/gson）"],
+  "preconditions": ["存在接受 JSON 体的接口", "报错或行为特征指向 FastJSON（指纹证据已登记）"],
+  "evidence_maturity": "observed",
+  "priority": 60,
+  "references": ["component-verification"],
+  "source": "Sorne 内置（公开 FastJSON 安全通告与验证方法论整理）",
+  "license": "Sorne 仓库内置",
+  "body": "## 何时使用\n\nJSON 接口的错误响应暴露 FastJSON 特征（如 autoType 报错文案、版本号回显、com.alibaba.fastjson 异常类名）。验证目标：受影响版本范围内 autoType 绕过/反序列化路线是否成立。\n\n## 先看什么证据\n\n- 报错响应原文（指纹证据）：异常类名、autoType 提示文案、版本回显。\n- 接口正常调用样本（基线）：合法 JSON 体的响应行为。\n- 版本线索：报错回显或依赖清单证据。\n\n## 调用哪个已注册能力\n\nhttp_request 发送最小化 JSON 探针（一次一个字段变化）并保存两侧证据；poc_scan 限定 FastJSON 模板；query_evidence 复核落盘文件。\n\n## 怎样解读结果\n\n- autoType 报错差异（未开启 vs 开启提示）说明解析行为，不等于可利用。\n- 探针被原样拒绝且无行为差异 → 该路线证据不足（insufficient evidence），不以“存在 fastjson”直接成立。\n- 出网类验证不在授权范围内默认使用：只依据响应内可观察差异判定。\n- WAF/网关拦截 JSON 探针时记录 blocked，不推断不受影响。\n\n## 怎样排除\n\n- 报错特征实际属于其他 JSON 库 → 指纹更正（upsert 技术观察）。\n- 版本证据明确在受影响范围外 → 排除并附版本证据。\n- 接口不接受 JSON 或所有探针与基线一致 → 排除该入口。\n\n## 怎样交付\n\nfact 候选：指纹证据、版本判断、探针/基线两侧响应差异、证据路径、业务影响。排除结论附证据与理由。\n\n## 何时停止\n\n已识别 JSON 入口逐一有判定或排除；无版本证据时记录信息缺口而不是反复试探。"
+}

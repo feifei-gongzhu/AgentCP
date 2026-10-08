@@ -1,0 +1,17 @@
+{
+  "id": "spring-verification",
+  "version": "1.0.0",
+  "title": "Spring 生态组件验证短卡",
+  "description": "Spring 指纹（X-Application-Context/actuator/报错页）识别、管理端点暴露与 SpEL/路由相关已知路线的受控验证。",
+  "roles": ["poc", "operator", "planner", "reviewer"],
+  "required_capabilities": ["poc_scan", "http_request", "query_results", "query_evidence", "record_finding", "negative_evidence_submit"],
+  "trigger_features": ["spring", "spring boot", "springboot", "actuator", "x-application-context", "whitelabel error page", "spring cloud gateway", "spel", "heapdump"],
+  "exclusion_features": ["报错页特征属于其他框架"],
+  "preconditions": ["Spring 指纹证据（响应头/错误页/actuator 路径）已登记"],
+  "evidence_maturity": "observed",
+  "priority": 60,
+  "references": ["component-verification"],
+  "source": "Sorne 内置（公开 Spring 安全通告与验证方法论整理）",
+  "license": "Sorne 仓库内置",
+  "body": "## 何时使用\n\n响应头出现 X-Application-Context、Whitelabel Error Page、/actuator 系列路径可访问，或画像确认 Spring Boot/Cloud。验证目标：①管理端点暴露面（env/heapdump/mappings 等）；②已知 SpEL/路由类路线是否适用。\n\n## 先看什么证据\n\n- actuator 路径的响应状态与内容（哪些端点开放、是否需要认证）。\n- 响应头与错误页特征（指纹证据）。\n- 版本线索（错误页/actuator info 端点/依赖清单）。\n\n## 调用哪个已注册能力\n\nhttp_request 逐端点受控请求（不下载大文件全量内容，先看元信息）；poc_scan 限定 Spring 相关模板；query_results 关联画像。\n\n## 怎样解读结果\n\n- actuator 暴露：开放端点清单是攻击面事实；heapdump/env 暴露敏感配置才算高价值候选（引用具体字段证据，不整包下载留证）。\n- SpEL/路由类命中：需要命中响应体现表达式语义或路由行为差异。\n- 404/401/302 到登录：说明端点受保护——记录，不推断内部不存在。\n\n## 怎样排除\n\n- actuator 全端点不可访问且无行为差异 → 排除管理面。\n- 版本在受影响范围外且有版本证据 → 排除对应路线。\n- 命中为统一错误页 → 疑似误报记录。\n\n## 怎样交付\n\nfact 候选：端点/路线、命中 URL、响应差异、证据路径、暴露的具体敏感项（配置键名级别）、业务影响。\n\n## 何时停止\n\n已识别端点逐个有结论；已知路线逐条判定或排除；覆盖已记录即停止本组件分支。"
+}

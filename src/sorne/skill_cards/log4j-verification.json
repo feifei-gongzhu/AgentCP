@@ -1,0 +1,17 @@
+{
+  "id": "log4j-verification",
+  "version": "1.0.0",
+  "title": "Log4j（JNDI Lookup）组件验证短卡",
+  "description": "Log4j 特征识别与 lookup 行为的受控验证：以无害 lookup 回显/差异判定，避免破坏性载荷与授权范围外出网验证。",
+  "roles": ["poc", "operator", "planner", "reviewer"],
+  "required_capabilities": ["poc_scan", "http_request", "query_results", "query_evidence", "record_finding", "negative_evidence_submit"],
+  "trigger_features": ["log4j", "log4shell", "jndi", "lookup", "log4j2", "cve-2021-44228"],
+  "exclusion_features": ["无 Java 技术栈证据且无日志回显面"],
+  "preconditions": ["存在会被记录的输入点（Header/参数/用户名等）", "Java/Log4j 线索（技术观察或错误特征）"],
+  "evidence_maturity": "observed",
+  "priority": 60,
+  "references": ["component-verification"],
+  "source": "Sorne 内置（公开 Log4j 安全通告与验证方法论整理）",
+  "license": "Sorne 仓库内置",
+  "body": "## 何时使用\n\n目标存在 Java 栈证据且有输入会进入日志（登录名、User-Agent、错误参数）。验证目标：日志层 lookup 求值行为是否发生。\n\n## 先看什么证据\n\n- 技术观察：Java/中间件指纹（错误页、Server 头、框架特征）。\n- 可观测的日志回显面：响应是否回显被记录的内容（错误消息、审计页）。\n- WAF 评估：已知拦截特征会影响探针可达性。\n\n## 调用哪个已注册能力\n\nhttp_request 发送无害 lookup 探针（如环境信息类 lookup，不含外联地址）；poc_scan 限定 Log4j 相关模板；两侧证据（探针/基线）由工具自动落盘。\n\n## 怎样解读结果\n\n- 无害 lookup 在响应/日志回显中被求值（渲染出系统信息而非原文）→ 强候选。\n- 探针原文原样回显或无差异 → 证据不足（insufficient evidence），不以“存在 Java”直接成立。\n- 出网类 DNS/HTTP 回连验证默认不使用：它需要授权范围外的观察点；项目若显式提供受控观察点并授权，方可作为补充证据。\n- WAF 拦截探针 → 记录 blocked 与拦截证据，不推断不受影响。\n\n## 怎样排除\n\n- 无 Java 栈证据且探针无差异 → 排除该输入点。\n- 版本证据显示已升级到修复版本 → 排除并附版本证据。\n- 输入不进入任何可观测日志 → 无法判定，登记信息缺口。\n\n## 怎样交付\n\nfact 候选：探针与求值证据（回显差异）、输入点、版本判断依据、证据路径、业务影响。绝不把外联地址写入事实；探针内容本身在证据文件中留档。\n\n## 何时停止\n\n可观测输入点逐一判定或排除；无回显面时记录缺口即停，不做盲扫。"
+}

@@ -1,0 +1,17 @@
+{
+  "id": "research-pipeline",
+  "version": "1.0.0",
+  "title": "研究环总卡（画像→规划→执行→研判→复核→再规划）",
+  "description": "Sorne 研究循环的根卡：解释画像驱动、依赖驱动、结果驱动三股力量如何衔接，以及各角色在环中的交接协议。",
+  "roles": ["orchestrator", "planner", "recon", "crack", "poc", "operator", "reviewer"],
+  "required_capabilities": ["query_results", "query_http", "list_facts"],
+  "trigger_features": ["研究环", "研究循环", "research pipeline", "整体流程", "新项目", "空资产"],
+  "exclusion_features": [],
+  "preconditions": ["项目已确认授权范围（target.json authorization=authorized）"],
+  "evidence_maturity": "observed",
+  "priority": 5,
+  "references": [],
+  "source": "Sorne 内置（研究循环实施方案 §4）",
+  "license": "Sorne 仓库内置",
+  "body": "## 何时使用\n\n任何一次规划、派发或执行前的定位卡：新项目第一次进入研究、或对当前环所处阶段有疑问时读。已有明确专项（认证、API、注入、组件）时直接路由到对应家族卡，本卡不替代专项方法。\n\n## 先看什么证据\n\n- project_summary：阶段、资产/事实计数、授权范围、活动运行。\n- query_results / query_http：既有采集（mrecon 观察、目标画像、技术观察）。\n- list_facts：候选事实与负向证据（负结果同样是证据）。\n- 覆盖账本摘要（coverage summary）：本批已执行过的方法×目标，避免同请求循环。\n\n## 调用哪个已注册能力\n\n只读类：project_summary、route_candidates、query_results、query_http、list_facts、target_profile_query。规划角色用 submit_plan 提交带 depends_on 的任务图；编排角色用 submit_dispatch 激活已有任务；执行角色按认领的方向使用其白名单工具。\n\n## 怎样解读结果\n\n研究环由三股驱动：\n1. 画像驱动：指纹、功能、技术栈决定候选方法；指纹已明确走组件验证，信息缺口走采集。\n2. 依赖驱动：任务的 depends_on 决定执行顺序；父任务未完成前依赖任务不可认领；父任务无命中且子任务需要该命中时会级联取消，项目其他分支继续。\n3. 结果驱动：扫描/验证的原始结果先落盘，独立 AI 研判层生成附加分析记录，候选经提交链提交，review 与 Guardian 复核，负向证据抑制重复。\n\n## 怎样排除\n\n- 该方法已被覆盖账本记录为“已执行且无命中”，且身份/目标/规则版本未变化 → 不重复。\n- 存在有效负向证据（valid_until 未过期，触发条件未命中）→ 抑制重复验证。\n- 目标不在授权范围 → 不进入计划。\n\n## 怎样交付\n\n- 规划角色：plan_batch（策略摘要、假设、反事实、覆盖声明、任务依赖）。\n- 执行角色：fact 候选或 negative_evidence，必须引用本批证据文件。\n- 编排角色：派发记录与阻塞/完成摘要。\n\n## 何时停止\n\n本批已分配对象逐项有验证结果或有依据的排除；或触发项目声明的停止条件（绝对截止时间、人工门禁、授权范围边界）。一条命中不代表任务结束；空候选不代表永远继续。"
+}

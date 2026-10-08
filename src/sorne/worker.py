@@ -265,6 +265,42 @@ def apply_worker_output(
     )
 
 
+def validate_review_payload(store: ProjectStore, mode: str, payload: dict[str, Any]) -> None:
+    """review_record 入链前校验（§3.4）：非法载荷在工具边界被拒绝，
+    不产生投毒的 retry_wait 提交事件。apply 分支保留同校验（投影重放防御）。"""
+    if mode == "action_review":
+        decision = str(payload.get("decision") or "").strip()
+        if decision not in {"approve", "deny", "escalate"}:
+            raise WorkerError(f"action_review 的 decision 非法: {decision}")
+        if not str(payload.get("rationale") or "").strip():
+            raise WorkerError("action_review 缺少 rationale")
+        if not str(payload.get("task_id") or "").strip():
+            raise WorkerError("action_review 缺少 task_id（票据绑定字段）")
+        if not str(payload.get("tool_id") or "").strip():
+            raise WorkerError("action_review 缺少 tool_id（票据绑定字段）")
+        if not str(payload.get("params_digest") or "").strip():
+            raise WorkerError("action_review 缺少 params_digest（票据绑定字段）")
+        return
+    if mode == "finding_review":
+        sufficiency = str(payload.get("evidence_sufficiency") or "").strip()
+        if sufficiency not in {"sufficient", "partial", "insufficient"}:
+            raise WorkerError(f"finding_review 的 evidence_sufficiency 非法: {sufficiency}")
+        recommendation = str(payload.get("recommendation") or "").strip()
+        if recommendation not in {
+            "accept_candidate", "request_evidence", "refine_scope", "suspect_false_positive",
+        }:
+            raise WorkerError(f"finding_review 的 recommendation 非法: {recommendation}")
+        candidate_ids = [str(item) for item in payload.get("candidate_ids", []) if str(item)]
+        if not candidate_ids:
+            raise WorkerError("finding_review 缺少 candidate_ids")
+        known = {str(item.get("id")) for item in store.read_jsonl("facts.jsonl")}
+        unknown = [item for item in candidate_ids if item not in known]
+        if unknown:
+            raise WorkerError(f"finding_review 引用了不存在的事实: {unknown}")
+        return
+    raise WorkerError(f"review_record 的 mode 非法: {mode}")
+
+
 def _apply_worker_output_legacy(store: ProjectStore, payload: dict[str, Any]) -> str:
     state = store.load_state()
     kind = payload.get("kind")
@@ -517,6 +553,109 @@ def _apply_worker_output_legacy(store: ProjectStore, payload: dict[str, Any]) ->
             store.save_state(state)
         render_dashboard(store)
         return f"已写入 Intent: {intent.id}{technology_suffix}"
+
+    if kind == "review_record":
+        # P2（方案 §3.4）：reviewer 的 submit_review 是唯一写入口；本分支
+        # 由提交链投影触发。票据绑定字段（task_id/tool_id/params_digest/
+        # control_version）在网关以服务端身份注入，模型值已在网关丢弃。
+        mode = str(payload.get("mode") or "").strip()
+        if mode not in {"action_review", "finding_review"}:
+            raise WorkerError(f"review_record 的 mode 非法: {mode}")
+        database = ControlDatabase(store.path / "control_plane.db")
+        reviewer_member = str(payload.get("proposed_by") or "reviewer").strip() or "reviewer"
+        if mode == "action_review":
+            # 票据绑定字段只能由服务端网关注入（§3.6）：模型直接以 Worker
+            # 输出提交的审批不被接受——否则模型可以给自己签发票据。
+            if not payload.get("server_bound"):
+                raise WorkerError(
+                    "action_review 必须经网关 submit_review 提交（票据绑定字段由"
+                    "服务端注入）；直接以 Worker 输出提交的审批票据被拒绝。"
+                )
+            decision = str(payload.get("decision") or "").strip()
+            if decision not in {"approve", "deny", "escalate"}:
+                raise WorkerError(f"action_review 的 decision 非法: {decision}")
+            if not str(payload.get("rationale") or "").strip():
+                raise WorkerError("action_review 缺少 rationale")
+            stored = database.insert_review_record(
+                "action_review",
+                {
+                    "task_id": payload.get("task_id"),
+                    "tool_id": payload.get("tool_id"),
+                    "params_digest": payload.get("params_digest"),
+                    "control_version": payload.get("control_version"),
+                    "decision": decision,
+                    "rationale": payload.get("rationale"),
+                    "conditions": payload.get("conditions") or [],
+                    "linked_task_id": payload.get("linked_task_id"),
+                },
+                reviewer_member=reviewer_member,
+                run_id=payload.get("run_id"),
+            )
+            store.append_jsonl("review_records.jsonl", {**payload, "review_id": stored["review_id"]})
+            render_dashboard(store)
+            return (
+                f"已写入 action_review: {stored['review_id']} | 决定: {decision}"
+                "（票据仅绑定该任务×工具×参数摘要×控制版本）"
+            )
+        # finding_review：证据充分性/缺失项/建议；不直接改变 Guardian 的
+        # 确认标准，也不改写原事实（只降不升的机制保持不变）。
+        sufficiency = str(payload.get("evidence_sufficiency") or "").strip()
+        if sufficiency not in {"sufficient", "partial", "insufficient"}:
+            raise WorkerError(f"finding_review 的 evidence_sufficiency 非法: {sufficiency}")
+        recommendation = str(payload.get("recommendation") or "").strip()
+        if recommendation not in {
+            "accept_candidate", "request_evidence", "refine_scope", "suspect_false_positive",
+        }:
+            raise WorkerError(f"finding_review 的 recommendation 非法: {recommendation}")
+        candidate_ids = [str(item) for item in payload.get("candidate_ids", []) if str(item)]
+        if not candidate_ids:
+            raise WorkerError("finding_review 缺少 candidate_ids")
+        known = {str(item.get("id")) for item in store.read_jsonl("facts.jsonl")}
+        unknown = [item for item in candidate_ids if item not in known]
+        if unknown:
+            raise WorkerError(f"finding_review 引用了不存在的事实: {unknown}")
+        stored = database.insert_review_record(
+            "finding_review",
+            {
+                "candidate_ids": candidate_ids,
+                "evidence_sufficiency": sufficiency,
+                "recommendation": recommendation,
+                "missing_items": payload.get("missing_items") or [],
+                "suggested_next_evidence": payload.get("suggested_next_evidence") or [],
+                "linked_analysis_ids": payload.get("linked_analysis_ids") or [],
+                "rationale": payload.get("rationale"),
+            },
+            reviewer_member=reviewer_member,
+            run_id=payload.get("run_id"),
+        )
+        store.append_jsonl("review_records.jsonl", {**payload, "review_id": stored["review_id"]})
+        if recommendation == "suspect_false_positive":
+            # 回流（§7A.2/§3.4）：疑似误报只是建议——不删除原始命中，不改
+            # Guardian 结论；后续通过 upsert_fact 重新提交时 Guardian 照常
+            # 只降不升复核。
+            store.append_jsonl(
+                "review_flags.jsonl",
+                {
+                    "fact_ids": candidate_ids,
+                    "flag": "suspect_false_positive",
+                    "source_review_id": stored["review_id"],
+                    "created_at": now_iso(),
+                },
+            )
+        render_dashboard(store)
+        return (
+            f"已写入 finding_review: {stored['review_id']} | 充分性: {sufficiency}"
+            f" | 建议: {recommendation}（不改变 Guardian 判定与原始事实）"
+        )
+
+    if kind == "analysis_record":
+        # 独立研判记录只能由 analysis_service 以服务身份写入（方案 §7A.1：
+        # 不能由七角色的一段附加输出冒充）。团队成员把它作为 Worker 输出
+        # 提交时在此拒绝。
+        raise WorkerError(
+            "analysis_record 只能由独立研判服务（analysis_service）产生并持久化；"
+            "团队成员不得以 Worker 输出冒充分析记录。"
+        )
 
     if kind == "decision":
         state = store.load_state()

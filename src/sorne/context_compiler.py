@@ -232,6 +232,17 @@ def compile_worker_context(
             limit=8,
         )
         add_records("related_negative_evidence", _related(negative, identity), limit=8)
+        # P2：reviewer 消费独立研判记录与 review 回流（明确是模型分析，
+        # 不伪装原始事实；§7A.5）。
+        add_records(
+            "related_analysis_records",
+            [
+                {**row.get("record", {}), "analysis_id": row.get("id"), "version": row.get("version")}
+                for row in _recent_analysis_records(store)
+            ],
+            limit=8,
+        )
+        add_records("recent_review_records", store.read_jsonl("review_records.jsonl"), limit=6)
     elif role == "waf_analyst":
         add_records("open_waf_branches", WAFManager().active(store), limit=6)
         add_records("related_negative_evidence", _related(negative, identity), limit=8)
@@ -246,6 +257,22 @@ def compile_worker_context(
         add_records("human_dismissed_directions", dismissed, limit=8)
         add_records("recent_negative_evidence", negative, limit=8)
         if role in {"reason", "planner", "orchestrator"}:
+            # P2（方案 §4.1/§12-P2）：覆盖账本与独立研判记录进入规划上下文，
+            # 支撑负结果驱动重规划——已覆盖方法×目标不原样重试，研判建议
+            # 只作为输入（标记 model_analysis，不伪装事实）。
+            from .coverage_ledger import coverage_summary
+
+            context["coverage_summary"] = _fit_value(
+                context, "coverage_summary", coverage_summary(store), budget,
+            )
+            add_records(
+                "recent_analysis_records",
+                [
+                    {**row.get("record", {}), "analysis_id": row.get("id"), "version": row.get("version")}
+                    for row in _recent_analysis_records(store)
+                ],
+                limit=6,
+            )
             # 画像驱动：规划与编排都按优先目标分组掌握全局（planner 用于
             # 生成假设，orchestrator 用于派发排序）。
             priority_targets = [
@@ -604,3 +631,22 @@ def _truncate(value: str, limit: int) -> str:
 
 def _json_chars(value: Any) -> int:
     return len(json.dumps(value, ensure_ascii=False, indent=2))
+
+def _recent_analysis_records(store: ProjectStore) -> list[dict[str, Any]]:
+    """最近的分析记录（§7A.5：带 model_analysis 标记供规划/复核消费）。"""
+    try:
+        from .database import ControlDatabase
+
+        database_path = store.path / "control_plane.db"
+        if not database_path.exists():
+            return []
+        records = ControlDatabase(database_path).list_analysis_records(limit=10)
+    except Exception:  # noqa: BLE001 —— 分析库不可读时规划不中断
+        return []
+    result = []
+    for row in records:
+        record = dict(row.get("record") or {})
+        record["model_analysis"] = True
+        record["analysis_id"] = row.get("id")
+        result.append({**row, "record": record})
+    return result

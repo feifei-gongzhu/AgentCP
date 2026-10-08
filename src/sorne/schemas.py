@@ -52,6 +52,11 @@ VALID_WORKER_KINDS = frozenset({
     "decision",
     "negative_evidence",
     "target_profile_batch",
+    "review_record",
+    # 独立研判层的模型输出载体：只有 analysis_service 以服务身份产生
+    # （run_driver 的 kind 校验需要它合法）；团队成员把它作为 Worker
+    # 输出提交会被 apply 分支拒绝——不冒充分析（方案 §7A.1）。
+    "analysis_record",
     "none",
 })
 

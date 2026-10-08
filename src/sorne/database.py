@@ -10,7 +10,7 @@ from typing import Any, Callable, Iterator
 from uuid import uuid4
 
 
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 
 
 _ASSET_TERMINAL_STATUSES = (
@@ -313,6 +313,88 @@ _PROFILE_SCHEMA_V7 = (
         conflicts INTEGER NOT NULL DEFAULT 0,
         report_json TEXT
     )
+    """,
+)
+
+
+_DEPENDENCY_SCHEMA_V8 = (
+    # 独立研判任务队列（方案 §7A.3：复用租约调度语义，独立于执行任务）。
+    """
+    CREATE TABLE IF NOT EXISTS analysis_jobs (
+        id TEXT PRIMARY KEY,
+        analyzer_kind TEXT NOT NULL,
+        status TEXT NOT NULL CHECK(status IN ('queued','running','completed','failed','cancelled')),
+        run_id TEXT,
+        source_task_id TEXT,
+        source_tool_call_id TEXT,
+        input_json TEXT NOT NULL,
+        input_hash TEXT NOT NULL,
+        result_record_id TEXT,
+        attempts INTEGER NOT NULL DEFAULT 0,
+        max_attempts INTEGER NOT NULL DEFAULT 2,
+        worker_id TEXT,
+        lease_expires_at TEXT,
+        last_heartbeat_at TEXT,
+        error TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+    )
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_analysis_jobs_claim
+        ON analysis_jobs(status, lease_expires_at, created_at)
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_analysis_jobs_source
+        ON analysis_jobs(source_task_id, source_tool_call_id)
+    """,
+    # 版本化分析记录（方案 §7A.3：相同输入复用；重分析生成新版本并保留旧记录）。
+    """
+    CREATE TABLE IF NOT EXISTS analysis_records (
+        id TEXT PRIMARY KEY,
+        analyzer_kind TEXT NOT NULL,
+        version INTEGER NOT NULL DEFAULT 1,
+        job_id TEXT,
+        run_id TEXT,
+        source_task_id TEXT,
+        source_tool_call_id TEXT,
+        input_hash TEXT NOT NULL,
+        lineage_root TEXT,
+        model_id TEXT,
+        prompt_version TEXT,
+        schema_version INTEGER NOT NULL DEFAULT 1,
+        analysis_status TEXT NOT NULL,
+        record_json TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        UNIQUE(analyzer_kind, input_hash, version)
+    )
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_analysis_records_kind
+        ON analysis_records(analyzer_kind, created_at)
+    """,
+    # review 记录（方案 §3.4）：action_review 审批票据按
+    # (task_id, tool_id, params_digest, control_version) 绑定；finding_review
+    # 只落记录不改 Guardian 判定。
+    """
+    CREATE TABLE IF NOT EXISTS review_records (
+        id TEXT PRIMARY KEY,
+        mode TEXT NOT NULL CHECK(mode IN ('action_review','finding_review')),
+        reviewer_member TEXT,
+        run_id TEXT,
+        task_id TEXT,
+        tool_id TEXT,
+        params_digest TEXT,
+        control_version INTEGER,
+        decision TEXT,
+        recommendation TEXT,
+        payload_json TEXT NOT NULL,
+        created_at TEXT NOT NULL
+    )
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_review_tickets
+        ON review_records(mode, task_id, tool_id, params_digest, control_version)
     """,
 )
 
@@ -669,6 +751,16 @@ class ControlDatabase:
                 self._ensure_column(db, "jobs", "commit_enqueued_at", "TEXT")
                 self._ensure_column(db, "jobs", "commit_projected_at", "TEXT")
                 self._ensure_column(db, "directions", "terminal_reason", "TEXT")
+                # V8（方案 §4.2/§7A.3、P0-契约设计 §4.3）：任务胶囊依赖图字段
+                # 与独立研判/review 持久化。全部带默认值，旧库可直接打开。
+                self._ensure_column(db, "directions", "assigned_role", "TEXT")
+                self._ensure_column(db, "directions", "depends_on_json", "TEXT NOT NULL DEFAULT '[]'")
+                self._ensure_column(db, "directions", "tool_ref", "TEXT")
+                self._ensure_column(db, "jobs", "job_kind", "TEXT NOT NULL DEFAULT 'execution'")
+                for statement in _DEPENDENCY_SCHEMA_V8:
+                    db.execute(statement)
+                # V8 追加列（表已由上方 DDL 创建；旧库由 CREATE IF NOT EXISTS 补表）
+                self._ensure_column(db, "analysis_records", "lineage_root", "TEXT")
                 # 方向认领版本：每次认领自增。心跳/完成回写校验该版本，
                 # 防止恢复后同认领者名称（run_id:member 跨波次复用）的
                 # 旧 Worker 回调取消或影响新认领。
@@ -1285,6 +1377,9 @@ class ControlDatabase:
         initial_status: str = "open",
         initial_terminal_reason: str | None = None,
         hypothesis_payload: dict[str, Any] | None = None,
+        assigned_role: str | None = None,
+        depends_on: list[str] | None = None,
+        tool_ref: dict[str, Any] | None = None,
     ) -> tuple[str, bool]:
         """Register a direction; optionally enqueue its intents.jsonl projection.
 
@@ -1293,6 +1388,11 @@ class ControlDatabase:
         ``record_intent_projection`` 在同一事务内写入待投影事件，交由既有
         Projector 幂等补写 intents.jsonl——SQLite 提交成功而文件写入失败时
         记录不会丢失。
+
+        V8 任务胶囊字段（方案 §4.2-4.3）：``assigned_role``（计划指派角色，
+        认领时强制同角色）、``depends_on``（父方向 ID 列表，全部 completed
+        前不可认领）、``tool_ref``（绑定的工具 ID 与结构化参数）。这些字段
+        由服务端（plan_graph 校验后）写入，模型 Payload 不参与。
         """
         if initial_status not in {"open", "released"}:
             raise ValueError(f"非法初始方向状态: {initial_status}")
@@ -1303,6 +1403,9 @@ class ControlDatabase:
         fingerprint = hashlib.sha256(identity.encode("utf-8")).hexdigest()
         direction_id = str(intent.get("id") or f"I-{uuid4().hex[:12]}")
         now = _now()
+        depends_on_json = json.dumps(
+            [str(item) for item in (depends_on or [])], ensure_ascii=False,
+        )
         with self.connect() as db:
             db.execute("BEGIN IMMEDIATE")
             existing = db.execute("SELECT id FROM directions WHERE fingerprint=?", (fingerprint,)).fetchone()
@@ -1312,12 +1415,17 @@ class ControlDatabase:
                 return str(existing["id"]), False
             db.execute(
                 """
-                INSERT INTO directions(id,fingerprint,intent_json,status,terminal_reason,created_at,updated_at)
-                VALUES (?,?,?,?,?,?,?)
+                INSERT INTO directions(
+                    id,fingerprint,intent_json,status,terminal_reason,
+                    assigned_role,depends_on_json,tool_ref,created_at,updated_at
+                ) VALUES (?,?,?,?,?,?,?,?,?,?)
                 """,
                 (
                     direction_id, fingerprint, json.dumps(intent, ensure_ascii=False),
-                    initial_status, initial_terminal_reason, now, now,
+                    initial_status, initial_terminal_reason,
+                    assigned_role, depends_on_json,
+                    json.dumps(tool_ref, ensure_ascii=False) if tool_ref else None,
+                    now, now,
                 ),
             )
             if record_intent_projection:
@@ -1440,6 +1548,10 @@ class ControlDatabase:
             ).fetchall()
             row = None
             for candidate in rows:
+                # V8 依赖门控（方案 §4.2：依赖未满足不执行）：父方向全部
+                # completed 前不认领。空 depends_on 视为无依赖。
+                if not self._direction_dependencies_ready(db, candidate):
+                    continue
                 if intent_filter is None:
                     row = candidate
                     break
@@ -1569,6 +1681,8 @@ class ControlDatabase:
             rows = [dict(row) for row in db.execute("SELECT * FROM directions ORDER BY created_at,id").fetchall()]
         for row in rows:
             row["intent"] = json.loads(row.pop("intent_json"))
+            row["depends_on"] = self._decode_depends_on(row.pop("depends_on_json", None))
+            row["tool_ref"] = self._decode_tool_ref(row.pop("tool_ref", None))
         return rows
 
     def get_direction(self, direction_id: str) -> dict[str, Any] | None:
@@ -1578,7 +1692,128 @@ class ControlDatabase:
             return None
         result = dict(row)
         result["intent"] = json.loads(result.pop("intent_json"))
+        result["depends_on"] = self._decode_depends_on(result.pop("depends_on_json", None))
+        result["tool_ref"] = self._decode_tool_ref(result.pop("tool_ref", None))
         return result
+
+    @staticmethod
+    def _decode_depends_on(raw: Any) -> list[str]:
+        if not raw:
+            return []
+        try:
+            values = json.loads(raw)
+        except (TypeError, json.JSONDecodeError):
+            return []
+        return [str(item) for item in values if str(item).strip()] if isinstance(values, list) else []
+
+    @staticmethod
+    def _decode_tool_ref(raw: Any) -> dict[str, Any] | None:
+        if not raw:
+            return None
+        try:
+            value = json.loads(raw)
+        except (TypeError, json.JSONDecodeError):
+            return None
+        return value if isinstance(value, dict) else None
+
+    # ── V8 依赖图（方案 §4.2）────────────────────────────────────────
+
+    @staticmethod
+    def _direction_dependencies(db: sqlite3.Connection, row: sqlite3.Row) -> list[str]:
+        raw = row["depends_on_json"] if "depends_on_json" in row.keys() else None
+        if not raw:
+            return []
+        try:
+            values = json.loads(raw)
+        except (TypeError, json.JSONDecodeError):
+            return []
+        return [str(item) for item in values if str(item).strip()] if isinstance(values, list) else []
+
+    @classmethod
+    def _direction_dependencies_ready(cls, db: sqlite3.Connection, row: sqlite3.Row) -> bool:
+        parents = cls._direction_dependencies(db, row)
+        if not parents:
+            return True
+        for parent in parents:
+            found = db.execute(
+                "SELECT status FROM directions WHERE id=?", (parent,),
+            ).fetchone()
+            if found is None or str(found["status"]) != "completed":
+                return False
+        return True
+
+    def direction_dependencies(self, direction_id: str) -> list[dict[str, Any]]:
+        """父方向状态清单（依赖门控的可见解释）。"""
+        direction = self.get_direction(direction_id)
+        if direction is None:
+            return []
+        parents = [str(item) for item in (direction.get("depends_on") or []) if str(item).strip()]
+        result: list[dict[str, Any]] = []
+        with self.connect() as db:
+            for parent in parents:
+                row = db.execute(
+                    "SELECT id,status,terminal_reason FROM directions WHERE id=?", (parent,),
+                ).fetchone()
+                result.append({
+                    "direction_id": parent,
+                    "status": str(row["status"]) if row else "missing",
+                    "terminal_reason": str(row["terminal_reason"]) if row else "missing_parent",
+                })
+        return result
+
+    def cascade_cancel_dependents(
+        self,
+        direction_id: str,
+        reason: str,
+        *,
+        visited: set[str] | None = None,
+    ) -> list[str]:
+        """取消把 direction_id 的命中作为前置条件的后续任务（方案 §4.2）。
+
+        只沿 depends_on 边传播（传递闭包），已处于终态的方向不再改动；
+        项目内其他无依赖分支不受影响。返回实际取消的方向 ID 列表。
+        """
+        visited = visited if visited is not None else set()
+        if direction_id in visited:
+            return []
+        visited.add(direction_id)
+        cancelled: list[str] = []
+        now = _now()
+        with self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            try:
+                rows = db.execute(
+                    "SELECT id,status,depends_on_json FROM directions WHERE status NOT IN "
+                    "('completed','rejected','exhausted','blocked','cancelled')",
+                ).fetchall()
+                direct: list[sqlite3.Row] = []
+                for row in rows:
+                    if direction_id in self._direction_dependencies(db, row):
+                        direct.append(row)
+                for row in direct:
+                    updated = db.execute(
+                        """
+                        UPDATE directions SET status='cancelled',claimed_by=NULL,
+                            lease_expires_at=NULL,terminal_reason=?,updated_at=?
+                        WHERE id=? AND status NOT IN
+                            ('completed','rejected','exhausted','blocked','cancelled')
+                        """,
+                        (reason[:1000], now, row["id"]),
+                    ).rowcount == 1
+                    if updated:
+                        cancelled.append(str(row["id"]))
+                        self._event(db, None, None, "direction_cascade_cancelled", {
+                            "direction_id": str(row["id"]),
+                            "parent_direction_id": direction_id,
+                            "reason": reason[:1000],
+                        })
+                db.execute("COMMIT")
+            except Exception:
+                db.execute("ROLLBACK")
+                raise
+        for dependent in list(cancelled):
+            cancelled.extend(self.cascade_cancel_dependents(dependent, reason, visited=visited))
+        return cancelled
 
     def dismiss_direction(self, direction_id: str, reason: str) -> dict[str, Any]:
         """Human-reject a direction and fence every not-yet-committed job bound to it."""
@@ -1822,6 +2057,404 @@ class ControlDatabase:
                     "reason": reason[:1000],
                 })
             return cancelled
+
+    # ── V8 独立研判任务/记录（方案 §7A.2-7A.3）─────────────────────────
+
+    def enqueue_analysis_job(
+        self,
+        analyzer_kind: str,
+        input_payload: dict[str, Any],
+        input_hash: str,
+        *,
+        run_id: str | None = None,
+        source_task_id: str | None = None,
+        source_tool_call_id: str | None = None,
+    ) -> tuple[dict[str, Any], bool]:
+        """幂等入队：相同 (analyzer_kind, input_hash) 的 queued/running/
+        completed 任务直接复用（防重复，不是额度，方案 §7A.3）。"""
+        now = _now()
+        with self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            try:
+                existing = db.execute(
+                    """
+                    SELECT * FROM analysis_jobs
+                    WHERE analyzer_kind=? AND input_hash=?
+                      AND status IN ('queued','running','completed')
+                    ORDER BY created_at DESC LIMIT 1
+                    """,
+                    (analyzer_kind, input_hash),
+                ).fetchone()
+                if existing is not None:
+                    db.execute("COMMIT")
+                    return dict(existing), False
+                job_id = f"AJ-{uuid4().hex[:12]}"
+                db.execute(
+                    """
+                    INSERT INTO analysis_jobs(
+                        id,analyzer_kind,status,run_id,source_task_id,
+                        source_tool_call_id,input_json,input_hash,created_at,updated_at
+                    ) VALUES (?,?,?,?,?,?,?,?,?,?)
+                    """,
+                    (
+                        job_id, analyzer_kind, "queued", run_id, source_task_id,
+                        source_tool_call_id,
+                        json.dumps(input_payload, ensure_ascii=False), input_hash,
+                        now, now,
+                    ),
+                )
+                self._event(db, run_id, None, "analysis_job_enqueued", {
+                    "analysis_job_id": job_id,
+                    "analyzer_kind": analyzer_kind,
+                    "source_task_id": source_task_id,
+                    "source_tool_call_id": source_tool_call_id,
+                })
+                db.execute("COMMIT")
+            except Exception:
+                db.execute("ROLLBACK")
+                raise
+        with self.connect() as db2:
+            row = db2.execute(
+                "SELECT * FROM analysis_jobs WHERE id=?", (job_id,),
+            ).fetchone()
+        return (dict(row) if row is not None else {"id": job_id, "status": "queued"}), True
+
+    def claim_analysis_job(
+        self,
+        worker_id: str,
+        lease_seconds: int = 120,
+    ) -> dict[str, Any] | None:
+        now = _now()
+        with self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            try:
+                rows = db.execute(
+                    """
+                    SELECT * FROM analysis_jobs
+                    WHERE attempts < max_attempts
+                      AND (status='queued'
+                           OR (status='running' AND lease_expires_at < ?))
+                    ORDER BY created_at, id LIMIT 8
+                    """,
+                    (now,),
+                ).fetchall()
+                claimed = None
+                for row in rows:
+                    if str(row["status"]) == "queued":
+                        claimed = row
+                        break
+                    if str(row["status"]) == "running" and str(row["lease_expires_at"] or "") < now:
+                        claimed = row
+                        break
+                if claimed is None:
+                    db.execute("COMMIT")
+                    return None
+                db.execute(
+                    """
+                    UPDATE analysis_jobs SET status='running',attempts=attempts+1,
+                        worker_id=?,lease_expires_at=?,last_heartbeat_at=?,updated_at=?
+                    WHERE id=?
+                    """,
+                    (worker_id, _lease_deadline(lease_seconds), now, now, claimed["id"]),
+                )
+                db.execute("COMMIT")
+            except Exception:
+                db.execute("ROLLBACK")
+                raise
+        result = dict(claimed)
+        result.update({
+            "status": "running",
+            "worker_id": worker_id,
+            "attempts": int(claimed["attempts"] or 0) + 1,
+            "input": json.loads(result.pop("input_json")),
+        })
+        return result
+
+    def heartbeat_analysis_job(
+        self,
+        job_id: str,
+        worker_id: str,
+        lease_seconds: int = 120,
+    ) -> bool:
+        with self.connect() as db:
+            result = db.execute(
+                """
+                UPDATE analysis_jobs SET lease_expires_at=?,last_heartbeat_at=?,updated_at=?
+                WHERE id=? AND worker_id=? AND status='running'
+                """,
+                (_lease_deadline(lease_seconds), _now(), _now(), job_id, worker_id),
+            )
+            return result.rowcount == 1
+
+    def finish_analysis_job(
+        self,
+        job_id: str,
+        worker_id: str,
+        *,
+        status: str,
+        record_id: str | None = None,
+        error: str | None = None,
+        retryable: bool = True,
+    ) -> str:
+        """终态写回；非本次租约持有者不得写（迟到 fencing）。"""
+        if status not in {"completed", "failed", "cancelled", "queued"}:
+            raise ValueError(f"非法分析任务终态: {status}")
+        now = _now()
+        with self.connect() as db:
+            row = db.execute(
+                "SELECT attempts,max_attempts,run_id FROM analysis_jobs WHERE id=?",
+                (job_id,),
+            ).fetchone()
+            if row is None:
+                return "missing"
+            requeue = (
+                status == "failed" and retryable
+                and int(row["attempts"] or 0) < int(row["max_attempts"] or 2)
+            )
+            final_status = "queued" if requeue else status
+            updated = db.execute(
+                """
+                UPDATE analysis_jobs SET status=?,result_record_id=?,error=?,worker_id=NULL,
+                    lease_expires_at=NULL,updated_at=?
+                WHERE id=? AND (worker_id=? OR status IN ('queued','cancelled'))
+                """,
+                (final_status, record_id, error, now, job_id, worker_id),
+            )
+            if updated.rowcount != 1:
+                return "fenced"
+            self._event(db, row["run_id"], None, "analysis_job_finished", {
+                "analysis_job_id": job_id,
+                "status": final_status,
+                "record_id": record_id,
+                "error": error,
+            })
+        return final_status
+
+    def cancel_analysis_jobs_for_run(self, run_id: str, reason: str) -> int:
+        """Run 停止后取消其排队/运行中的分析任务（旧 Run 迟到分析不激活）。"""
+        now = _now()
+        with self.connect() as db:
+            updated = db.execute(
+                """
+                UPDATE analysis_jobs SET status='cancelled',error=?,worker_id=NULL,
+                    lease_expires_at=NULL,updated_at=?
+                WHERE run_id=? AND status IN ('queued','running')
+                """,
+                (reason[:1000], now, run_id),
+            )
+            return updated.rowcount
+
+    def get_analysis_job(self, job_id: str) -> dict[str, Any] | None:
+        with self.connect() as db:
+            row = db.execute(
+                "SELECT * FROM analysis_jobs WHERE id=?", (job_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        result = dict(row)
+        result["input"] = json.loads(result.pop("input_json"))
+        return result
+
+    def list_analysis_jobs(self, run_id: str | None = None) -> list[dict[str, Any]]:
+        with self.connect() as db:
+            if run_id:
+                rows = db.execute(
+                    "SELECT * FROM analysis_jobs WHERE run_id=? ORDER BY created_at,id",
+                    (run_id,),
+                ).fetchall()
+            else:
+                rows = db.execute(
+                    "SELECT * FROM analysis_jobs ORDER BY created_at,id",
+                ).fetchall()
+        result = []
+        for row in rows:
+            item = dict(row)
+            item["input"] = json.loads(item.pop("input_json"))
+            result.append(item)
+        return result
+
+    def insert_analysis_record(
+        self,
+        analyzer_kind: str,
+        input_hash: str,
+        record: dict[str, Any],
+        *,
+        job_id: str | None = None,
+        run_id: str | None = None,
+        source_task_id: str | None = None,
+        source_tool_call_id: str | None = None,
+        model_id: str | None = None,
+        prompt_version: str | None = None,
+        schema_version: int = 1,
+        record_id: str | None = None,
+        lineage_root: str | None = None,
+    ) -> dict[str, Any]:
+        """版本化写入：同一 lineage（同源重分析链）的版本号递增，旧记录保留。"""
+        now = _now()
+        with self.connect() as db:
+            analysis_id = record_id or f"AN-{uuid4().hex[:12]}"
+            root = lineage_root or analysis_id
+            latest = db.execute(
+                """
+                SELECT MAX(version) AS version FROM analysis_records
+                WHERE analyzer_kind=? AND (input_hash=? OR lineage_root=?)
+                """,
+                (analyzer_kind, input_hash, root),
+            ).fetchone()
+            version = int(latest["version"] or 0) + 1
+            db.execute(
+                """
+                INSERT INTO analysis_records(
+                    id,analyzer_kind,version,job_id,run_id,source_task_id,
+                    source_tool_call_id,input_hash,lineage_root,model_id,
+                    prompt_version,schema_version,analysis_status,record_json,
+                    created_at
+                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                """,
+                (
+                    analysis_id, analyzer_kind, version, job_id, run_id,
+                    source_task_id, source_tool_call_id, input_hash, root,
+                    model_id, prompt_version, schema_version,
+                    str(record.get("analysis_status") or "completed"),
+                    json.dumps(record, ensure_ascii=False), now,
+                ),
+            )
+            self._event(db, run_id, None, "analysis_record_written", {
+                "analysis_id": analysis_id,
+                "analyzer_kind": analyzer_kind,
+                "version": version,
+                "analysis_status": record.get("analysis_status"),
+                "source_task_id": source_task_id,
+                "source_tool_call_id": source_tool_call_id,
+            })
+        return {
+            "analysis_id": analysis_id,
+            "analyzer_kind": analyzer_kind,
+            "version": version,
+            "input_hash": input_hash,
+            "lineage_root": root,
+        }
+
+    def list_analysis_records(
+        self,
+        analyzer_kind: str | None = None,
+        *,
+        limit: int = 50,
+        source_task_id: str | None = None,
+    ) -> list[dict[str, Any]]:
+        with self.connect() as db:
+            query = "SELECT * FROM analysis_records"
+            conditions: list[str] = []
+            params: list[Any] = []
+            if analyzer_kind:
+                conditions.append("analyzer_kind=?")
+                params.append(analyzer_kind)
+            if source_task_id:
+                conditions.append("source_task_id=?")
+                params.append(source_task_id)
+            if conditions:
+                query += " WHERE " + " AND ".join(conditions)
+            query += " ORDER BY created_at DESC, version DESC LIMIT ?"
+            params.append(max(1, min(200, int(limit))))
+            rows = db.execute(query, params).fetchall()
+        result = []
+        for row in rows:
+            item = dict(row)
+            item["record"] = json.loads(item.pop("record_json"))
+            result.append(item)
+        return result
+
+    # ── V8 review 记录（方案 §3.4）────────────────────────────────────
+
+    def insert_review_record(
+        self,
+        mode: str,
+        payload: dict[str, Any],
+        *,
+        reviewer_member: str | None = None,
+        run_id: str | None = None,
+    ) -> dict[str, Any]:
+        if mode not in {"action_review", "finding_review"}:
+            raise ValueError(f"非法 review 模式: {mode}")
+        review_id = f"RV-{uuid4().hex[:12]}"
+        now = _now()
+        with self.connect() as db:
+            db.execute(
+                """
+                INSERT INTO review_records(
+                    id,mode,reviewer_member,run_id,task_id,tool_id,params_digest,
+                    control_version,decision,recommendation,payload_json,created_at
+                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+                """,
+                (
+                    review_id, mode, reviewer_member, run_id,
+                    str(payload.get("task_id") or "") or None,
+                    str(payload.get("tool_id") or "") or None,
+                    str(payload.get("params_digest") or "") or None,
+                    payload.get("control_version"),
+                    str(payload.get("decision") or "") or None,
+                    str(payload.get("recommendation") or "") or None,
+                    json.dumps(payload, ensure_ascii=False), now,
+                ),
+            )
+        return {"review_id": review_id, "mode": mode}
+
+    def list_review_records(
+        self,
+        mode: str | None = None,
+        *,
+        task_id: str | None = None,
+        limit: int = 50,
+    ) -> list[dict[str, Any]]:
+        with self.connect() as db:
+            query = "SELECT * FROM review_records"
+            conditions: list[str] = []
+            params: list[Any] = []
+            if mode:
+                conditions.append("mode=?")
+                params.append(mode)
+            if task_id:
+                conditions.append("task_id=?")
+                params.append(task_id)
+            if conditions:
+                query += " WHERE " + " AND ".join(conditions)
+            query += " ORDER BY created_at DESC LIMIT ?"
+            params.append(max(1, min(200, int(limit))))
+            rows = db.execute(query, params).fetchall()
+        result = []
+        for row in rows:
+            item = dict(row)
+            item["payload"] = json.loads(item.pop("payload_json"))
+            result.append(item)
+        return result
+
+    def find_action_ticket(
+        self,
+        *,
+        task_id: str,
+        tool_id: str,
+        params_digest: str,
+        control_version: int,
+    ) -> dict[str, Any] | None:
+        """审批票只绑定 (task_id, tool_id, params_digest, control_version)：
+        参数改变或控制版本变化都不命中——旧票据不得授权新参数（§13.1-10）。
+        """
+        with self.connect() as db:
+            row = db.execute(
+                """
+                SELECT * FROM review_records
+                WHERE mode='action_review' AND decision='approve'
+                  AND task_id=? AND tool_id=? AND params_digest=?
+                  AND control_version=?
+                ORDER BY created_at DESC LIMIT 1
+                """,
+                (task_id, tool_id, params_digest, control_version),
+            ).fetchone()
+        if row is None:
+            return None
+        result = dict(row)
+        result["payload"] = json.loads(result.pop("payload_json"))
+        return result
 
     def job_status(self, job_id: str) -> str | None:
         with self.connect() as db:
@@ -2706,6 +3339,16 @@ class ControlDatabase:
                 WHERE status='claimed' AND claimed_by LIKE ?
                 """,
                 (reason, now, f"{run_id}:%"),
+            )
+            # V8（方案 §7A.3）：Run 停止同时取消其排队/运行中的独立研判任务，
+            # 迟到的分析结果将被租约 fencing 拒绝，不激活新扫描任务。
+            db.execute(
+                """
+                UPDATE analysis_jobs SET status='cancelled',error=?,worker_id=NULL,
+                    lease_expires_at=NULL,updated_at=?
+                WHERE run_id=? AND status IN ('queued','running')
+                """,
+                (f"run_stopped:{reason}"[:1000], now, run_id),
             )
             self._event(db, run_id, None, "run_stopping", {
                 "reason": reason, "control_version": next_version,

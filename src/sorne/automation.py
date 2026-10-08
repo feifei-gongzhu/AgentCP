@@ -28,6 +28,18 @@ from .role_registry import (
     member_can_claim,
     role_activity,
 )
+
+
+def _member_claim_filter(role: str, intent: dict[str, Any]) -> bool:
+    """认领资格谓词：能力匹配 ∧（若计划显式指派）同角色。
+
+    assigned_role 只在计划图（plan_graph）注册的方向上出现；未指派的方向
+    保持 P1 的能力匹配语义（专兵优先、operator 兜底）。
+    """
+    assigned = str((intent or {}).get("assigned_role") or "").strip()
+    if assigned and assigned != role:
+        return False
+    return member_can_claim(role, intent)
 from .schemas import GateStatus, normalize_role
 from .scheduler import Scheduler
 from .store import ProjectStore
@@ -577,9 +589,27 @@ class AutomationEngine:
             return "已暂停：等待用户批准"
         self.db.set_run_status(run_id, "running")
         summaries = self._continue_run(run_id)
+        # 独立研判批处理（方案 §7A.2）：原始结果已先行提交可见；研判异步
+        # 生成附加记录。失败只登记状态，不影响 Run 收敛；Run 停止时其
+        # 分析任务已在 stop_run 内被取消。
+        summaries.extend(self._drain_analysis(run_id))
         self._sync_run_state(run_id)
         render_dashboard(self.store)
         return "\n".join(summaries)
+
+    def _drain_analysis(self, run_id: str | None) -> list[str]:
+        try:
+            from .analysis_service import AnalysisService
+
+            def _cancelled() -> bool:
+                latest = self.db.get_run(run_id) if run_id else None
+                return latest is not None and latest.get("status") in {
+                    "stopping", "stopped", "cancelled",
+                }
+
+            return AnalysisService(self.store, self.db).drain(cancel_check=_cancelled)
+        except Exception as exc:  # noqa: BLE001 —— 研判缺失不得阻断 Run 收敛
+            return [f"独立研判批处理失败（原始结果不受影响）: {type(exc).__name__}: {exc}"]
 
     def status(
         self,
@@ -925,12 +955,15 @@ class AutomationEngine:
                     # 能力匹配认领（方案 §12-P1）：认领资格 = 执行类 kind ∧
                     # Intent 所需能力 ⊆（角色白名单 ∩ 已实现能力）。租约、
                     # claim_version、认领顺序语义与原 claim_direction 一致。
+                    # P2（方案 §4.2）：计划显式指派 assigned_role 的方向只由
+                    # 该角色认领；依赖未满足的方向在 claim_direction 内被
+                    # 门控（V8 depends_on 校验）。
                     direction_worker = f"{run_id}:{job_member_name}"
                     direction = self.db.claim_direction(
                         direction_worker,
                         lease_seconds=int(run["timeout_seconds"]) + 30,
                         intent_filter=(
-                            lambda intent, role=member.role: member_can_claim(role, intent)
+                            lambda intent, role=member.role: _member_claim_filter(role, intent)
                         ),
                     )
                     if not direction:
@@ -1875,6 +1908,40 @@ class AutomationEngine:
             reason=reason,
             claim_version=claim_version,
         )
+        self._after_direction_finished(direction_id, outcome or "released")
+
+    def _after_direction_finished(self, direction_id: str, outcome: str) -> None:
+        """方向终态后的服务端钩子（P2）：覆盖账本 + 无命中级联取消。
+
+        尽力执行：钩子失败不影响已落定的任务终态，异常记入事件。
+        """
+        try:
+            from .coverage_ledger import record_direction_coverage
+            from .plan_graph import cascade_cancel_on_no_hit, direction_has_hit
+
+            direction = self.db.get_direction(direction_id)
+            if direction is None:
+                return
+            record_direction_coverage(
+                self.store, direction,
+                has_hit=direction_has_hit(self.store, direction_id),
+            )
+            if outcome == "completed":
+                cancelled = cascade_cancel_on_no_hit(self.store, self.db, direction_id)
+                if cancelled:
+                    self.db.add_event(None, None, "direction_cascade_cancelled", {
+                        "parent": direction_id,
+                        "cancelled": cancelled,
+                        "via": "automation_finish",
+                    })
+        except Exception as exc:  # noqa: BLE001 —— 钩子失败不吞掉任务终态
+            try:
+                self.db.add_event(None, None, "direction_hook_error", {
+                    "direction_id": direction_id,
+                    "error": f"{type(exc).__name__}: {exc}"[:500],
+                })
+            except Exception:
+                pass
 
     def _commit_candidates(
         self,

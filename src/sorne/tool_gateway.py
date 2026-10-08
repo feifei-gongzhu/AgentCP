@@ -64,6 +64,9 @@ _ALLOWED_READ_PREFIXES = (
     "intents.jsonl", "negative_evidence.jsonl", "human_verdicts.jsonl",
     "technology_observations.jsonl", "target.json", "checklist.json",
     "method_pack.json", "plan_batches.jsonl", "hypotheses.jsonl",
+    # P2：计划任务图/覆盖账本/review 回流（只读）
+    "plan_graphs.jsonl", "coverage_ledger.jsonl", "review_records.jsonl",
+    "review_flags.jsonl",
 )
 _DENIED_READ_PREFIXES = (
     "control_plane.db", ".sorne-runtime/", "team_config.json",
@@ -273,12 +276,21 @@ class ToolGateway:
             output = json.dumps(result, ensure_ascii=False, default=str)
         except ToolGatewayError as exc:
             audit.status = "failed"
-            audit.error_kind = "gateway_error"
+            message = str(exc)
+            audit.error_kind = (
+                "capability_missing" if message.startswith("capability_missing")
+                else "approval_required" if message.startswith("approval_required")
+                else "gateway_error"
+            )
             output = f"tool_error: {exc}"
         except Exception as exc:  # noqa: BLE001 —— 工具错误必须回传模型而不是中断循环
             audit.status = "failed"
-            audit.error_kind = type(exc).__name__
-            output = f"tool_error: {type(exc).__name__}: {exc}"
+            message = f"{type(exc).__name__}: {exc}"
+            audit.error_kind = (
+                "capability_missing" if message.startswith("capability_missing")
+                else type(exc).__name__
+            )
+            output = f"tool_error: {message}"
         audit.duration_ms = int((time.monotonic() - started) * 1000)
         is_error = audit.status != "ok"
         if len(output) > 12_000:
@@ -330,17 +342,22 @@ class ToolGateway:
             "target_profile_query": self._tool_target_profile_query,
             "query_evidence": self._tool_query_evidence,
             "rule_query": self._tool_rule_query,
+            "analysis_query": self._tool_analysis_query,
             "tool_query": self._tool_tool_query,
             "submit_plan": self._tool_submit_plan,
             "submit_dispatch": self._tool_submit_dispatch,
             "query_execution": self._tool_query_execution,
             "finish_task": self._tool_finish_task,
+            "poc_scan": self._tool_poc_scan,
             "http_request": self._tool_http_request,
             "session_ref": self._tool_session_ref,
             "record_finding": self._tool_record_finding,
             "upsert_fact": self._tool_upsert_fact,
             "technology_observe": self._tool_technology_observe,
             "negative_evidence_submit": self._tool_negative_evidence_submit,
+            "submit_review": self._tool_submit_review,
+            "load_skill": self._tool_load_skill,
+            "skill_query": self._tool_skill_query,
             "workspace_read": self._tool_workspace_read,
             "workspace_list": self._tool_workspace_list,
             "workspace_write": self._tool_workspace_write,
@@ -631,6 +648,42 @@ class ToolGateway:
             raise ToolGatewayError(f"submit_plan 只接受 plan_batch（收到 {kind}）")
         if not role_allows_kind(self.identity.role, "plan_batch"):
             raise ToolGatewayError(f"角色 {self.identity.role} 不允许输出 plan_batch")
+        tasks = plan.get("tasks")
+        if isinstance(tasks, list) and tasks:
+            # P2 任务图路径（方案 §4.2-4.3）：depends_on 显式校验（环/缺失
+            # 父任务/跨项目/能力/授权范围）+ 方向注册（胶囊字段入 v8 列）。
+            from .plan_graph import PlanGraphError, submit_plan_graph
+            from .database import ControlDatabase
+
+            database_path = self.store.path / "control_plane.db"
+            if not database_path.exists():
+                raise ToolGatewayError("当前项目没有控制平面数据库")
+            try:
+                record = submit_plan_graph(
+                    self.store,
+                    ControlDatabase(database_path),
+                    plan,
+                    proposed_by=self.identity.member_name,
+                    run_id=self.identity.run_id,
+                )
+            except PlanGraphError as exc:
+                raise ToolGatewayError(f"计划被拒绝（未入库任何任务）: {exc}") from exc
+            return {
+                "accepted": True,
+                "plan_id": record["plan_id"],
+                "tasks": [
+                    {
+                        "task_key": item["task_key"],
+                        "direction_id": item["direction_id"],
+                        "created": item["created"],
+                    }
+                    for item in record["tasks"]
+                ],
+                "note": (
+                    "任务图已注册为方向（depends_on 已校验；依赖满足前不可认领）。"
+                    "派发由编排角色 submit_dispatch 激活，本工具不派发。"
+                ),
+            }
         payload = dict(plan)
         payload["kind"] = "plan_batch"
         payload["proposed_by"] = self.identity.member_name
@@ -698,7 +751,61 @@ class ToolGateway:
                 "control_version": run.get("control_version"),
             } if run else None,
             "jobs": list(reversed(jobs))[:limit],
+            "pending_approvals": self._pending_approvals()[:20],
+            "waiting_dependencies": [
+                {
+                    "direction_id": item.get("id"),
+                    "verb": (item.get("intent") or {}).get("verb"),
+                    "blockers": database.direction_dependencies(str(item.get("id"))),
+                }
+                for item in database.list_directions()
+                if item.get("status") in {"open", "released"}
+                and (item.get("depends_on") or [])
+                and any(
+                    blocker.get("status") != "completed"
+                    for blocker in database.direction_dependencies(str(item.get("id")))
+                )
+            ][:20],
+            "analysis_jobs": [
+                {
+                    "analysis_job_id": job.get("id"),
+                    "analyzer_kind": job.get("analyzer_kind"),
+                    "status": job.get("status"),
+                    "source_task_id": job.get("source_task_id"),
+                }
+                for job in database.list_analysis_jobs()
+                if job.get("status") in {"queued", "running", "failed"}
+            ][:20],
         }
+
+    def _pending_approvals(self) -> list[dict[str, Any]]:
+        """待审批动作（reviewer action_review 的输入来源；服务端组装）。"""
+        rows = [
+            item for item in self.store.read_jsonl("pending_approvals.jsonl")
+            if not item.get("resolved_at")
+        ]
+        from .database import ControlDatabase
+
+        database_path = self.store.path / "control_plane.db"
+        database = (
+            ControlDatabase(database_path)
+            if database_path.exists() else None
+        )
+        result: list[dict[str, Any]] = []
+        for row in rows[-40:]:
+            ticket = (
+                database.find_action_ticket(
+                    task_id=str(row.get("task_id") or ""),
+                    tool_id=str(row.get("tool_id") or ""),
+                    params_digest=str(row.get("params_digest") or ""),
+                    control_version=int(row.get("control_version") or 0),
+                )
+                if database is not None else None
+            )
+            entry = dict(row)
+            entry["approved"] = ticket is not None
+            result.append(entry)
+        return result
 
     def _tool_finish_task(self, arguments: dict[str, Any]) -> dict[str, Any]:
         from .database import ControlDatabase
@@ -749,7 +856,45 @@ class ToolGateway:
                 "任务终态声明未生效：方向可能已不在原认领（当前状态 "
                 f"{(direction or {}).get('status')}）；旧认领结果不得终结新认领。"
             )
+        self._after_direction_finished(database, task_id, outcome)
         return {"task_id": task_id, "outcome": outcome, "reason": reason}
+
+    def _after_direction_finished(
+        self,
+        database,
+        task_id: str,
+        outcome: str,
+    ) -> None:
+        """方向终态后的服务端钩子（覆盖账本 + 无命中级联取消）。
+
+        尽力执行：钩子失败不改变任务终态本身，异常记录到事件里。
+        """
+        try:
+            from .coverage_ledger import record_direction_coverage
+            from .plan_graph import cascade_cancel_on_no_hit, direction_has_hit
+
+            direction = database.get_direction(task_id)
+            if direction is None:
+                return
+            record_direction_coverage(
+                self.store, direction, has_hit=direction_has_hit(self.store, task_id),
+            )
+            if outcome == "completed":
+                cancelled = cascade_cancel_on_no_hit(self.store, database, task_id)
+                if cancelled:
+                    database.add_event(self.identity.run_id, None, "direction_cascade_cancelled", {
+                        "parent": task_id,
+                        "cancelled": cancelled,
+                        "via": "finish_task",
+                    })
+        except Exception as exc:  # noqa: BLE001 —— 钩子失败不吞掉任务终态
+            try:
+                database.add_event(self.identity.run_id, None, "direction_hook_error", {
+                    "direction_id": task_id,
+                    "error": f"{type(exc).__name__}: {exc}"[:500],
+                })
+            except Exception:
+                pass
 
     # ── 受控验证 ─────────────────────────────────────────────────────
     def _tool_session_ref(self, arguments: dict[str, Any]) -> dict[str, Any]:
@@ -1144,6 +1289,17 @@ class ToolGateway:
         destination.write_text(content, encoding="utf-8")
         return {"written": posix, "bytes": len(content.encode("utf-8"))}
 
+    def _tool_helper_recipe(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        # 配方注册表当前为空（首批引擎适配在 P2/P3 落地后登记固定 argv 配方）。
+        # 返回真实空态而不是伪造可用配方；无配方时该能力不出现在模型可见列表。
+        return {
+            "recipes": [],
+            "reason": (
+                "当前未注册任何辅助命令配方；任意命令不会默认开放。"
+                "配方将以固定 argv 形式登记并按角色白名单放行。"
+            ),
+        }
+
     def _tool_compat_bash(self, arguments: dict[str, Any]) -> dict[str, Any]:
         command = str(arguments.get("command") or "").strip()
         if not command:
@@ -1155,14 +1311,223 @@ class ToolGateway:
         output, is_error = self._compat_executor(command)
         return {"output": output, "is_error": is_error}
 
-    def _tool_helper_recipe(self, arguments: dict[str, Any]) -> dict[str, Any]:
-        # 配方注册表当前为空（首批引擎适配在 P2/P3 落地后登记固定 argv 配方）。
-        # 返回真实空态而不是伪造可用配方；无配方时该能力不出现在模型可见列表。
+    # ── 采集扫描：nuclei 组件验证（§6.6-2，P2）────────────────────────
+    def _tool_poc_scan(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        targets = [
+            str(item).strip() for item in (arguments.get("targets") or [])
+            if str(item).strip()
+        ]
+        if not targets:
+            raise ToolGatewayError("poc_scan 需要至少一个目标（targets: string[]）")
+        for target in targets:
+            self._check_target_authorization(target)
+        template_ids = [
+            str(item).strip() for item in (arguments.get("template_ids") or [])
+            if str(item).strip()
+        ]
+        ticket = self._enforce_action_approval("poc_scan", arguments)
+        from .engine_adapters import nuclei_adapter
+
+        result = nuclei_adapter.run_scan(
+            self.store,
+            {"targets": targets, "template_ids": template_ids},
+            cancel_check=self.cancel_check,
+        )
+        # 请求/响应证据已由适配层落盘（evidence/poc/，sha256 边车）。
+        # 独立研判异步入队：不阻塞本结果返回；失败也只登记缺口（§7A.2）。
+        analysis_note = {"skipped": True, "reason": "未入队"}
+        try:
+            from .analysis_service import AnalysisService
+
+            analysis_note = AnalysisService(self.store).enqueue_from_tool_result(
+                analyzer_kind="poc",
+                tool_id="poc_scan",
+                tool_call_id=f"{self.identity.task_id or self.identity.member_name}:poc_scan",
+                result=result,
+                run_id=self.identity.run_id,
+                source_task_id=self.identity.task_id,
+            )
+        except Exception as exc:  # noqa: BLE001 —— 原始结果优先；研判缺失显式可见
+            analysis_note = {
+                "skipped": True,
+                "reason": f"研判入队失败（原始结果不受影响）: {type(exc).__name__}: {exc}",
+            }
+        result["analysis_enqueued"] = analysis_note
+        if ticket is not None:
+            result["approved_via_ticket"] = ticket["id"]
+        return result
+
+    def _enforce_action_approval(
+        self,
+        tool_id: str,
+        arguments: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        """高操作安全风险任务的动作审批（§3.4）：绑定方向声明
+        requires_human_confirmation 时，需 reviewer 的 action_review 票据
+        （approve）且绑定字段完全一致才放行。其余方向沿用既有门禁语义。"""
+        task_id = self.identity.task_id
+        if not task_id:
+            return None
+        from .database import ControlDatabase
+
+        database_path = self.store.path / "control_plane.db"
+        if not database_path.exists():
+            return None
+        database = ControlDatabase(database_path)
+        direction = database.get_direction(task_id)
+        intent = (direction or {}).get("intent") or {}
+        if not bool(intent.get("requires_human_confirmation")):
+            return None
+        params_digest = _digest({"tool_id": tool_id, **arguments})
+        if self.identity.control_version is None:
+            raise ToolGatewayError(
+                "approval_required: 审批票必须绑定控制版本；本次会话缺少运行绑定，"
+                "请在自动化运行内发起审批。"
+            )
+        ticket = database.find_action_ticket(
+            task_id=task_id,
+            tool_id=tool_id,
+            params_digest=params_digest,
+            control_version=int(self.identity.control_version),
+        )
+        if ticket is None:
+            self.store.append_jsonl("pending_approvals.jsonl", {
+                "task_id": task_id,
+                "tool_id": tool_id,
+                "params_digest": params_digest,
+                "control_version": int(self.identity.control_version),
+                "requested_by": self.identity.member_name,
+                "created_at": now_iso(),
+            })
+            raise ToolGatewayError(
+                "approval_required: 本任务声明了需要人工确认的操作安全风险；"
+                "缺少匹配的 action_review approve 票据"
+                f"（task_id={task_id}, tool_id={tool_id}, "
+                f"params_digest={params_digest[:16]}…, "
+                f"control_version={self.identity.control_version}）。"
+                "票据由 reviewer 经 submit_review(action_review) 签发；"
+                "参数或控制版本变化后旧票据失效。"
+            )
+        return ticket
+
+    # ── review 两模式（§3.4）──────────────────────────────────────────
+    def _tool_submit_review(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        mode = str(arguments.get("mode") or "").strip()
+        payload = arguments.get("payload")
+        if mode not in {"action_review", "finding_review"}:
+            raise ToolGatewayError("submit_review 的 mode 只能是 action_review 或 finding_review")
+        if not isinstance(payload, dict):
+            raise ToolGatewayError("submit_review 需要 payload 对象")
+        if not role_allows_kind(self.identity.role, "review_record"):
+            raise ToolGatewayError(
+                f"角色 {self.identity.role} 不允许输出 review_record；"
+                "动作审批与发现复核只归 reviewer。"
+            )
+        payload = dict(payload)
+        payload["kind"] = "review_record"
+        payload["mode"] = mode
+        payload["proposed_by"] = self.identity.member_name
+        if mode == "action_review":
+            # 票据绑定字段全部服务端注入/校验（§3.6）：模型值丢弃。
+            task_id = str(self.identity.task_id or payload.get("task_id") or "").strip()
+            if not task_id:
+                raise ToolGatewayError(
+                    "action_review 需要绑定任务：请在本任务会话内提交，或提供 task_id"
+                )
+            tool_id = str(payload.get("tool_id") or "").strip()
+            params_digest = str(payload.get("params_digest") or "").strip()
+            if not tool_id or not params_digest:
+                raise ToolGatewayError(
+                    "action_review 缺少 tool_id/params_digest（来自待审批清单；"
+                    "可用 query_execution 查看 pending_approvals）"
+                )
+            if self.identity.control_version is None:
+                raise ToolGatewayError(
+                    "审批票必须绑定控制版本：请自动化运行内执行审批"
+                )
+            payload["task_id"] = task_id
+            payload["tool_id"] = tool_id
+            payload["params_digest"] = params_digest
+            payload["control_version"] = int(self.identity.control_version)
+            payload["run_id"] = self.identity.run_id
+        else:
+            payload["run_id"] = self.identity.run_id
+        # 入链前校验：非法载荷在工具边界拒绝，不产生投毒的重试事件。
+        from .worker import validate_review_payload
+
+        validate_review_payload(self.store, mode, payload)
+        # 服务端绑定标记：apply 分支据此区分网关提交（票据字段可信）与
+        # 模型直接输出（拒绝签发票据）。
+        payload["server_bound"] = True
+        message = self._submit_through_commit_chain(payload)
         return {
-            "recipes": [],
-            "reason": (
-                "当前未注册任何辅助命令配方；任意命令不会默认开放。"
-                "配方将以固定 argv 形式登记并按角色白名单放行。"
+            "accepted": True,
+            "message": message,
+            "note": (
+                "action_review 票据仅绑定 (task_id, tool_id, params_digest, control_version)；"
+                "参数或控制版本变化后不得复用。finding_review 不改变 Guardian 判定。"
+            ) if mode == "action_review" else
+            "finding_review 只是证据充分性建议；不删除原始命中、不确认漏洞。",
+        }
+
+    # ── 知识：技能加载与路由（§5.3）───────────────────────────────────
+    def _tool_load_skill(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        from .skill_registry import get_skill, skill_status
+
+        skill_id = str(arguments.get("skill_id") or "").strip()
+        card = get_skill(skill_id)
+        if card is None:
+            raise ToolGatewayError(
+                f"技能卡 {skill_id} 不存在；未覆盖特征应记录为方法缺口，不伪造技能"
+            )
+        if self.identity.role not in card.roles:
+            raise ToolGatewayError(
+                f"技能卡 {card.id} 的角色白名单不含 {self.identity.role}"
+                f"（允许: {', '.join(card.roles)}）"
+            )
+        return {
+            **skill_status(card),
+            "body": card.body,
+            "note": "版本与内容哈希已固定返回；任务快照中的哈希可用于事后核对。",
+        }
+
+    def _tool_skill_query(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        from .skill_router import route_skills
+
+        features = [str(item) for item in (arguments.get("features") or []) if str(item).strip()]
+        if not features:
+            raise ToolGatewayError("skill_query 需要 features 数组")
+        return route_skills(features, role=self.identity.role)
+
+    # ── 独立研判查询（§7A.5）──────────────────────────────────────────
+    def _tool_analysis_query(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        from .analysis_registry import analyzer_status
+        from .analysis_service import AnalysisService
+
+        analyzer_kind = str(arguments.get("analyzer_kind") or "").strip() or None
+        limit = _bound_int(arguments.get("limit"), default=20, minimum=1, maximum=100)
+        service = AnalysisService(self.store)
+        rows = service.query_records(analyzer_kind=analyzer_kind, limit=limit)
+        return {
+            "analyzers": analyzer_status(),
+            "records": [
+                {
+                    "analysis_id": row.get("id"),
+                    "analyzer_kind": row.get("analyzer_kind"),
+                    "version": row.get("version"),
+                    "analysis_status": row.get("analysis_status"),
+                    "model_id": row.get("model_id"),
+                    "prompt_version": row.get("prompt_version"),
+                    "input_hash": str(row.get("input_hash"))[:16],
+                    "source_task_id": row.get("source_task_id"),
+                    "created_at": row.get("created_at"),
+                    "record": row.get("record"),
+                }
+                for row in rows
+            ],
+            "note": (
+                "以上为独立 AI 研判层的模型分析（model_analysis=true），"
+                "不是原始事实；候选判断与 confirmed 漏洞状态严格分开。"
             ),
         }
 

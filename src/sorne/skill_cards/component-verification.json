@@ -1,0 +1,17 @@
+{
+  "id": "component-verification",
+  "version": "1.0.0",
+  "title": "组件验证总卡（指纹→短卡→POC 候选链）",
+  "description": "组件/框架/中间件指纹明确后的验证入口：选择对应短卡，用受控模板扫描与请求对照区分“引擎声称命中”与“证据实际支持”。",
+  "roles": ["poc", "operator", "planner", "reviewer"],
+  "required_capabilities": ["poc_scan", "http_request", "query_results", "query_evidence", "record_finding", "negative_evidence_submit", "load_skill"],
+  "trigger_features": ["组件指纹", "框架", "中间件", "cms", "已知漏洞", "cve", "版本号", "指纹", "shiro", "fastjson", "spring", "log4j", "struts", "thinkphp"],
+  "exclusion_features": ["无任何技术栈线索的纯静态目标"],
+  "preconditions": ["至少一条主动或被动指纹证据（响应头/Cookie/错误页/行为特征）", "指纹证据已登记（technology_observations 或事实）"],
+  "evidence_maturity": "observed",
+  "priority": 50,
+  "references": ["research-pipeline", "web-methods"],
+  "source": "Sorne 内置（组件验证方法论）",
+  "license": "Sorne 仓库内置",
+  "body": "## 何时使用\n\n技术观察/画像/事实中出现明确的组件或框架指纹（如 Shiro rememberMe、FastJSON 报错、Spring actuator、Log4j 特征）。先路由到对应短卡（shiro/fastjson/spring/log4j-verification）；无对应短卡的组件按本卡通用流程处理，并记录方法缺口。\n\n## 先看什么证据\n\n- technology_observations：指纹内容、版本线索、证据类型（头/Cookie/页面/行为）与置信度。\n- 主动与被动指纹冲突时：保留两方证据，先补充验证，不强行选一个（方案 §5.3）。\n- query_evidence：指纹证据的原始文件，确认可复核。\n\n## 调用哪个已注册能力\n\npoc_scan（限定模板的组件验证引擎扫描；目标必须逐个来自授权范围）；http_request 做命中后的对照请求；record_finding 提交候选；load_skill 加载短卡全文。\n\n## 怎样解读结果\n\n指纹→短技能→POC 是候选选择链，不是“指纹→漏洞成立”：\n- 引擎命中只是候选：必须区分引擎声称命中与证据实际支持（命中响应是否真的体现漏洞语义、版本是否在受影响范围、环境特征是否匹配）。\n- 请求/响应证据以工具落盘文件为准（evidence/poc/...），摘要仅供判读。\n- 命中但无有效证据（如仅状态码差异、目标明显是统一错误页）→ 不进入确认漏洞池，作为候选提交并注明证据不足。\n- 独立研判层（POC 分析器）会异步生成附加分析记录：解释、疑似误报、补证据项——它是输入，不是结论。\n\n## 怎样排除\n\n- 版本不在受影响范围且有版本证据 → 排除并登记负向证据。\n- 命中响应经对照证明为统一错误页/登录跳转/catch-all → 疑似误报，保留记录。\n- 组件指纹后续被证伪（被动证据过期）→ 更新技术观察。\n\n## 怎样交付\n\nfact 候选（classification 最高 vulnerability 候选，一律过 Guardian）：模板/方法、命中 URL、匹配条件、请求/响应证据路径、版本判断依据、业务影响。排除结论用 negative_evidence_submit（附 evidence_type 与证据文件）。\n\n## 何时停止\n\n该组件的全部已选模板逐个有命中判定或排除；无命中时记录覆盖（方法×目标）后停止本组件分支；或触发停止条件。不做无条件全模板扫描。"
+}

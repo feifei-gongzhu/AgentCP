@@ -1,0 +1,17 @@
+{
+  "id": "shiro-verification",
+  "version": "1.0.0",
+  "title": "Apache Shiro 组件验证短卡",
+  "description": "rememberMe 会话特征识别与 Shiro 反序列化（默认密钥）/Padding Oracle 路线的受控验证与排除。",
+  "roles": ["poc", "operator", "planner", "reviewer"],
+  "required_capabilities": ["poc_scan", "http_request", "query_results", "query_evidence", "record_finding", "negative_evidence_submit"],
+  "trigger_features": ["shiro", "rememberme", "remember-me", "rememberMe=deleteMe", "apache shiro"],
+  "exclusion_features": ["响应无 rememberMe 相关 Cookie 且无框架证据"],
+  "preconditions": ["目标响应出现 rememberMe Cookie 或 deleteMe 标记（指纹证据已登记）"],
+  "evidence_maturity": "observed",
+  "priority": 60,
+  "references": ["component-verification"],
+  "source": "Sorne 内置（公开 Apache Shiro 安全通告与验证方法论整理）",
+  "license": "Sorne 仓库内置",
+  "body": "## 何时使用\n\n响应 Set-Cookie 出现 rememberMe=deleteMe（登出/无效会话标记）或画像确认 Apache Shiro。验证目标是：①默认密钥反序列化路线（Shiro-550 类）是否成立；②已知密钥被修改（Shiro-721 类 padding oracle 需要有效 rememberMe 值，成本高，默认只做存在性判断）。\n\n## 先看什么证据\n\n- 原始响应（头与体）中的 Set-Cookie: rememberMe=deleteMe——这是指纹证据本身。\n- technology_observations 中的 Shiro 记录与版本线索。\n- 是否已有登录身份：rememberMe 值仅在成功“记住我”登录后签发。\n\n## 调用哪个已注册能力\n\npoc_scan 限定 Shiro 相关模板（template_ids 逐个给出，不做全模板扫描）；http_request 复核命中响应与统一错误页对照。\n\n## 怎样解读结果\n\n- 引擎命中反序列化类模板：候选成立与否取决于命中响应是否体现 payload 语义（如可控回显/延迟差异），而不是模板标签本身。\n- 默认密钥判断：命中且响应差异可归因 → 候选；命中但目标实为统一错误页 → 疑似误报。\n- Shiro-721：没有有效 rememberMe 值时无法验证，登记 blocked（缺少必要身份），不算排除。\n\n## 怎样排除\n\n- 无 rememberMe Cookie 且其他指纹无佐证 → 指纹不成立。\n- 命中响应与随机路径基线一致（catch-all）→ 疑似误报记录。\n- 版本证据显示已修复/密钥已更换且有依据 → 排除。\n\n## 怎样交付\n\nfact 候选：命中 URL、模板 ID、响应差异、证据路径（evidence/poc/...）、密钥判断依据、业务影响。排除结论附证据文件与理由。\n\n## 何时停止\n\n已选 Shiro 模板逐个有判定或排除；未持有有效 rememberMe 时 Shiro-721 路线停止并登记身份缺口。"
+}

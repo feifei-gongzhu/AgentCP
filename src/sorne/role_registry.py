@@ -185,7 +185,7 @@ _ROLE_RECORDS: tuple[RoleSpec, ...] = (
         origin="seven_role",
         context_profile="reviewer",
         prompt_file="prompts/reviewer.md",
-        worker_kinds=("decision", "fact", "none"),
+        worker_kinds=("decision", "review_record", "fact", "none"),
         capabilities=frozenset({
             "project_summary", "list_facts", "query_results", "query_http",
             "query_evidence", "query_execution", "rule_query", "analysis_query",

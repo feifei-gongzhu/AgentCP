@@ -1,0 +1,17 @@
+{
+  "id": "web-client-side",
+  "version": "1.0.0",
+  "title": "客户端验证（DOM/Origin/前端信息）",
+  "description": "DOM 交互面、消息通道（postMessage/CORS）、前端代码中的敏感信息与推断 API 的客户端侧验证方法。",
+  "roles": ["operator", "recon", "planner", "reviewer"],
+  "required_capabilities": ["http_request", "query_results", "query_http", "workspace_read", "record_finding", "negative_evidence_submit"],
+  "trigger_features": ["javascript", "js 文件", "前端", "postmessage", "cors", "access-control-allow-origin", "dom xss", "source map", "sourcemap", "webpack", "前端路由", "spa", "localstorage"],
+  "exclusion_features": ["服务端渲染无客户端代码"],
+  "preconditions": ["已采集前端入口与 JS 资源清单"],
+  "evidence_maturity": "observed",
+  "priority": 35,
+  "references": ["web-methods"],
+  "source": "Sorne 内置（客户端验证方法论）",
+  "license": "Sorne 仓库内置",
+  "body": "## 何时使用\n\n目标包含富客户端逻辑：SPA、消息监听、宽松 CORS、前端硬编码的端点/密钥线索、source map 暴露。注意：客户端能力的完整采集（js_scan 引擎）在 P3 接入；本卡方法在既有采集与 http_request 上即可执行。\n\n## 先看什么证据\n\n- query_http / query_results：JS 资源 URL、HTML 中的脚本引用。\n- workspace_read（.sorne-work 下已保存的片段）或 http_request 拉取的脚本内容。\n- 响应头：CORS 头组合、CSP 缺失情况。\n\n## 调用哪个已注册能力\n\nhttp_request 获取脚本/验证 Origin 反射；workspace_read 读取已落盘片段；record_finding 提交候选；negative_evidence_submit 登记排除。\n\n## 怎样解读结果\n\n- postMessage：监听器是否校验 event.origin；有接收者把消息内容写入 sink 的链路才算候选。\n- CORS：反射任意 Origin 且支持凭据 → 跨源读取链路候选；仅有头不代表可利用，需展示可读取的敏感响应。\n- DOM XSS：source→sink 链路要以实际可控输入验证，不以“存在 innerHTML”定论。\n- 前端信息：硬编码端点用于扩充 API 清单（衔接 web-api）；硬编码凭据必须先判别真伪（测试值/占位符），不凭变量名定论。\n- source map：暴露的源码用于方法输入，单独存在记为攻击面线索。\n\n## 怎样排除\n\n- Origin 校验严格（白名单）→ 排除消息通道。\n- 变量为占位值或公开密钥类（如可公开的前端 key）→ 不作为凭据泄漏。\n- DOM sink 输入不可控 → 排除并记录。\n\n## 怎样交付\n\nfact 候选附代码位置（文件+片段）与实际请求证据；推断出的 API 移交 web-api 线验证。区分“观察到”与“推断”\n\n## 何时停止\n\n入口脚本的主要 source/sink 与消息通道逐一有结论或排除；或触发停止条件。"
+}

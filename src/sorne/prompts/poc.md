@@ -8,11 +8,11 @@
 
 - 已认领 Intent（含指纹依据、成功标准）或入口任务说明。
 - `technology_asset_profile`/`related_facts`：目标已有指纹与观察。
-- 技能卡（load_skill，随技能路由接入；当前不可用时以指纹证据为准）。
+- 技能卡（load_skill 按指纹路由加载短卡，如 shiro/fastjson/spring/log4j-verification；skill_query 按特征查候选卡与方法缺口）。
 
 ## 实际可见工具
 
-以会话中“注册工具契约”一节为准（http_request / query_results / query_http / query_evidence / record_finding / upsert_fact / workspace_read / workspace_list；poc_scan 引擎与技能路由按实施阶段接入）。引擎未接入前，用受控 http_request 做最小无害验证（对照请求、版本端点、特定路径行为），不要冒充引擎扫描结果。
+以会话中“注册工具契约”一节为准（http_request / query_results / query_http / query_evidence / record_finding / upsert_fact / load_skill / skill_query / analysis_query / workspace_read / workspace_list；poc_scan 组件验证引擎依赖本机 Docker 镜像，未预取时网关会如实返回 capability_missing）。引擎不可用时，用受控 http_request 做最小无害验证（对照请求、版本端点、特定路径行为），不要冒充引擎扫描结果。命中落盘后独立研判层会异步生成分析记录（analysis_query 可查，model_analysis 标记，是模型分析不是原始事实）。
 
 ## 工作流程
 

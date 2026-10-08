@@ -1,0 +1,17 @@
+{
+  "id": "web-auth-session",
+  "version": "1.0.0",
+  "title": "认证与会话验证",
+  "description": "登录流程、会话令牌、口令重置、权限边界与认证绕过的受控验证方法。",
+  "roles": ["operator", "planner", "reviewer"],
+  "required_capabilities": ["http_request", "session_ref", "query_results", "record_finding", "negative_evidence_submit"],
+  "trigger_features": ["登录", "login", "session", "会话", "jwt", "token", "cookie", "remember-me", "rememberme", "oauth", "sso", "单点登录", "密码重置", "口令重置", "验证码"],
+  "exclusion_features": ["无认证入口的纯静态站"],
+  "preconditions": ["已定位登录/认证入口", "会话凭据以引用（session_ref）提供，不使用明文"],
+  "evidence_maturity": "observed",
+  "priority": 40,
+  "references": ["web-methods"],
+  "source": "Sorne 内置（认证与会话验证方法论）",
+  "license": "Sorne 仓库内置",
+  "body": "## 何时使用\n\n目标存在登录、令牌签发、会话保持或身份切换点。典型对象：登录表单、JWT/自包含令牌、会话 Cookie 属性、口令重置链路、OAuth/SSO 跳转。\n\n## 先看什么证据\n\n- query_http：登录/登出/重置端点的既有响应；Set-Cookie 属性。\n- 目标画像：功能分类中的认证入口。\n- session_ref 清单：当前可用身份（匿名/低权/高权），认证上下文不同的请求不合并对照。\n- 事实与负向证据：已尝试的凭据组合与结论。\n\n## 调用哪个已注册能力\n\nhttp_request（用 session_ref 引用身份，逐请求对照）；record_finding 提交候选；negative_evidence_submit 登记已排除路径；list_facts 查已有结论。\n\n## 怎样解读结果\n\n- 令牌类：签名算法、有效期、声明是否可影响授权判定；篡改声明后响应差异必须可归因于声明变化。\n- 会话类：Cookie 的 Secure/HttpOnly/SameSite 缺失是攻击面线索，不是漏洞成立；需要展示可利用路径。\n- 重置链路：令牌可预测、跨账号生效、重置后旧会话是否失效，均以请求对照证明。\n- 绕过类：必须给出“未认证 vs 认证”两侧的响应差异；仅状态码 200 不足以成立。\n\n## 怎样排除\n\n- 登录失败响应完全同质（同状态码同体）→ 无差异线索，登记排除。\n- 目标统一跳转登录页 → 用基线路径区分鉴权拦截与 catch-all。\n- 凭据组合已被有效负向证据覆盖且环境未变 → 不重试。\n\n## 怎样交付\n\nfact 候选（classification 最高到 vulnerability 候选，交 Guardian 复核）：标题、验证谓词（我做了 X，观察到 Y）、两侧行为差异、证据路径、业务影响。凭据本身不写入事实——只写 secret 引用名。\n\n## 何时停止\n\n认证入口的各验证面（令牌、会话、重置、绕过）逐一有结果或排除；或达到任务停止条件。不要在单一凭据组合上无限重试。"
+}

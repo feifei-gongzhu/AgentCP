@@ -65,9 +65,11 @@ def test_model_visible_tools_exclude_bash_for_new_roles(project: ProjectStore) -
         definition["function"]["name"]
         for definition in _gateway(project, "planner").tool_definitions()
     }
+    # P2 起 planner 另有知识/研判查询能力（技能路由与独立研判已实现）。
     assert planner_names == {
         "project_summary", "list_facts", "query_results", "query_http",
         "target_profile_query", "tool_query", "submit_plan",
+        "load_skill", "skill_query", "analysis_query",
     }
     # 旧 executor 保留迁移期 Bash 名称。
     legacy_names = {
@@ -77,18 +79,30 @@ def test_model_visible_tools_exclude_bash_for_new_roles(project: ProjectStore) -
     assert "Bash" in legacy_names
 
 
-def test_capability_missing_for_unimplemented_engines(project: ProjectStore) -> None:
+def test_capability_missing_for_unimplemented_engines(
+    project: ProjectStore, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # P3 引擎保持 capability_missing + 目标阶段说明。
     cases = [
         ("crack", "pwd_crack", {"targets": ["https://fixture.invalid"]}, "P3"),
-        ("poc", "poc_scan", {"targets": ["https://fixture.invalid"]}, "P2"),
         ("recon", "dir_scan", {"targets": ["https://fixture.invalid"]}, "P3"),
-        ("reviewer", "submit_review", {"mode": "finding_review", "payload": {}}, "P2"),
     ]
     for role, capability, arguments, phase in cases:
         output, is_error = _gateway(project, role).dispatch(capability, arguments)
         assert is_error
         assert "capability_missing" in output, output
         assert phase in output, f"{capability} 缺口说明应包含目标阶段 {phase}"
+    # P2 起 poc_scan 适配层已实现：运行环境（Docker 镜像）缺失时返回
+    # capability_missing 并说明真实缺口（不再是“计划于 P2 提供”）。
+    monkeypatch.setattr(
+        "src.sorne.tool_registry.ENGINE_AVAILABILITY",
+        {"poc_scan": lambda: (False, "测试：镜像未预取")},
+    )
+    output, is_error = _gateway(project, "poc").dispatch(
+        "poc_scan", {"targets": ["https://fixture.invalid"]},
+    )
+    assert is_error
+    assert "capability_missing" in output and "适配层已实现" in output
 
 
 def test_operator_cannot_dispatch_and_specialists_stay_in_lane(project: ProjectStore) -> None:

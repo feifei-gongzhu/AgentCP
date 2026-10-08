@@ -20,7 +20,41 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Callable
+
+
+# 引擎类能力的运行时可用性提供者（能力 ID → 返回 (available, reason)）。
+# 适配层存在（implemented=True）不等于运行可用：Docker/镜像缺失时网关
+# 返回 capability_missing 并说明缺口，不用假结果代替（方案 §6.2/§12-P2）。
+ENGINE_AVAILABILITY: dict[str, Callable[[], tuple[bool, str]]] = {}
+
+# 引擎能力 → 适配层模块（惰性导入；导入即注册 ENGINE_AVAILABILITY 提供者）。
+_ENGINE_ADAPTER_MODULES = {"poc_scan": ".engine_adapters"}
+
+
+def register_engine_availability(
+    capability_id: str,
+    provider: Callable[[], tuple[bool, str]],
+) -> None:
+    ENGINE_AVAILABILITY[capability_id] = provider
+
+
+def _engine_availability(capability_id: str) -> tuple[bool, str] | None:
+    provider = ENGINE_AVAILABILITY.get(capability_id)
+    if provider is None and capability_id in _ENGINE_ADAPTER_MODULES:
+        import importlib
+
+        module_name = _ENGINE_ADAPTER_MODULES[capability_id]
+        package = __name__.rsplit(".", 1)[0]
+        importlib.import_module(module_name, package=package)
+        provider = ENGINE_AVAILABILITY.get(capability_id)
+    if provider is None:
+        return None
+    try:
+        available, reason = provider()
+        return bool(available), str(reason or "")
+    except Exception as exc:  # noqa: BLE001 —— 可用性探测失败按不可用处理
+        return False, f"availability check failed: {type(exc).__name__}: {exc}"
 
 
 @dataclass(frozen=True)
@@ -42,8 +76,26 @@ class ToolSpec:
         return self.function_name or self.id
 
     @property
+    def engine_gap(self) -> str | None:
+        """引擎能力不可用时的缺口说明；非引擎能力返回 None。"""
+        if not self.implemented:
+            return None
+        availability = _engine_availability(self.id)
+        if availability is None or availability[0]:
+            return None
+        return availability[1]
+
+    @property
+    def available(self) -> bool:
+        """实现存在且（对引擎能力）运行环境当前可用。"""
+        if not self.implemented:
+            return False
+        availability = _engine_availability(self.id)
+        return availability is None or availability[0]
+
+    @property
     def visible_to_model(self) -> bool:
-        return self.implemented and self.function_name is not None
+        return self.available and self.function_name is not None
 
 
 def _object_schema(
@@ -190,14 +242,17 @@ TOOL_CATALOG: dict[str, ToolSpec] = {
     "analysis_query": ToolSpec(
         id="analysis_query",
         category="project_read",
-        description="查询独立 AI 研判层的分析记录（POC/目录/JS）。",
+        description=(
+            "查询独立 AI 研判层的分析记录（POC/目录/JS）。返回记录带"
+            "“模型分析”标记与版本/输入哈希，不伪装成原始事实。"
+        ),
         parameters=_object_schema({
             "analyzer_kind": {"type": "string", "enum": ["poc", "directory", "js"]},
             "limit": {"type": "integer"},
         }),
         side_effects="none",
         available_from_phase="P2",
-        implemented=False,
+        implemented=True,
     ),
     # ── 计划协调（P1）─────────────────────────────────────────────────
     "submit_plan": ToolSpec(
@@ -269,14 +324,19 @@ TOOL_CATALOG: dict[str, ToolSpec] = {
     "poc_scan": ToolSpec(
         id="poc_scan",
         category="scan_collect",
-        description="组件验证引擎扫描（限定模板），targets: string[]。",
+        description=(
+            "组件验证引擎扫描（nuclei 适配，限定模板），targets: string[]。"
+            "命中只构成候选：区分引擎声称命中与证据实际支持由独立研判与复核完成。"
+        ),
         parameters=_object_schema(
             {"targets": {"type": "array", "items": {"type": "string"}}, "template_ids": {"type": "array", "items": {"type": "string"}}},
             required=["targets"],
         ),
         side_effects="network_readonly",
         available_from_phase="P2",
-        implemented=False,
+        # 适配层已实现（engine_adapters/nuclei_adapter.py）；运行可用性
+        # （Docker 守护进程 + 镜像）由 ENGINE_AVAILABILITY 动态判定。
+        implemented=True,
     ),
     "url_scan": ToolSpec(
         id="url_scan",
@@ -447,7 +507,12 @@ TOOL_CATALOG: dict[str, ToolSpec] = {
     "submit_review": ToolSpec(
         id="submit_review",
         category="business_commit",
-        description="提交结构化 review 记录（action_review / finding_review 两模式）。",
+        description=(
+            "提交结构化 review 记录（action_review / finding_review 两模式）。"
+            "action_review 输出 approve/deny/escalate 并生成绑定"
+            "(task_id, tool_id, params_digest, control_version) 的审批票据；"
+            "finding_review 只输出证据充分性与建议，不改 Guardian 判定。"
+        ),
         parameters=_object_schema(
             {
                 "mode": {"type": "string", "enum": ["action_review", "finding_review"]},
@@ -457,26 +522,26 @@ TOOL_CATALOG: dict[str, ToolSpec] = {
         ),
         side_effects="state_mutating",
         available_from_phase="P2",
-        implemented=False,
+        implemented=True,
     ),
     # ── 知识（P2 随技能路由；tool_query 在 P1 即可用）──────────────────
     "load_skill": ToolSpec(
         id="load_skill",
         category="knowledge",
-        description="按技能 ID 加载家族卡/短卡内容。",
+        description="按技能 ID 加载家族卡/短卡内容（返回版本与内容哈希；角色必须在卡片白名单内）。",
         parameters=_object_schema({"skill_id": {"type": "string"}}, required=["skill_id"]),
         side_effects="none",
         available_from_phase="P2",
-        implemented=False,
+        implemented=True,
     ),
     "skill_query": ToolSpec(
         id="skill_query",
         category="knowledge",
-        description="按特征查询候选技能卡。",
+        description="按特征查询候选技能卡（结构化路由；返回命中、排除与方法缺口）。",
         parameters=_object_schema({"features": {"type": "array", "items": {"type": "string"}}}, required=["features"]),
         side_effects="none",
         available_from_phase="P2",
-        implemented=False,
+        implemented=True,
     ),
     "tool_query": ToolSpec(
         id="tool_query",
@@ -557,12 +622,18 @@ def get_tool(capability_id: str) -> ToolSpec | None:
     return TOOL_CATALOG.get(str(capability_id or "").strip())
 
 
+def effective_tool_spec(capability_id: str) -> ToolSpec | None:
+    """与 ``get_tool`` 同源；保留独立入口供可用性判定消费（引擎能力动态可用）。"""
+    return get_tool(capability_id)
+
+
 def implemented_capabilities() -> frozenset[str]:
-    return frozenset(item.id for item in TOOL_CATALOG.values() if item.implemented)
+    """当前真实可用的能力集合（实现存在 ∧ 运行环境可用）。"""
+    return frozenset(item.id for item in TOOL_CATALOG.values() if item.available)
 
 
 def capability_gap(capability_id: str) -> str:
-    """未实现/未到阶段能力的缺口说明（capability_missing 载荷）。"""
+    """未实现/运行不可用能力的缺口说明（capability_missing 载荷）。"""
     spec = get_tool(capability_id)
     if spec is None:
         return f"capability_missing: 能力 {capability_id} 不在工具目录中"
@@ -571,5 +642,12 @@ def capability_gap(capability_id: str) -> str:
             f"capability_missing: 能力 {capability_id}（{spec.description}）"
             f"计划于 {spec.available_from_phase} 阶段提供真实实现，当前不可用；"
             "不得用其他工具或结果冒充该能力。"
+        )
+    engine_gap = spec.engine_gap
+    if engine_gap:
+        return (
+            f"capability_missing: 能力 {capability_id} 的适配层已实现，"
+            f"但运行环境当前不可用（{engine_gap}）。"
+            "本调用被拒绝；不得用其他工具或结果冒充该能力。"
         )
     return f"capability_missing: 能力 {capability_id} 当前不可用"
