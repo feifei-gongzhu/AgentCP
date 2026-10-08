@@ -57,10 +57,13 @@ VALID_WORKER_KINDS = frozenset({
 
 # 规范角色及其输入别名。pentester 是旧配置/旧 Job 的兼容输入，任何入口
 # 读取后都应立即规范化为 executor；新配置只保存规范角色。
+# 双契约（方案 §10-1）：SUPPORTED_ROLES = 迁移期旧 6 角色 + 七角色
+# （orchestrator/planner/recon/crack/poc/operator/reviewer），数据源是
+# role_registry（唯一事实源），本集合只做引用，不复制名单。
+from .role_registry import supported_roles as _registry_supported_roles
+
 ROLE_ALIASES = {"pentester": "executor"}
-SUPPORTED_ROLES = frozenset({
-    "reason", "metacog", "executor", "reviewer", "waf_analyst", "profile_mapper",
-})
+SUPPORTED_ROLES = _registry_supported_roles()
 
 
 def normalize_role(role: object) -> str:

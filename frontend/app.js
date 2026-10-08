@@ -1601,7 +1601,7 @@ function renderMemberPanel() {
   if (empty) return;
   $("memberPanelTitle").textContent = member.name || "未命名角色";
   $("mName").value = member.name || "";
-  $("mRole").value = member.role || "executor";
+  $("mRole").value = member.role || "operator";
   $("mMaxRunning").value = member.max_running ?? 1;
   $("mPriority").value = member.priority ?? 0;
   $("mType").value = member.type || member.backend || "codex";
@@ -2393,7 +2393,7 @@ $("addRoleButton").addEventListener("click", () => {
   const current = currentMember();
   if (current && !$("memberPanel").hidden) syncMemberFromForm(current);
   state.teamConfig.members.push({
-    name: `worker-${state.teamConfig.members.length + 1}`, role: "executor", runtime_mode: "local-docker",
+    name: `worker-${state.teamConfig.members.length + 1}`, role: "operator", runtime_mode: "local-docker",
     custom_prompt: null, type: "codex", model: null, base_url: null, api_key_env: "OPENAI_API_KEY",
     auth_mode: "auto", sandbox: "workspace-write", max_running: 1, priority: 1, env: {},
     dangerously_bypass_sandbox: false,

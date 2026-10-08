@@ -85,7 +85,9 @@ def test_cli_parser_defaults_and_task_args() -> None:
 
     parser = build_parser()
     worker_args = parser.parse_args(["run-worker", "vendor", "--dry-run"])
-    assert worker_args.role == "executor"
+    # P1 起 run-worker 默认角色为 operator（七角色主执行者；迁移映射
+    # executor→operator，方案 §10）。
+    assert worker_args.role == "operator"
     assert worker_args.task is None
     aliased = parser.parse_args(["run-worker", "vendor", "--role", "pentester", "--dry-run"])
     assert normalize_role(aliased.role) == "executor"

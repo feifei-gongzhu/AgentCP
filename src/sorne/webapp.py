@@ -10,6 +10,7 @@ import shutil
 import threading
 import time
 from contextlib import contextmanager
+from dataclasses import fields as dataclass_fields
 from datetime import datetime, timezone
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -26,6 +27,7 @@ from .methodology import ensure_methodology
 from .agent_compose import shutdown_project_runtimes
 from .metrics import collect_metrics, refresh_asset_count
 from .quality import QualityLedger
+from . import role_registry
 from .waf import WAFManager
 from .store import PROJECTS, ROOT, ProjectStore
 from .technologies import enriched_target_profile, technology_profile
@@ -39,7 +41,7 @@ from .target_profile import (
 from .profile_workbook import build_profile_workbook
 from .platform_paths import valid_project_name
 from .projector import PROJECTOR_MANAGER
-from .team import run_team
+from .team import TeamMember, run_team
 from .runtime_config import canonical_runtime_mode, effective_backend
 from .runtime_secrets import RuntimeSecretStore
 from .asset_inventory import (
@@ -659,10 +661,9 @@ def _normalize_team_config(config: dict) -> dict:
     if not config["members"]:
         raise WebAppError("至少需要一个角色")
     allowed_types = {"codex", "claude-cli", "openai-compatible", "ollama", "container"}
-    allowed_roles = {
-        "reason", "metacog", "executor", "reviewer",
-        "waf_analyst", "profile_mapper",
-    }
+    # 角色白名单唯一事实源：role_registry（双契约 = 迁移期旧 6 + 七角色）。
+    allowed_roles = set(role_registry.role_ids())
+    allowed_member_fields = {item.name for item in dataclass_fields(TeamMember)}
     allowed_sandboxes = {"read-only", "workspace-write", "danger-full-access"}
     allowed_auth_modes = {"auto", "bearer", "x-api-key"}
     allowed_runtime_modes = {"local-docker", "agent-compose", "local-cli"}
@@ -670,6 +671,12 @@ def _normalize_team_config(config: dict) -> dict:
     for member in config["members"]:
         if not isinstance(member, dict):
             raise WebAppError("成员配置必须是对象")
+        # 剔除未知成员字段：TeamMember 是严格 dataclass，未知字段一旦写入
+        # team_config.json 会让 load_team 抛 TypeError（P0 §2 D-13）。
+        # 扩展配置请放入 extra。
+        member_keys = set(member)
+        for unknown in member_keys - allowed_member_fields - {"backend"}:
+            member.pop(unknown)
         # 非空 type 优先、缺失回退 backend（共享规则），移除 backend 前先迁移。
         member_type = effective_backend(member.get("type"), member.get("backend"))
         member["type"] = member_type

@@ -6,7 +6,7 @@ import sqlite3
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any, Callable, Iterator
 from uuid import uuid4
 
 
@@ -1389,11 +1389,24 @@ class ControlDatabase:
         )
         return event_id
 
-    def claim_direction(self, worker_id: str, lease_seconds: int = 60) -> dict[str, Any] | None:
+    def claim_direction(
+        self,
+        worker_id: str,
+        lease_seconds: int = 60,
+        *,
+        intent_filter: Callable[[dict[str, Any]], bool] | None = None,
+    ) -> dict[str, Any] | None:
+        """Claim the next eligible direction (FIFO-priority order preserved).
+
+        ``intent_filter`` 支持能力匹配认领（方案 §12-P1）：过滤谓词在
+        ``BEGIN IMMEDIATE`` 事务内对候选方向逐个求值，只认领第一个通过的
+        方向；不通过的方向保持原状（open/可重领），不被跳过性修改。
+        认领/租约/claim_version 语义与未过滤路径完全一致。
+        """
         now = _now()
         with self.connect() as db:
             db.execute("BEGIN IMMEDIATE")
-            row = db.execute(
+            rows = db.execute(
                 """
                 SELECT * FROM directions
                 WHERE status='open'
@@ -1421,10 +1434,19 @@ class ControlDatabase:
                     CAST(coalesce(json_extract(intent_json, '$.target_score'), -1) AS INTEGER) DESC,
                     created_at,
                     id
-                LIMIT 1
+                LIMIT 64
                 """,
                 (now, now),
-            ).fetchone()
+            ).fetchall()
+            row = None
+            for candidate in rows:
+                if intent_filter is None:
+                    row = candidate
+                    break
+                intent = json.loads(candidate["intent_json"])
+                if intent_filter(intent):
+                    row = candidate
+                    break
             if row is None:
                 db.execute("COMMIT")
                 return None
@@ -1445,6 +1467,46 @@ class ControlDatabase:
                 "claim_version": int(row["claim_version"] or 0) + 1,
             })
             return result
+
+    def prioritize_direction(
+        self,
+        direction_id: str,
+        priority_score: float,
+        *,
+        reason: str = "",
+        run_id: str | None = None,
+    ) -> bool:
+        """Raise a direction's priority (orchestrator submit_dispatch).
+
+        只对已存在方向生效：不存在/已终态的方向返回 False，不创建重复任务
+        （方案 §4.2——dispatch 只激活已有任务）。优先级只影响认领顺序，
+        不改写 fingerprint/语义；降方向优先级不受支持（防止编排角色埋任务
+        于队列之外，派发必须是显式动作）。
+        """
+        with self.connect() as db:
+            score = max(0.0, min(1_000_000.0, float(priority_score)))
+            updated = db.execute(
+                """
+                UPDATE directions
+                SET intent_json = json_set(
+                        intent_json, '$.priority_score',
+                        json_quote(max(
+                            CAST(coalesce(json_extract(intent_json, '$.priority_score'), 0) AS REAL),
+                            ?
+                        ))
+                    ), updated_at = ?
+                WHERE id=? AND status IN ('open', 'released')
+                """,
+                (score, _now(), direction_id),
+            )
+            changed = updated.rowcount == 1
+            if changed:
+                self._event(db, run_id, None, "direction_dispatched", {
+                    "direction_id": direction_id,
+                    "priority_score": score,
+                    "reason": str(reason or "")[:500],
+                })
+            return changed
 
     def heartbeat_direction(
         self,

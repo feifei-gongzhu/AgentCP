@@ -242,7 +242,7 @@ def test_model_tool_progress_is_persisted_as_run_events(
         encoding="utf-8",
     )
 
-    def fake_run_member(store, member, timeout, dry_run, context_suffix="", cancel_check=None, progress_callback=None):
+    def fake_run_member(store, member, timeout, dry_run, context_suffix="", cancel_check=None, progress_callback=None, **_binding):
         assert progress_callback is not None
         progress_callback({
             "event": "tool_started",
@@ -291,7 +291,7 @@ def test_successful_candidate_is_not_lost_when_sibling_job_fails(
         {"name": "metacog-fails", "type": "mock", "role": "metacog"},
     ]}), encoding="utf-8")
 
-    def partial_run_member(store, member, timeout, dry_run, context_suffix="", cancel_check=None, progress_callback=None):
+    def partial_run_member(store, member, timeout, dry_run, context_suffix="", cancel_check=None, progress_callback=None, **_binding):
         if member.name == "metacog-fails":
             raise RuntimeError("synthetic permanent failure")
         return {
@@ -337,7 +337,7 @@ def test_policy_refusal_is_restricted_without_failing_successful_siblings(
         {"name": "metacog-restricted", "type": "mock", "role": "metacog"},
     ]}), encoding="utf-8")
 
-    def policy_run_member(store, member, timeout, dry_run, context_suffix="", cancel_check=None, progress_callback=None):
+    def policy_run_member(store, member, timeout, dry_run, context_suffix="", cancel_check=None, progress_callback=None, **_binding):
         if member.name == "metacog-restricted":
             raise RuntimeError("This content was flagged for possible cybersecurity risk.")
         return {
@@ -413,7 +413,7 @@ def test_policy_refusal_restricts_job_without_fallback_or_prompt_mutation(
     }]}), encoding="utf-8")
     observed_prompts: list[str] = []
 
-    def refusing_run_member(store, member, timeout, dry_run, context_suffix="", cancel_check=None, progress_callback=None):
+    def refusing_run_member(store, member, timeout, dry_run, context_suffix="", cancel_check=None, progress_callback=None, **_binding):
         observed_prompts.append(member.custom_prompt)
         # Sorne 0.0.3：上游模型内容策略拒答。不再有“剥离提示词重试一次”的降级路径。
         raise RuntimeError("This content was flagged for possible cybersecurity risk.")

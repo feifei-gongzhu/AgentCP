@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import dataclass
+from dataclasses import dataclass, fields as dataclass_fields
 from typing import Any
 from collections.abc import Callable
 
@@ -10,6 +10,7 @@ from .dashboard import render_dashboard
 from .directives import authoritative_directives, directive_ids, missing_directive_ids
 from .drivers import DriverConfig, run_driver
 from .lifecycle import project_execution_lock, require_executable_target, require_initialized_project
+from .role_registry import is_execution_role
 from .schemas import now_iso, normalize_role
 from .execution import run_member as _run_member
 from .runtime_config import canonical_runtime_mode, effective_backend
@@ -53,9 +54,14 @@ def load_team(name: str, store: ProjectStore | None = None) -> list[TeamMember]:
     if not path.exists():
         raise WorkerError(f"团队配置不存在: {path}")
     data = json.loads(path.read_text(encoding="utf-8"))
+    known_fields = {item.name for item in dataclass_fields(TeamMember)}
     members = []
     for item in data.get("members", []):
         item = dict(item)
+        # 双契约读取（方案 §10-1）：未知成员字段（新版本配置写入的扩展键、
+        # 旧文件遗留键）一律剔除，保证严格 dataclass 构造不因未知字段抛
+        # TypeError；扩展配置请放入 extra。
+        item = {key: value for key, value in item.items() if key in known_fields}
         # 旧配置里的 pentester 读取时即规范化为 executor；写回发生在
         # 用户正常保存配置时，不在读取路径自动重写文件。
         item["role"] = normalize_role(item.get("role"))
@@ -103,16 +109,18 @@ def _run_team_locked(
         raise WorkerError(f"团队 {team_name} 没有成员")
 
     task_text = str(task or "").strip()
-    # executor 要求明确任务：一次性批次没有调度器分配的 Direction，必须由
-    # 入口 --task 或成员 custom_prompt 提供；否则拒绝启动而不是让模型自选目标。
-    executor_members = [item for item in members if item.role == "executor"]
+    # 执行类角色（executor/recon/crack/poc/operator）要求明确任务：一次性
+    # 批次没有调度器分配的 Direction，必须由入口 --task 或成员 custom_prompt
+    # 提供；否则拒绝启动而不是让模型自选目标。按 kind 判定（方案 §1.2：
+    # 执行任务校验不能只识别 executor）。
+    execution_members = [item for item in members if is_execution_role(item.role)]
     if (
-        executor_members
+        execution_members
         and not task_text
-        and not any(item.custom_prompt for item in executor_members)
+        and not any(item.custom_prompt for item in execution_members)
     ):
         raise WorkerError(
-            "团队包含 executor 角色但未提供明确任务：请用 --task 提供本次批次的"
+            "团队包含执行类角色但未提供明确任务：请用 --task 提供本次批次的"
             "任务说明，或在该成员配置中填写专属提示词；持续运行请改用 automate。"
         )
     context_suffix = (

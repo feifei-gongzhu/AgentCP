@@ -30,6 +30,7 @@ from .openai_urls import openai_chat_completions_url
 from .provider_auth import anthropic_secret_env_var, normalize_base_url, resolve_anthropic_auth_mode
 from .schemas import VALID_WORKER_KINDS
 from .platform_process import process_group_options, terminate_process_tree
+from .tool_gateway import ToolGateway
 
 
 ProgressCallback = Callable[[dict[str, Any]], None]
@@ -137,44 +138,43 @@ class LocalDockerRuntime:
         image: str,
         runtime_root: Path,
     ) -> dict[str, Any]:
-        """Run an OpenAI function-calling loop with tools executed in Docker.
+        """Run an OpenAI function-calling loop with gateway-mediated tools.
 
         Some gateways expose Grok through both Anthropic and OpenAI protocols
         but lose ``tool_use`` blocks while translating Anthropic Messages.
         Calling the gateway's native OpenAI endpoint preserves tool calls. Only
-        the model protocol changes: every command still runs in the same
-        capability-dropped, resource-bounded Sorne guest container.
+        the model protocol changes: tools are dispatched through the role-bound
+        ``tool_gateway``（方案 §6.4：权限取交集并在运行时强制；orchestrator/
+        planner/reviewer 默认无 Bash/网络；旧角色保留迁移期 compat Bash 通路，
+        该通路仍运行在同一个 capability-dropped、resource-bounded 的容器里）。
         """
 
+        gateway = ToolGateway.from_extra(
+            dict(self.config.extra or {}),
+            cancel_check=self.cancel_check,
+        )
+        if gateway is None:
+            # 严格模式（方案 §6.4）：缺少角色/项目绑定的会话无法执行角色
+            # 白名单，拒绝执行而不是悄悄退回任意 Shell 的工具循环。
+            raise LocalDockerError(
+                "OpenAI 工具循环缺少角色/项目运行时绑定（role/project_path），"
+                "严格模式拒绝启动；请通过 execution.run_member 提供绑定。"
+            )
+        if "compat_bash" in gateway.granted_capabilities():
+            gateway.bind_compat_executor(
+                lambda command: self._run_compatibility_bash(
+                    command,
+                    image=image,
+                    runtime_root=runtime_root,
+                    deadline=time.monotonic() + self.timeout,
+                )
+            )
         schema = json.loads(
             (Path(__file__).resolve().parent / "worker_output_schema.json").read_text(
                 encoding="utf-8"
             )
         )
-        tools = [
-            {
-                "type": "function",
-                "function": {
-                    "name": "Bash",
-                    "description": (
-                        "Run one bounded shell command inside the isolated "
-                        "Sorne worker container. Use /workspace/evidence for "
-                        "evidence and /workspace/.sorne-work for reusable "
-                        "intermediate files."
-                    ),
-                    "parameters": {
-                        "type": "object",
-                        "additionalProperties": False,
-                        "properties": {
-                            "command": {
-                                "type": "string",
-                                "description": "Shell command to execute.",
-                            },
-                        },
-                        "required": ["command"],
-                    },
-                },
-            },
+        tools = gateway.tool_definitions() + [
             {
                 "type": "function",
                 "function": {
@@ -187,6 +187,10 @@ class LocalDockerRuntime:
                 },
             },
         ]
+        tool_names = [
+            definition["function"]["name"]
+            for definition in tools
+        ]
         messages: list[dict[str, Any]] = [
             {"role": "system", "content": THIRD_PARTY_CLAUDE_SYSTEM_PROMPT},
             {"role": "user", "content": prompt},
@@ -195,7 +199,8 @@ class LocalDockerRuntime:
             "event": "stream_started",
             "runtime": "local-docker-openai-tools",
             "session_id": "",
-            "tools": ["Bash", "StructuredOutput"],
+            "tools": tool_names,
+            "role": gateway.identity.role,
         })
         deadline = time.monotonic() + self.timeout
         for _round in range(OPENAI_TOOL_MAX_ROUNDS):
@@ -236,8 +241,9 @@ class LocalDockerRuntime:
                         "role": "user",
                         "content": (
                             "You have not completed the worker protocol. Call "
-                            "Bash if work remains, or call StructuredOutput with "
-                            "the final Sorne JSON payload now."
+                            "an available registered tool if work remains, or "
+                            "call StructuredOutput with the final Sorne Worker "
+                            "JSON payload now."
                         ),
                     })
                     continue
@@ -274,21 +280,12 @@ class LocalDockerRuntime:
                     "tool_name": name or "unknown",
                     "input_summary": _safe_value(arguments, self.profile.api_key),
                 })
-                if name.casefold() != "bash":
-                    output = f"Unsupported tool: {name}"
-                    is_error = True
-                else:
-                    command = str(arguments.get("command") or "").strip()
-                    if not command:
-                        output = "Bash command is empty"
-                        is_error = True
-                    else:
-                        output, is_error = self._run_compatibility_bash(
-                            command,
-                            image=image,
-                            runtime_root=runtime_root,
-                            deadline=deadline,
-                        )
+                if not isinstance(arguments, dict):
+                    arguments = {}
+                # 全部业务工具经网关派发：权限交集、参数 Schema、审计、
+                # capability_missing 都在网关统一执行（方案 §6.1：不在容器、
+                # CLI、MCP 实现多套执行逻辑）。
+                output, is_error = gateway.dispatch(name, arguments)
                 self.progress_callback({
                     "event": "tool_completed",
                     "runtime": "local-docker-openai-tools",

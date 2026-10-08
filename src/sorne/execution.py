@@ -34,7 +34,20 @@ def run_member(
     context_suffix: str = "",
     cancel_check: Callable[[], bool] | None = None,
     progress_callback: Callable[[dict[str, Any]], None] | None = None,
+    *,
+    run_id: str | None = None,
+    job_id: str | None = None,
+    task_id: str | None = None,
+    claim_worker: str | None = None,
+    claim_version: int | None = None,
+    control_version: int | None = None,
 ) -> dict[str, Any]:
+    """执行单个成员并返回标准结果。
+
+    调度侧的运行/任务绑定（run_id/job_id/task_id/claim_*/control_version）
+    由调用方（AutomationEngine 等服务端路径）注入，随 DriverConfig.extra
+    传递给工具网关做身份绑定——这些字段绝不取自模型输出（方案 §6.4）。
+    """
     owner_directives = authoritative_directives(store)
     observed_directive_ids = directive_ids(owner_directives)
     task_context, retry_delta = parse_task_context(context_suffix)
@@ -50,6 +63,20 @@ def run_member(
     extra = dict(member.extra or {})
     extra["runtime_mode"] = member.runtime_mode or "local-docker"
     extra.setdefault("role", member.role)
+    # 工具网关身份绑定：仅当调度方提供时写入（一次性批次无 run/job 绑定，
+    # 网关仍按角色+项目强制权限交集）。
+    if run_id is not None:
+        extra.setdefault("run_id", str(run_id))
+    if job_id is not None:
+        extra.setdefault("job_id", str(job_id))
+    if task_id is not None:
+        extra.setdefault("task_id", str(task_id))
+    if claim_worker is not None:
+        extra.setdefault("claim_worker", str(claim_worker))
+    if claim_version is not None:
+        extra.setdefault("claim_version", int(claim_version))
+    if control_version is not None:
+        extra.setdefault("control_version", int(control_version))
     member_env = dict(member.env or {})
     api_key_env = member.api_key_env
     runtime_secret = RuntimeSecretStore.get(store.vendor, member.name)

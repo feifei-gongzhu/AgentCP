@@ -129,8 +129,8 @@ function directionStatusInfo(intent) {
 }
 const LABELS = {
   phase: { intake: "接入", probe: "探测", recon: "侦察", hunt: "狩猎", verify: "验证", report: "报告" },
-  role: { reason: "推理规划", metacog: "盲点检查", executor: "执行验证", reviewer: "质量复核", waf_analyst: "WAF 对抗", profile_mapper: "画像采集" },
-  roleShort: { reason: "推理员", metacog: "盲点检查员", executor: "执行器", reviewer: "复核员", waf_analyst: "WAF 分析员", profile_mapper: "画像员" },
+  role: { orchestrator: "编排", planner: "规划", recon: "侦察", crack: "口令验证", poc: "组件验证", operator: "综合执行", reviewer: "质量复核", reason: "推理规划（旧）", metacog: "盲点检查（旧）", executor: "执行验证（旧）", waf_analyst: "WAF 对抗（旧）", profile_mapper: "画像服务（旧）" },
+  roleShort: { orchestrator: "编排员", planner: "规划员", recon: "侦察员", crack: "口令验证员", poc: "组件验证员", operator: "执行员", reviewer: "复核员", reason: "推理员", metacog: "盲点检查员", executor: "执行器", waf_analyst: "WAF 分析员", profile_mapper: "画像员" },
   stage: { swarm: "并发执行", review: "结果复核", commit: "结果提交", profile: "基础画像", profile_incremental: "增量画像", mrecon: "前置采集", finished: "已结束" },
   jobStatus: { queued: "排队", running: "运行中", completed: "已完成", failed: "失败", restricted: "策略受限", cancelled: "已取消", cancelling: "取消中" },
   verb: { verify: "验证", inspect: "检查", execute: "执行", waf_characterize: "WAF 刻画" },

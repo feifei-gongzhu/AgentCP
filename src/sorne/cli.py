@@ -6,6 +6,7 @@ import time
 from pathlib import Path
 
 from .automation import AutomationEngine
+from . import role_registry
 from .lifecycle import (
     project_execution_lock,
     require_initialized_project,
@@ -377,9 +378,9 @@ def build_parser() -> argparse.ArgumentParser:
     worker.add_argument("vendor")
     worker.add_argument("--backend", default="codex", choices=["codex", "claude-cli", "openai-compatible", "ollama", "container", "mock"])
     worker.add_argument(
-        "--role", default="executor",
-        choices=["executor", "pentester", "reason", "metacog", "reviewer", "waf_analyst", "profile_mapper"],
-        help="pentester 是 executor 的兼容别名，执行前自动规范化",
+        "--role", default="operator",
+        choices=[*role_registry.role_ids(origin="seven_role"), *role_registry.role_ids(origin="legacy"), "pentester"],
+        help="角色清单由 role_registry 派生（七角色 + 迁移期旧角色）；pentester 是 executor 的兼容别名，执行前自动规范化",
     )
     worker.add_argument(
         "--task",

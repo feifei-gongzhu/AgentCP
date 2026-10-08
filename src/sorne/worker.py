@@ -17,6 +17,7 @@ from .methodology import derive_bounded_follow_up
 from .memory import record_negative_lesson
 from .phase import reconcile_phase
 from .lifecycle import project_execution_lock, require_initialized_project
+from .role_registry import get_role, is_execution_role
 from .schemas import (
     Decision,
     Fact,
@@ -29,6 +30,7 @@ from .schemas import (
     now_iso,
     normalize_role,
 )
+from .tool_registry import TOOL_CATALOG
 from .store import ProjectStore
 from .technologies import record_technology_observations
 from .target_profile import (
@@ -81,6 +83,7 @@ def compile_worker_prompt(
     prompt_file = PROMPT_DIR / f"{role}.md"
     if not prompt_file.exists():
         raise WorkerError(f"未知 Worker 角色: {role}")
+    role_record = get_role(role)
     open_hints = (
         authoritative_directives(store)
         if owner_directives is None
@@ -107,9 +110,19 @@ def compile_worker_prompt(
     prompt += (
         "# Sorne 内置角色规则与输出协议\n"
         + prompt_file.read_text(encoding="utf-8")
-        + "\n\n# 当前任务所需的编译上下文\n"
-        + compiled.render()
+        + "\n\n"
     )
+    if role_record is not None and not role_record.is_legacy:
+        # 公共纪律集中维护，由编译器注入（方案 §5.1）；各角色文件只保留
+        # 真正独有的规则。迁移期旧六角色 Prompt 保持原样（不注入），避免
+        # 改变旧项目可解释性。
+        common_file = PROMPT_DIR / "_common.md"
+        if common_file.exists():
+            prompt += common_file.read_text(encoding="utf-8") + "\n\n"
+        tool_section = render_role_tool_contract(role)
+        if tool_section:
+            prompt += tool_section + "\n\n"
+    prompt += "# 当前任务所需的编译上下文\n" + compiled.render()
     if open_hints:
         prompt += (
             "\n\n# 项目所有者指令（Sorne 内部最高控制优先级）\n"
@@ -126,7 +139,61 @@ def compile_worker_prompt(
         "role_prompt_chars": len(prompt_file.read_text(encoding="utf-8")),
         "final_prompt_chars_before_runtime": len(prompt),
     })
+    if role_record is not None and not role_record.is_legacy:
+        manifest["common_discipline_injected"] = True
+        manifest["tool_contract_capabilities"] = sorted(role_record.effective_capabilities())
     return prompt, manifest
+
+
+def render_role_tool_contract(role: str) -> str:
+    """由注册表生成本角色的工具契约节（方案 §5.1：工具名与参数必须来自
+    注册表生成的契约，不能在角色 Prompt 里手写另一份）。
+
+    只列出“角色白名单 ∩ 已实现”的能力；未实现能力不出现（模型调用会得到
+    capability_missing）。返回空串表示该角色当前没有已实现工具。
+    """
+    record = get_role(role)
+    if record is None:
+        return ""
+    lines: list[str] = ["# 注册工具契约（由工具注册表生成本角色可见集合）"]
+    compat = "compat_bash" in record.effective_capabilities()
+    listed = 0
+    for capability_id in sorted(record.effective_capabilities()):
+        spec = TOOL_CATALOG.get(capability_id)
+        if spec is None or not spec.visible_to_model:
+            continue
+        listed += 1
+        required = ", ".join(spec.parameters.get("required") or []) or "无必填参数"
+        properties = spec.parameters.get("properties") or {}
+        params = "; ".join(
+            f"{key}（{'必填' if key in (spec.parameters.get('required') or []) else '可选'}: "
+            f"{_describe_param(rule)}）"
+            for key, rule in properties.items()
+        )
+        lines.append(f"- {spec.callable_name}: {spec.description} 参数: {params}。必填校验: {required}。")
+    if compat:
+        lines.append(
+            "- Bash（迁移期兼容）: 旧 executor 通路，在隔离容器内执行单条 shell 命令；"
+            "仅本角色迁移期可用，P4 迁移后移除。"
+        )
+    if listed == 0 and not compat:
+        lines.append(
+            "- 当前没有已实现的可用工具：输出结论所需的证据必须来自任务胶囊与编译上下文；"
+            "不要虚构工具调用。"
+        )
+    lines.append(
+        "未列出的能力当前不可用；调用未授权能力会被运行时网关拒绝。"
+        "StructuredOutput 仍是最终交付出口。"
+    )
+    return "\n".join(lines)
+
+
+def _describe_param(rule: dict[str, Any]) -> str:
+    kind = str(rule.get("type") or "value")
+    enum = rule.get("enum")
+    if enum:
+        return "/".join(str(item) for item in enum)
+    return kind
 
 
 def submit_payload(
@@ -585,11 +652,12 @@ def _run_worker_locked(
         payload = json.loads(apply_output.read_text(encoding="utf-8"))
         return apply_worker_output(store, payload)
 
-    if role == "executor" and not task_context:
-        # executor 要求明确任务：单次入口必须由 --task 提供（或改用 automate
-        # 由调度器认领 Direction），不得让模型自行补选目标。
+    if is_execution_role(role) and not task_context:
+        # 执行类角色（executor/recon/crack/poc/operator）要求明确任务：单次
+        # 入口必须由 --task 提供（或改用 automate 由调度器认领 Direction），
+        # 不得让模型自行补选目标。按 kind 判定而非只识别 executor。
         raise WorkerError(
-            "executor 角色需要明确任务：请用 --task 提供本次执行的任务说明"
+            f"{role} 角色需要明确任务：请用 --task 提供本次执行的任务说明"
             "（目标、动作与成功标准），或改用 automate 由调度器分配已认领 Intent。"
         )
 

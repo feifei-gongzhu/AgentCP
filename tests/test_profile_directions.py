@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -780,6 +781,13 @@ def test_counterexample_needs_review_counts_only_scheduled_urls(
     from src.sorne.target_profile import queue_incremental_profile_urls, load_profile_state
 
     store = _project(tmp_path, monkeypatch, vendor="review-counting")
+    # 新默认团队为七角色（profile_mapper 是服务能力、非默认常驻成员，
+    # 方案 §2/§10）；画像调度机制测试自带含画像服务成员的团队配置，
+    # 不依赖仓库默认团队的构成。
+    (store.path / "team_config.json").write_text(
+        json.dumps({"members": [{"name": "profile", "type": "mock", "role": "profile_mapper"}]}),
+        encoding="utf-8",
+    )
     target = store.read_json("target.json")
     target["targets"] = ["https://example.com"]
     store.write_json("target.json", target)

@@ -14,6 +14,7 @@ from urllib.parse import urlparse
 from uuid import uuid4
 
 from . import diagnostics
+from . import role_registry
 from .database import ControlDatabase
 from .dashboard import render_dashboard
 from .evidence import freeze_worker_result_evidence
@@ -21,6 +22,12 @@ from .directives import authoritative_directives, missing_directive_ids
 from .lifecycle import project_execution_lock, require_executable_target, require_initialized_project
 from .memory import active_negative_evidence, matching_negative_evidence
 from .methodology import ensure_methodology, seed_methodology_portfolio
+from .role_registry import (
+    claim_blockers,
+    is_execution_role,
+    member_can_claim,
+    role_activity,
+)
 from .schemas import GateStatus, normalize_role
 from .scheduler import Scheduler
 from .store import ProjectStore
@@ -80,11 +87,8 @@ def _project_candidate_lock(store: ProjectStore) -> threading.RLock:
         return _CANDIDATE_LOCKS.setdefault(key, threading.RLock())
 
 ROLE_ACTIVITIES = {
-    "reason": ("分析黑板并生成审计方向", "产出可执行 Intent 或有证据的 Fact"),
-    "metacog": ("检查盲点、反例与高价值路径", "补充或修正当前审计方向"),
-    "reviewer": ("审查候选结果与证据质量", "决定接受、驳回或请求人工确认"),
-    "waf_analyst": ("刻画已确认的 WAF 干扰分支", "产出受预算约束的等价差异验证 Intent"),
-    "profile_mapper": ("遍历目标可点击功能并识别技术栈", "产出 URL、功能、技术栈画像"),
+    role_id: role_activity(role_id)
+    for role_id in role_registry.role_ids()
 }
 
 
@@ -852,28 +856,43 @@ class AutomationEngine:
                 "count": seeded_profile_targets,
             })
         members = load_team(run["team"], self.store)
-        reason_members = [item for item in members if item.role == "reason"]
-        metacog_members = [item for item in members if item.role == "metacog"]
-        reviewer_members = [item for item in members if item.role == "reviewer"]
-        waf_members = [item for item in members if item.role == "waf_analyst"]
-        executor_members = [item for item in members if item.role == "executor"]
-        other_members = [
+        # 角色分组由 role_registry 派生（方案 §12-P1：替代硬编码角色集合；
+        # 迁移期旧角色与新七角色按 kind 归位）。waf_analyst/profile_mapper
+        # 保持原有专属调度路径（WAF 分支 / 画像阶段），不并入通用波次。
+        planning_members = [
             item for item in members
-            if item.role not in {
-                "reason", "metacog", "reviewer", "executor",
-                "waf_analyst", "profile_mapper",
-            }
+            if role_registry.role_kind(item.role) == role_registry.KIND_PLANNING
+            and item.role not in {"waf_analyst", "profile_mapper"}
         ]
+        metacog_members = [item for item in planning_members if item.role == "metacog"]
+        reason_members = [item for item in planning_members if item.role != "metacog"]
+        reviewer_members = [
+            item for item in members
+            if role_registry.role_kind(item.role) == role_registry.KIND_REVIEW
+        ]
+        orchestrator_members = [
+            item for item in members
+            if role_registry.role_kind(item.role) == role_registry.KIND_ORCHESTRATION
+        ]
+        waf_members = [item for item in members if item.role == "waf_analyst"]
+        # 执行类成员（legacy executor + recon/crack/poc/operator）按注册表
+        # claim_priority 排序：专兵先认领，operator/legacy executor 随后，
+        # 落实“operator 默认不与专兵抢任务”（方案 §3.1）。
+        execution_members = sorted(
+            (item for item in members if is_execution_role(item.role)),
+            key=lambda item: role_registry.get_role(item.role).claim_priority,
+        )
 
         active_waf_branches = WAFManager().active(self.store)
         direction_backlog = self.db.open_direction_count()
         backlog_mode = direction_backlog >= DIRECTION_BACKLOG_HIGH_WATERMARK
         # Planning must not outrun validation.  Once the actionable queue reaches
         # the high-water mark, spend the whole wave on existing directions and
-        # suspend Reason/Metacog direction generation until the queue drains.
-        selected = executor_members + other_members
+        # suspend planning (reason/planner/metacog) and orchestration until the
+        # queue drains.
+        selected = execution_members
         if not backlog_mode:
-            selected = reason_members + selected
+            selected = reason_members + orchestrator_members + selected
         if active_waf_branches:
             selected += waf_members
         if not backlog_mode and self._should_trigger_metacog(run):
@@ -882,10 +901,11 @@ class AutomationEngine:
             self.db.add_event(run_id, None, "direction_backpressure_activated", {
                 "open_directions": direction_backlog,
                 "high_watermark": DIRECTION_BACKLOG_HIGH_WATERMARK,
-                "action": "suspend_reason_and_metacog_prioritize_executors",
+                "action": "suspend_planning_prioritize_execution_roles",
             })
         if not selected:
             selected = reviewer_members if backlog_mode else (metacog_members or reviewer_members)
+        execution_job_enqueued = False
         for member in selected:
             for slot in range(max(1, member.max_running)):
                 job_member_name = member.name if member.max_running == 1 else f"{member.name}#{slot + 1}"
@@ -901,14 +921,21 @@ class AutomationEngine:
                         ensure_ascii=False,
                         indent=2,
                     )
-                if member.role == "executor":
+                if is_execution_role(member.role):
+                    # 能力匹配认领（方案 §12-P1）：认领资格 = 执行类 kind ∧
+                    # Intent 所需能力 ⊆（角色白名单 ∩ 已实现能力）。租约、
+                    # claim_version、认领顺序语义与原 claim_direction 一致。
                     direction_worker = f"{run_id}:{job_member_name}"
                     direction = self.db.claim_direction(
                         direction_worker,
                         lease_seconds=int(run["timeout_seconds"]) + 30,
+                        intent_filter=(
+                            lambda intent, role=member.role: member_can_claim(role, intent)
+                        ),
                     )
                     if not direction:
                         continue
+                    execution_job_enqueued = True
                     persistent_work_dir = self.store.path / ".sorne-work"
                     persistent_work_dir.mkdir(parents=True, exist_ok=True)
                     payload["direction"] = direction
@@ -921,12 +948,35 @@ class AutomationEngine:
                                 "只执行该 Intent；原始证据必须写入 evidence_sink。"
                                 "需要被后续 Job 复用的解压目录、中间索引和分析缓存必须写入 "
                                 "/workspace/.sorne-work，禁止写入容器临时目录 /tmp。"
+                                "受控 HTTP 与结果查询通过注册工具完成；未在工具契约中列出的"
+                                "能力当前不可用，不得虚构其结果。"
                             ),
                         },
                         ensure_ascii=False,
                         indent=2,
                     )
                 self.db.enqueue_job(run_id, "swarm", job_member_name, member.role, payload)
+        if execution_members and not execution_job_enqueued and direction_backlog > 0:
+            # capability_missing 显式化（方案 §11/§13.2）：有开放方向但无人
+            # 具备（已实现的）所需能力——明确记录缺口，不静默换人、不用
+            # 空转模型调用冒充上场。
+            open_intents = []
+            for item in self.db.list_directions():
+                if item.get("status") not in {"open", "released"}:
+                    continue
+                intent = item.get("intent")
+                if not isinstance(intent, dict):
+                    continue
+                intent["id"] = item.get("id")
+                open_intents.append(intent)
+            blockers = claim_blockers(open_intents, [item.role for item in execution_members])
+            if blockers:
+                self.db.add_event(run_id, None, "direction_capability_missing", {
+                    "open_directions": direction_backlog,
+                    "execution_roles": [item.role for item in execution_members],
+                    "blockers": blockers[:20],
+                    "note": "开放方向所需能力当前无已实现归属角色；等待引擎接入（capability_missing）。",
+                })
         self.db.set_run_stage(run_id, "swarm")
 
     def _should_trigger_metacog(self, run: dict[str, Any]) -> bool:
@@ -1573,6 +1623,14 @@ class AutomationEngine:
                     context_suffix=context_suffix,
                     cancel_check=cancel_check,
                     progress_callback=persist_model_progress,
+                    # 运行/任务/控制版本绑定：服务端注入，工具网关据此做
+                    # 身份绑定与迟到写回 fencing（方案 §6.4；绝不取自模型）。
+                    run_id=str(run["id"]),
+                    job_id=str(job["id"]),
+                    task_id=str(direction.get("id")) if direction else None,
+                    claim_worker=str(direction.get("claimed_by")) if direction else None,
+                    claim_version=int(direction.get("claim_version") or 0) if direction else None,
+                    control_version=int(job["control_version"]),
                 )
                 result = freeze_worker_result_evidence(
                     self.store.path,

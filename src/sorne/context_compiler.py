@@ -10,6 +10,7 @@ from urllib.parse import urlsplit
 from .database import ControlDatabase
 from .directives import authoritative_directives
 from .memory import relevant_lessons
+from .role_registry import get_role
 from .schemas import new_id, now_iso
 from .store import ProjectStore
 from .technologies import technology_profile
@@ -18,16 +19,38 @@ from .mrecon import compact_mrecon_rows
 from .waf import WAFManager
 
 
+# 预算按角色（不是 context_profile）配置：同 profile 的旧/新角色预算一致，
+# 行为可预期。执行类角色预算较小（任务胶囊聚焦），规划/编排类更大（需要
+# 广度）。键集必须覆盖 role_registry 全部角色（见下方断言）。
 ROLE_CONTEXT_BUDGETS = {
+    # 迁移期旧角色
     "executor": 12_000,
     "waf_analyst": 12_000,
     "reason": 18_000,
     "metacog": 18_000,
     "reviewer": 20_000,
     "profile_mapper": 18_000,
+    # 七角色
+    "orchestrator": 16_000,
+    "planner": 18_000,
+    "recon": 12_000,
+    "crack": 12_000,
+    "poc": 12_000,
+    "operator": 12_000,
 }
 DEFAULT_CONTEXT_BUDGET = 15_000
 RETRY_DELTA_BUDGET = 2_000
+
+# 任务胶囊不压缩的角色集合：执行类角色（kind=execution）的任务胶囊是
+# 本轮唯一授权工作对象，不得截断（方案 §1.2：新执行角色不能走错误分支
+# 或截断任务胶囊）。由 role_registry kind 派生，旧硬编码集合等价展开。
+def _capsule_roles() -> frozenset[str]:
+    from .role_registry import KIND_EXECUTION, ROLE_REGISTRY
+
+    return frozenset(
+        role_id for role_id, record in ROLE_REGISTRY.items()
+        if record.kind == KIND_EXECUTION
+    )
 
 _SECRET_PATTERNS = (
     (re.compile(r"(?i)(authorization\s*[:=]\s*(?:bearer|basic)\s+)[^\s\"']+"), r"\1[REDACTED]"),
@@ -82,7 +105,7 @@ def compile_worker_context(
     raw_task = task_context or {}
     task = (
         raw_task
-        if role in {"executor", "waf_analyst"}
+        if role in _capsule_roles() | {"waf_analyst"}
         else _compact(raw_task, max_string=4_000, max_items=30, depth=6)
     )
     budget = max(4_000, int(budget_chars or ROLE_CONTEXT_BUDGETS.get(role, DEFAULT_CONTEXT_BUDGET)))
@@ -179,7 +202,10 @@ def compile_worker_context(
         )
         add_records("recent_facts", facts, limit=6)
         add_records("recent_negative_evidence", negative, limit=4)
-    elif role == "executor":
+    elif _role_kind(role) == "execution":
+        # 执行类角色（legacy executor + recon/crack/poc/operator）共用任务
+        # 聚焦分支：相关事实/负向证据/技术观察/人工裁决。kind 由
+        # role_registry 派生，替代 role == "executor" 硬编码（P0 §2 D-5）。
         add_records("related_facts", _related(facts, identity), limit=8)
         add_records("related_negative_evidence", _related(negative, identity), limit=6)
         add_records(
@@ -192,6 +218,11 @@ def compile_worker_context(
             _related_verdicts(verdicts, facts, identity),
             limit=6,
         )
+        if role in {"recon", "poc"}:
+            # 侦察与组件验证直接消费技术画像（指纹→验证链条）。
+            context["technology_asset_profile"] = _fit_value(
+                context, "technology_asset_profile", technology_profile(store), budget,
+            )
     elif role == "reviewer":
         add_records("related_system_vulnerabilities", _related_vulnerabilities(facts, identity), limit=12)
         add_records("related_human_verdicts", _related_verdicts(verdicts, facts, identity), limit=10)
@@ -214,7 +245,9 @@ def compile_worker_context(
         add_records("recent_intents", active_intents, limit=8)
         add_records("human_dismissed_directions", dismissed, limit=8)
         add_records("recent_negative_evidence", negative, limit=8)
-        if role == "reason":
+        if role in {"reason", "planner", "orchestrator"}:
+            # 画像驱动：规划与编排都按优先目标分组掌握全局（planner 用于
+            # 生成假设，orchestrator 用于派发排序）。
             priority_targets = [
                 item for item in target_assessments(store)
                 if item.get("profile_class") == "priority_target"
@@ -318,6 +351,11 @@ def redact_prompt(prompt: str) -> str:
     for pattern, replacement in _SECRET_PATTERNS:
         redacted = pattern.sub(replacement, redacted)
     return redacted
+
+
+def _role_kind(role: str) -> str:
+    record = get_role(role)
+    return record.kind if record is not None else ""
 
 
 def _direction_views(
