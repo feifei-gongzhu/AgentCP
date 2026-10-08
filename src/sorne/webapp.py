@@ -19,6 +19,8 @@ from uuid import uuid4
 
 from .dashboard import render_dashboard
 from .automation import AutomationEngine
+from . import console_api
+from . import team_migration
 from .database import ControlDatabase
 from .lifecycle import ProjectLifecycleBusy, project_deletion_lock
 from .scheduler import Scheduler
@@ -1271,6 +1273,84 @@ class AgentControlHandler(SimpleHTTPRequestHandler):
             except Exception as exc:
                 self._json({"ok": False, "error": str(exc)}, status=_error_status(exc))
             return
+        # ── P4 控制台聚合端点（§11 前端与配置体验）───────────────────────
+        if parsed.path == "/api/team/health":
+            try:
+                vendor = parse_qs(parsed.query).get("vendor", [DEFAULT_VENDOR])[0]
+                self._json({"ok": True, **console_api.role_health(_safe_project(vendor))})
+            except Exception as exc:
+                self._json({"ok": False, "error": str(exc)}, status=_error_status(exc))
+            return
+        if parsed.path == "/api/team/migration":
+            try:
+                vendor = parse_qs(parsed.query).get("vendor", [DEFAULT_VENDOR])[0]
+                store = _safe_project(vendor)
+                self._json({"ok": True, **team_migration.migration_preview(store)})
+            except Exception as exc:
+                self._json({"ok": False, "error": str(exc)}, status=_error_status(exc))
+            return
+        if parsed.path == "/api/plan":
+            try:
+                vendor = parse_qs(parsed.query).get("vendor", [DEFAULT_VENDOR])[0]
+                self._json({"ok": True, **console_api.plan_view(_safe_project(vendor))})
+            except Exception as exc:
+                self._json({"ok": False, "error": str(exc)}, status=_error_status(exc))
+            return
+        if parsed.path == "/api/tools/health":
+            try:
+                vendor = parse_qs(parsed.query).get("vendor", [DEFAULT_VENDOR])[0]
+                self._json({"ok": True, **console_api.tools_health(_safe_project(vendor))})
+            except Exception as exc:
+                self._json({"ok": False, "error": str(exc)}, status=_error_status(exc))
+            return
+        if parsed.path == "/api/skills/routing":
+            try:
+                query = parse_qs(parsed.query)
+                vendor = query.get("vendor", [DEFAULT_VENDOR])[0]
+                _safe_project(vendor)
+                features = query.get("features", [])
+                role = query.get("role", [None])[0]
+                self._json({
+                    "ok": True,
+                    "explanation": console_api.skill_routing_explanation_for(features, role=role),
+                })
+            except Exception as exc:
+                self._json({"ok": False, "error": str(exc)}, status=_error_status(exc))
+            return
+        if parsed.path == "/api/analysis":
+            try:
+                query = parse_qs(parsed.query)
+                vendor = query.get("vendor", [DEFAULT_VENDOR])[0]
+                limit = int(query.get("limit", ["30"])[0])
+                self._json({"ok": True, **console_api.analysis_panel(_safe_project(vendor), record_limit=limit)})
+            except Exception as exc:
+                self._json({"ok": False, "error": str(exc)}, status=_error_status(exc))
+            return
+        if parsed.path == "/api/resources":
+            try:
+                query = parse_qs(parsed.query)
+                vendor = query.get("vendor", [DEFAULT_VENDOR])[0]
+                category = query.get("category", [None])[0]
+                self._json({"ok": True, **console_api.resources_panel(_safe_project(vendor), category=category)})
+            except Exception as exc:
+                self._json({"ok": False, "error": str(exc)}, status=_error_status(exc))
+            return
+        if parsed.path == "/api/run/tools":
+            try:
+                vendor = parse_qs(parsed.query).get("vendor", [DEFAULT_VENDOR])[0]
+                self._json({"ok": True, **console_api.run_tool_progress(_safe_project(vendor))})
+            except Exception as exc:
+                self._json({"ok": False, "error": str(exc)}, status=_error_status(exc))
+            return
+        if parsed.path == "/api/findings/chain":
+            try:
+                query = parse_qs(parsed.query)
+                vendor = query.get("vendor", [DEFAULT_VENDOR])[0]
+                finding_id = query.get("finding_id", [""])[0]
+                self._json({"ok": True, **console_api.finding_chain(_safe_project(vendor), finding_id)})
+            except Exception as exc:
+                self._json({"ok": False, "error": str(exc)}, status=_error_status(exc))
+            return
         if parsed.path == "/frontend":
             self.send_response(302)
             self.send_header("Location", "/frontend/")
@@ -1707,6 +1787,141 @@ class AgentControlHandler(SimpleHTTPRequestHandler):
                 )
                 render_dashboard(store)
                 self._json({"ok": True, "output": output})
+                return
+
+            # ── P4：团队迁移 / 独立研判 / 资源仓库（§10 §11 §7A.4 §7.2）─────
+            if parsed.path == "/api/team/migration":
+                payload = self._read_json()
+                store = _safe_project(payload.get("vendor", DEFAULT_VENDOR))
+                action = str(payload.get("action") or "").strip()
+                if action == "execute":
+                    output = team_migration.execute_migration(
+                        store, requested_by=str(payload.get("requested_by") or "web-console")
+                    )
+                    _audit(store, "team_migration_executed", {
+                        "archive_dir": output.get("archive_dir"),
+                        "executed": output.get("executed"),
+                    })
+                elif action == "rollback":
+                    output = team_migration.rollback_migration(store)
+                    _audit(store, "team_migration_rolled_back", {
+                        "archive_dir": output.get("archive_dir"),
+                    })
+                else:
+                    raise WebAppError("action 必须是 execute 或 rollback")
+                render_dashboard(store)
+                self._json({"ok": True, **output})
+                return
+
+            if parsed.path == "/api/analysis/config":
+                payload = self._read_json()
+                store = _safe_project(payload.get("vendor", DEFAULT_VENDOR))
+                analyzers = payload.get("analyzers")
+                if not isinstance(analyzers, dict):
+                    raise WebAppError("缺少 analyzers 对象")
+                output = console_api.save_analysis_config(store, analyzers)
+                _audit(store, "analysis_config_updated", {"saved": output["saved"]})
+                self._json({"ok": True, **output, **{
+                    key: value for key, value in
+                    console_api.analysis_panel(store).items()
+                    if key in ("analyzers",)
+                }})
+                return
+
+            if parsed.path == "/api/analysis/reanalyze":
+                payload = self._read_json()
+                store = _safe_project(payload.get("vendor", DEFAULT_VENDOR))
+                analysis_id = str(payload.get("analysis_id") or "").strip()
+                if not analysis_id:
+                    raise WebAppError("缺少 analysis_id")
+                from .analysis_service import AnalysisService
+
+                service = AnalysisService(store)
+                output = service.reanalyze(
+                    analysis_id,
+                    reason=str(payload.get("reason") or "web-console-reanalysis"),
+                )
+                _audit(store, "analysis_reanalyze_requested", {"analysis_id": analysis_id})
+                self._json({"ok": True, **output})
+                return
+
+            if parsed.path == "/api/analysis/followup":
+                payload = self._read_json()
+                store = _safe_project(payload.get("vendor", DEFAULT_VENDOR))
+                analysis_id = str(payload.get("analysis_id") or "").strip()
+                followup_index = payload.get("followup_index")
+                if not analysis_id or followup_index is None:
+                    raise WebAppError("缺少 analysis_id 或 followup_index")
+                from .analysis_service import AnalysisService
+
+                service = AnalysisService(store)
+                output = service.mark_followup(
+                    analysis_id,
+                    int(followup_index),
+                    adopted=bool(payload.get("adopted")),
+                    task_id=payload.get("task_id"),
+                    reason=payload.get("reason"),
+                )
+                self._json({"ok": True, **output})
+                return
+
+            if parsed.path == "/api/resources/import":
+                payload = self._read_json()
+                store = _safe_project(payload.get("vendor", DEFAULT_VENDOR))
+                content = payload.get("content")
+                if isinstance(content, str):
+                    try:
+                        content = json.loads(content)
+                    except json.JSONDecodeError as exc:
+                        raise WebAppError(f"content 不是合法 JSON: {exc}") from exc
+                from . import resource_repository as repo
+
+                try:
+                    entry = repo.import_resource(
+                        store,
+                        category=str(payload.get("category") or ""),
+                        resource_id=str(payload.get("resource_id") or ""),
+                        name=str(payload.get("name") or ""),
+                        content=content,
+                        source=str(payload.get("source") or ""),
+                        source_url=str(payload.get("source_url") or ""),
+                        license=str(payload.get("license") or ""),
+                        imported_by=str(payload.get("imported_by") or "web-console"),
+                        enabled=bool(payload.get("enabled", True)),
+                    )
+                except repo.ResourceRepositoryError as exc:
+                    raise WebAppError(str(exc)) from exc
+                _audit(store, "resource_imported", {"resource_id": entry.get("id"), "version": entry.get("version")})
+                self._json({"ok": True, "entry": entry})
+                return
+
+            if parsed.path == "/api/resources/enabled":
+                payload = self._read_json()
+                store = _safe_project(payload.get("vendor", DEFAULT_VENDOR))
+                from . import resource_repository as repo
+
+                try:
+                    entry = repo.set_enabled(
+                        store,
+                        str(payload.get("resource_id") or ""),
+                        enabled=bool(payload.get("enabled")),
+                    )
+                except repo.ResourceRepositoryError as exc:
+                    raise WebAppError(str(exc)) from exc
+                self._json({"ok": True, "entry": entry})
+                return
+
+            if parsed.path == "/api/resources/rollback":
+                payload = self._read_json()
+                store = _safe_project(payload.get("vendor", DEFAULT_VENDOR))
+                from . import resource_repository as repo
+
+                try:
+                    entry = repo.rollback(store, str(payload.get("resource_id") or ""))
+                except repo.ResourceRepositoryError as exc:
+                    raise WebAppError(str(exc)) from exc
+                _audit(store, "resource_rolled_back", {"resource_id": entry.get("id")})
+                self._json({"ok": True, "entry": entry})
                 return
 
             self._json({"ok": False, "error": "unknown endpoint"}, status=404)

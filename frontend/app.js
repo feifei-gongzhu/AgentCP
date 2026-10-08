@@ -22,6 +22,15 @@ import {
   summarizeTeamPresetDiff, validateMemberData,
 } from "./modules/team-config.js";
 import { downloadTechnologyProfile, downloadTechnologyWorkbook, renderTechnologyProfile } from "./modules/technology-profile.js";
+import { ROLE_OPTIONS } from "./modules/team-config.js";
+import {
+  renderRoleCards, renderRunRoleBreakdown, renderRunBlockPanel, renderMigrationPanel,
+} from "./modules/team-health.js";
+import { renderPlanView, initPlanView } from "./modules/plan-view.js";
+import { renderAnalysisPanel } from "./modules/analysis-panel.js";
+import { renderToolsPanel, initRoutingPlayground } from "./modules/tools-panel.js";
+import { renderResourcesPanel, initResourceImport } from "./modules/resources-panel.js";
+import { buildEvidenceChainSection, loadEvidenceChain } from "./modules/evidence-chain.js";
 import { routeFromHash } from "./modules/router.js";
 
 /* ---------- 工具 ---------- */
@@ -30,6 +39,7 @@ const PAGE_META = {
   overview: { eyebrow: "实时状态 · 结论 · 控制", title: "总览" },
   findings: { eyebrow: "已验证结果与待验证线索", title: "发现" },
   directions: { eyebrow: "验证方向与假设池", title: "方向" },
+  plans: { eyebrow: "计划图 · 依赖 · 方法卡 · 工具调用", title: "计划" },
   assets: { eyebrow: "暴露面底座 · 技术画像", title: "资产与画像" },
   runs: { eyebrow: "Job 队列 · 事件 · 审计", title: "运行与诊断" },
   settings: { eyebrow: "目标 · 模型团队 · 黑板", title: "项目设置" },
@@ -65,7 +75,7 @@ function routeUrl(route) {
 }
 function applyRoute(requested) {
   let route = requested;
-  if (["overview", "findings", "directions", "assets", "runs", "settings"].includes(route) && !state.vendor && !state.newTaskMode) route = "projects";
+  if (["overview", "findings", "directions", "plans", "assets", "runs", "settings"].includes(route) && !state.vendor && !state.newTaskMode) route = "projects";
   if (route === "settings" && !state.vendor && !state.newTaskMode) route = "projects";
   state.route = route;
   document.querySelectorAll("[data-view]").forEach(node => { node.hidden = node.dataset.view !== route; });
@@ -108,7 +118,9 @@ function selectVendor(vendor) {
   state.newTaskMode = false;
   state.projectData = null;
   state.derived = null;
-  ui.selected = { vulns: null, leads: null, directions: null, surface: null };
+  state.p4 = null;
+  ++state.p4Generation;
+  ui.selected = { vulns: null, leads: null, directions: null, surface: null, plans: null };
   return true;
 }
 async function openProject(vendor, route = "overview") {
@@ -1024,6 +1036,12 @@ function renderVulnDetail() {
   nodes.push(detailSection(impactLabel, el("p", "", fact.business_impact || "尚未形成漏洞闭环")));
   // 证据阅读器：合并证据文件与复现步骤（石墨暗面，证据/请求/响应/复现四个标签）
   nodes.push(buildEvidenceReader(fact, evidenceForFact(fact, indexedEvidence)));
+  // 证据链：请求/响应 → 引擎命中 → 独立研判 → review → Guardian → 人工结论
+  if (!fact.__pending) {
+    const chainSection = buildEvidenceChainSection();
+    nodes.push(chainSection);
+    void loadEvidenceChain(fact.id, chainSection);
+  }
   nodes.push(verdictSummarySection(verdict, fact, () => { box.hidden = !box.hidden; }));
   const sourceLeads = sourceLeadsByVulnerability.get(fact.id) || [];
   if (sourceLeads.length) nodes.push(detailSection("来源", el("p", "", `由 ${sourceLeads.length} 条风险线索论证转化`)));
@@ -1834,6 +1852,7 @@ function renderProject(project, metrics, automation, config, evidenceResult, aud
   renderTeamEditor(config);
   renderTargetEditor(project.target);
   $("blackboardText").textContent = project.blackboard || "黑板为空";
+  renderP4Panels();
   applyRoute(state.route);
 }
 async function refresh() {
@@ -1855,6 +1874,8 @@ async function refresh() {
     if (generation !== state.requestGeneration || requestedVendor !== state.vendor) return;
     state.secretStatus = configResult.secret_status || {};
     renderProject(project, metricsResult.metrics, automation, configResult.config, evidenceResult, auditResult, promptResult, assetResult);
+    // P4 面板按需拉取（当前路由需要时）；首次进入 settings/runs/plans 即有数据
+    void refreshP4(false);
     setConnectionStatus("实时同步", true);
   } catch (error) {
     if (generation !== state.requestGeneration || requestedVendor !== state.vendor) return;
@@ -1891,6 +1912,7 @@ async function refreshRunTelemetry() {
     renderGateApproval(state.projectData.state, automation);
     renderRunFailure(automation);
     renderDiagnostics(state.projectData, automation, state.auditCache || { audit: [] }, state.promptCache || { snapshots: [] });
+    if (["runs", "settings", "plans"].includes(state.route)) void refreshP4(false);
     setConnectionStatus("实时同步", true);
   } catch (error) {
     if (generation !== state.requestGeneration || requestedVendor !== state.vendor) return;
@@ -1899,9 +1921,89 @@ async function refreshRunTelemetry() {
   }
 }
 
+/* ---------- P4 控制台面板（§11：角色卡/计划/研判/工具/资源/迁移） ---------- */
+function p4RouteNeedsData() {
+  return ["runs", "settings", "plans"].includes(state.route);
+}
+function renderP4Panels() {
+  const p4 = state.p4;
+  if (!p4) return;
+  renderRoleCards(p4.health);
+  renderMigrationPanel(p4.migration, () => refreshP4(true));
+  renderRunRoleBreakdown(p4.health, state.automationCache);
+  renderRunBlockPanel(p4.health, state.automationCache);
+  renderAnalysisPanel(p4.analysis, () => refreshP4(true));
+  renderToolsPanel(p4.tools);
+  renderResourcesPanel(p4.resources, () => refreshP4(true));
+  renderPlanView(p4.plan, {
+    openFinding: result => {
+      // 从计划任务跳到发现页对应记录（含证据链）
+      navigate("findings");
+      selectVulnerability(result.fact_id, { switchTab: result.classification === "vulnerability" });
+      showToast(`已定位发现 ${result.fact_id}（${result.title}）`);
+    },
+    rerenderDetail: () => renderP4Panels(),
+  });
+  const directionCount = (p4.plan?.directions || []).length;
+  $("navPlansCount").textContent = String(directionCount);
+  $("navPlansCount").hidden = !directionCount;
+  $("planTasksCount").textContent = `${directionCount} 个任务方向`;
+  renderRunToolProgress(p4.toolProgress);
+}
+function renderRunToolProgress(progress) {
+  const body = $("runToolProgressBody");
+  if (!body) return;
+  const tools = progress?.tools || [];
+  body.replaceChildren();
+  if (!tools.length) {
+    const row = document.createElement("tr");
+    const td = el("td", "empty-row", progress?.run ? "本运行尚无工具调用记录" : "暂无运行");
+    td.colSpan = 6;
+    row.append(td);
+    body.append(row);
+    return;
+  }
+  tools.forEach(tool => {
+    const row = document.createElement("tr");
+    row.append(cell(tool.tool_id, "mono"));
+    row.append(cell((tool.roles || []).join("、") || "—"));
+    row.append(cell(String(tool.calls), "num"));
+    row.append(cell(String(tool.ok), "num"));
+    row.append(cell(String(tool.failed + tool.rejected), "num"));
+    row.append(cell(tool.last_at ? formatEventTime(tool.last_at) : "—"));
+    body.append(row);
+  });
+}
+async function refreshP4(force) {
+  if (!state.vendor) return;
+  if (!force && !p4RouteNeedsData()) return;
+  const requestedVendor = state.vendor;
+  const generation = ++state.p4Generation;
+  try {
+    const vendor = encodeURIComponent(requestedVendor);
+    const requests = [
+      api(`/api/team/health?vendor=${vendor}`),
+      api(`/api/plan?vendor=${vendor}`),
+      api(`/api/tools/health?vendor=${vendor}`),
+      api(`/api/analysis?vendor=${vendor}&limit=30`),
+      api(`/api/resources?vendor=${vendor}`),
+      api(`/api/team/migration?vendor=${vendor}`),
+      api(`/api/run/tools?vendor=${vendor}`),
+    ];
+    const [health, plan, tools, analysis, resources, migration, toolProgress] = await Promise.all(requests);
+    if (generation !== state.p4Generation || requestedVendor !== state.vendor) return;
+    state.p4 = { health, plan, tools, analysis, resources, migration, toolProgress };
+    renderP4Panels();
+  } catch (error) {
+    if (generation !== state.p4Generation || requestedVendor !== state.vendor) return;
+    showToast(`控制台面板刷新失败：${error.message}`, true);
+  }
+}
+
 /* ---------- 空工作区 / 新建任务 ---------- */
 function renderEmptyWorkspace() {
   state.vendor = null; state.runId = null; state.runStatus = null;
+  state.p4 = null; ++state.p4Generation;
   state.teamConfig = null; state.configVendor = null; state.teamDirty = false;
   state.targetConfig = null; state.targetConfigVendor = null; state.targetDirty = false;
   state.secretStatus = {}; state.gateContext = null; state.gateSubmitting = false; state.derived = null;
@@ -1921,7 +2023,13 @@ function renderEmptyWorkspace() {
   $("runFailure").hidden = true; $("runFailure").replaceChildren();
   ["assetMetric", "factMetric", "vulnMetric"].forEach(id => { $(id).textContent = "0"; });
   $("coverageMetric").textContent = "0%";
-  ["vulnList", "leadList", "directionList", "surfaceList", "coverageList", "recentEvents"].forEach(id => $(id).replaceChildren());
+  ["vulnList", "leadList", "directionList", "surfaceList", "coverageList", "recentEvents",
+    "roleCards", "migrationPanel", "runRoleBreakdown", "runBlockPanel", "analyzerConfigPanel",
+    "analysisRecordsBody", "enginesBody", "toolsBody", "skillsBody", "routingExplanation",
+    "resourcesBody", "planBatchesBody", "planTasksBody", "runToolProgressBody"].forEach(id => { if ($(id)) $(id).replaceChildren(); });
+  $("migrationSection").hidden = true;
+  $("planTaskDetail").replaceChildren(el("div", "empty-state", "请先创建项目。"));
+  $("plansSummary").textContent = "—";
   ["vulnDetailInfo", "leadDetailBody", "directionDetail", "surfaceDetailBody"].forEach(id => $(id).replaceChildren(el("div", "empty-state", "请先创建项目。")));
   $("reviewBox").hidden = true;
   emptyRow($("hypothesesBody"), 7); emptyRow($("jobsBody"), 8); emptyRow($("promptSnapshotsBody"), 7);
@@ -1940,6 +2048,8 @@ function renderEmptyWorkspace() {
 }
 function prepareNewTask() {
   ++state.requestGeneration;
+  ++state.p4Generation;
+  state.p4 = null;
   state.vendor = null; state.newTaskMode = true;
   state.runId = null; state.runStatus = null;
   state.teamConfig = null; state.configVendor = null; state.teamDirty = false;
@@ -2103,7 +2213,9 @@ $("projectSelect").addEventListener("change", async event => {
 });
 document.querySelectorAll("[data-route-link]").forEach(link => link.addEventListener("click", event => {
   event.preventDefault();
-  requestRoute(link.dataset.routeLink);
+  requestRoute(link.dataset.routeLink).then(() => {
+    if (["plans", "runs", "settings"].includes(state.route) && state.vendor) void refreshP4(true);
+  });
 }));
 window.addEventListener("hashchange", async () => {
   const route = routeFromLocation();
@@ -2115,6 +2227,7 @@ window.addEventListener("hashchange", async () => {
   }
   applyRoute(route);
   if (route !== "projects" && state.vendor && !state.projectData) await refresh();
+  if (["plans", "runs", "settings"].includes(route) && state.vendor) void refreshP4(true);
 });
 // 项目中心表格
 $("projectList").addEventListener("click", async event => {
@@ -2516,6 +2629,22 @@ $("copyBoard").addEventListener("click", async () => {
   showToast("黑板内容已复制");
 });
 
+/* ---------- P4 面板初始化 ---------- */
+initPlanView({
+  openFinding: result => {
+    navigate("findings");
+    selectVulnerability(result.fact_id, { switchTab: result.classification === "vulnerability" });
+  },
+  rerenderDetail: () => renderP4Panels(),
+});
+initRoutingPlayground();
+initResourceImport(() => refreshP4(true));
+ROLE_OPTIONS.forEach(option => {
+  const optionNode = document.createElement("option");
+  optionNode.value = option.value;
+  optionNode.textContent = option.legacy ? `${option.label}（迁移期）` : option.label;
+  $("routingRoleSelect").append(optionNode);
+});
 /* ---------- 启动 ---------- */
 async function boot() {
   try {
@@ -2526,7 +2655,7 @@ async function boot() {
       renderEmptyWorkspace();
       navigate("projects", { replace: true });
       showToast("请先创建第一个审计任务");
-    } else if (["overview", "findings", "directions", "assets", "runs", "settings"].includes(initialRoute) && (state.vendor || requestedVendor)) {
+    } else if (["overview", "findings", "directions", "plans", "assets", "runs", "settings"].includes(initialRoute) && (state.vendor || requestedVendor)) {
       if (requestedVendor && requestedVendor !== state.vendor) selectVendor(requestedVendor);
       applyRoute(initialRoute);
       await refresh();

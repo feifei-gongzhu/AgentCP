@@ -11,12 +11,14 @@ export const state = {
   assetInventory: null, assetOffset: 0, assetPageSize: 100,
   derived: null, automationCache: null, auditCache: null, promptCache: null,
   metricsCache: null,
+  // P4 控制台面板缓存（角色健康/计划/工具/研判/资源/迁移/工具进度）
+  p4: null, p4Generation: 0,
 };
 
 // UI-only state survives polling redraws.
 export const ui = {
   tab: "vulns", diag: "jobs", memberIndex: 0,
-  selected: { vulns: null, leads: null, directions: null, surface: null },
+  selected: { vulns: null, leads: null, directions: null, surface: null, plans: null },
   findingFilters: {
     vulns: { q: "", severity: "", status: "", type: "" },
     leads: { q: "", severity: "", status: "", type: "" },

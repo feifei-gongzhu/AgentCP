@@ -19,15 +19,33 @@ projects/{项目名}/team_config.json
 
 ## 2. 推荐的标准角色
 
+新项目默认使用七角色团队（Sorne 0.0.5 起；能力白名单由
+`src/sorne/role_registry.py` 唯一定义，前端角色下拉与
+`frontend/modules/team-config.js` 的 ROLE_OPTIONS 与之对齐）：
+
 | 职责 | 用途 | 推荐后端 | 推荐沙箱 | 推荐并发 |
 |---|---|---|---|---|
-| `reason` | 分析目标、提出高价值测试方向，主要产生 Intent | `codex` 或 `openai-compatible` | `read-only` | 1–2 |
-| `metacog` | 查盲点、纠偏、止损、补充反事实假设 | `codex` 或 `openai-compatible` | `read-only` | 1 |
-| `executor` | 认领 Intent，实际执行并把原始证据写入 `evidence/` | `codex` 或 `container` | `workspace-write` | 1–3 |
-| `reviewer` | 审核候选结果、证据质量和业务影响 | `codex` 或 `openai-compatible` | `read-only` | 1 |
+| `orchestrator` | 阶段推进、任务派发与汇总 | `codex` | `read-only` | 1 |
+| `planner` | 画像驱动的验证计划与重规划 | `codex` 或 `openai-compatible` | `read-only` | 1–2 |
+| `recon` | 资产、服务、目录、JS 线索与指纹采集 | `codex` | `workspace-write` | 1–3 |
+| `crack` | 已授权服务上的口令验证 | `codex` | `workspace-write` | 1 |
+| `poc` | 指纹对应的组件验证 | `codex` | `workspace-write` | 1–2 |
+| `operator` | Web 主验证、认证/API/业务逻辑与专项执行 | `codex` 或 `container` | `workspace-write` | 1–3 |
+| `reviewer` | 动作审批（action_review）与发现质量复核（finding_review） | `codex` 或 `openai-compatible` | `read-only` | 1 |
 
+七角色默认不要求七种不同模型：多个角色可共用同一后端与模型，
+按职责调整沙箱与并发即可。
 
-`openai-compatible` 只发送一次 HTTP 模型请求，没有本地工具循环，适合 Reason、Metacog 和 Reviewer。它不能代替需要运行命令、读取目标源码、访问测试目标和落盘证据的 Executor。
+`openai-compatible` 只发送一次 HTTP 模型请求，没有本地工具循环，适合
+planner 与 reviewer 的解释类任务；执行类角色（recon/crack/poc/operator）
+需要工具循环，应使用 `codex`、`claude-cli` 或 `container`。
+
+### 旧六角色（迁移期兼容）
+
+`reason`、`metacog`、`executor`、`waf_analyst`、`profile_mapper` 是迁移
+期旧角色：旧项目继续可运行，新项目不再默认包含。在"团队与设置"页可对
+含旧角色的项目执行团队迁移（预览/执行/回退，运行中的旧 Run 不热切换；
+详见 USAGE.md §32.8）。
 
 ## 3. 前端字段说明
 
@@ -46,7 +64,7 @@ reviewer-quality
 
 ### 职责
 
-选择 `reason`、`metacog`、`executor`、`reviewer`、`waf_analyst` 或 `profile_mapper`。职责决定加载哪个角色 Prompt，也决定自动化调度阶段。旧配置中的 `pentester` 是 `executor` 的兼容别名：读取时自动规范化为 `executor`，正常保存后写回规范角色。
+选择七角色（`orchestrator`、`planner`、`recon`、`crack`、`poc`、`operator`、`reviewer`）或迁移期旧角色（`reason`、`metacog`、`executor`、`waf_analyst`、`profile_mapper`）。职责决定加载哪个角色 Prompt、能力白名单与调度阶段。旧配置中的 `pentester` 是 `executor` 的兼容别名：读取时自动规范化为 `executor`，正常保存后写回规范角色。未知角色由服务端注册表拒绝，不会静默映射。
 
 ### 后端
 

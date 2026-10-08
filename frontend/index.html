@@ -7,7 +7,7 @@
   <title>Sorne</title>
   <link rel="preconnect" href="https://rsms.me">
   <link rel="stylesheet" href="https://rsms.me/inter/inter.css">
-  <link rel="stylesheet" href="/frontend/styles.css?v=9.0">
+  <link rel="stylesheet" href="/frontend/styles.css?v=10.0">
 </head>
 <body>
 <div class="app">
@@ -28,6 +28,7 @@
         <a class="nav-item" data-route-link="overview" href="#overview">总览</a>
         <a class="nav-item" data-route-link="findings" href="#findings">发现<span class="nav-count" id="navFindingsCount" hidden></span></a>
         <a class="nav-item" data-route-link="directions" href="#directions">验证方向<span class="nav-count" id="navDirectionsCount" hidden></span></a>
+        <a class="nav-item" data-route-link="plans" href="#plans">计划<span class="nav-count" id="navPlansCount" hidden></span></a>
         <a class="nav-item" data-route-link="assets" href="#assets">资产</a>
         <a class="nav-item" data-route-link="runs" href="#runs">运行</a>
         <a class="nav-item" data-route-link="settings" href="#settings">团队与设置</a>
@@ -276,6 +277,26 @@
       </div>
     </section>
 
+    <!-- 计划（§11 计划视图：任务依赖、委派角色、方法卡、结果、工具调用与证据） -->
+    <section id="view-plans" data-view="plans" hidden>
+      <div class="page-head"><h1>计划</h1><p class="desc" id="plansSummary">—</p></div>
+      <div class="section">
+        <div class="sec-head"><h2>计划版本</h2><span class="text-dim">planner submit_plan 生成的版本化任务图</span></div>
+        <div class="table-scroll"><table class="dt"><thead><tr>
+          <th>计划</th><th>策略</th><th>提出者</th><th class="num">任务</th><th>时间</th>
+        </tr></thead><tbody id="planBatchesBody"></tbody></table></div>
+      </div>
+      <div class="split">
+        <div>
+          <div class="table-toolbar"><span class="toolbar-count" id="planTasksCount"></span></div>
+          <div class="table-scroll findings-scroll"><table class="dt"><thead><tr>
+            <th>任务 / 依赖</th><th>动词</th><th>目标</th><th>委派角色 / 工具</th><th>状态</th>
+          </tr></thead><tbody id="planTasksBody"></tbody></table></div>
+        </div>
+        <div id="planTaskDetail" class="detail-pane"><div class="placeholder">选择任务</div></div>
+      </div>
+    </section>
+
     <!-- 资产 -->
     <section id="view-assets" data-view="assets" hidden>
       <div class="page-head">
@@ -333,6 +354,20 @@
           </select>
         </div>
         <div class="table-scroll"><table class="dt"><thead><tr><th>单元</th><th>职责</th><th>模型</th><th>当前</th><th>阶段</th><th>状态</th><th class="num">尝试</th><th>信号</th></tr></thead><tbody id="jobsBody"></tbody></table></div>
+      </div>
+      <div class="grid-2col">
+        <div class="section">
+          <div class="sec-head"><h2>角色分工</h2><span class="text-dim">七角色当前参与情况</span></div>
+          <div id="runRoleBreakdown" class="role-strip"></div>
+        </div>
+        <div class="section">
+          <div class="sec-head"><h2>阻塞与取消原因</h2><span class="text-dim">失败任务 / 能力缺口 / 停止原因</span></div>
+          <div id="runBlockPanel"></div>
+        </div>
+      </div>
+      <div class="section">
+        <div class="sec-head"><h2>工具进度</h2><span class="text-dim">本运行各工具调用状态统计</span></div>
+        <div class="table-scroll"><table class="dt"><thead><tr><th>工具</th><th>角色</th><th class="num">调用</th><th class="num">成功</th><th class="num">失败</th><th>最近活动</th></tr></thead><tbody id="runToolProgressBody"></tbody></table></div>
       </div>
       <div class="section">
         <div class="sec-head"><h2>事件流</h2><span id="eventsCountChip" class="text-dim"></span></div>
@@ -395,6 +430,14 @@
         </div>
       </div>
       <div class="section">
+        <div class="sec-head"><h2>七角色</h2><span class="text-dim" id="roleCardsNote"></span></div>
+        <div id="roleCards" class="role-grid"></div>
+      </div>
+      <div class="section" id="migrationSection" hidden>
+        <div class="sec-head"><h2>旧团队迁移</h2><span class="text-dim">预览 / dry-run / 回退副本；运行中不热切换</span></div>
+        <div id="migrationPanel"></div>
+      </div>
+      <div class="section">
         <div class="sec-head">
           <h2>Agent 团队</h2>
           <button id="addRoleButton" class="btn ghost sm" type="button">+ 添加</button>
@@ -446,6 +489,65 @@
           </div>
         </div>
       </div>
+      <div class="section">
+        <div class="sec-head"><h2>独立研判</h2><span class="text-dim" id="analysisPanelNote"></span></div>
+        <div id="analyzerConfigPanel" class="analyzer-grid"></div>
+        <div class="table-scroll"><table class="dt"><thead><tr>
+          <th>分析器</th><th>版本</th><th>状态 / 模型</th><th>结论</th><th class="num">建议</th><th></th>
+        </tr></thead><tbody id="analysisRecordsBody"></tbody></table></div>
+      </div>
+      <div class="section">
+        <div class="sec-head"><h2>工具与技能</h2><span class="text-dim">健康检查与路由解释；不把失败统一显示成“AI 出错”</span></div>
+        <div class="table-scroll"><table class="dt"><thead><tr>
+          <th>引擎能力</th><th>适配器</th><th>可用性</th><th>角色</th>
+        </tr></thead><tbody id="enginesBody"></tbody></table></div>
+        <details class="collapse">
+          <summary>工具目录 <span class="text-dim">35 项注册能力</span></summary>
+          <div class="collapse-body"><div class="table-scroll"><table class="dt"><thead><tr>
+            <th>工具</th><th>说明</th><th>状态</th><th>模型可见</th><th>角色白名单</th>
+          </tr></thead><tbody id="toolsBody"></tbody></table></div></div>
+        </details>
+        <details class="collapse">
+          <summary>技能卡 <span class="text-dim">家族卡与角色白名单</span></summary>
+          <div class="collapse-body"><div class="table-scroll"><table class="dt"><thead><tr>
+            <th>技能</th><th>版本</th><th>角色</th><th>状态</th><th>说明</th>
+          </tr></thead><tbody id="skillsBody"></tbody></table></div></div>
+        </details>
+        <details class="collapse">
+          <summary>技能路由解释 <span class="text-dim">为什么命中 / 为什么缺口</span></summary>
+          <div class="collapse-body">
+            <div class="row-3">
+              <input id="routingFeaturesInput" class="input-sm" placeholder="特征（逗号分隔）：shiro、fastjson、登录…">
+              <select id="routingRoleSelect" class="input-sm"><option value="">不限角色</option></select>
+              <button id="routingExplainButton" class="btn sm" type="button">解释路由</button>
+            </div>
+            <div id="routingExplanation"></div>
+          </div>
+        </details>
+      </div>
+      <div class="section">
+        <div class="sec-head"><h2>资源仓库</h2><span class="text-dim" id="resourcesPanelNote"></span></div>
+        <div class="table-scroll"><table class="dt"><thead><tr>
+          <th>资源</th><th>类别</th><th>名称 / 版本</th><th>来源 / 许可</th><th>许可</th><th>SHA-256</th><th></th>
+        </tr></thead><tbody id="resourcesBody"></tbody></table></div>
+        <details class="collapse">
+          <summary>导入资源 <span class="text-dim">来源与许可必填；导入验证拒绝明文凭据</span></summary>
+          <div class="collapse-body form-stack">
+            <div class="row-3">
+              <select id="resourceCategorySelect" class="input-sm"><option value="fingerprint_rules">指纹规则</option><option value="js_clue_rules">JS 线索规则</option><option value="service_dictionaries">服务字典</option><option value="poc_templates">POC 模板</option><option value="skill_docs">技能文档</option></select>
+              <input id="resourceIdInput" class="input-sm" placeholder="资源 ID（字母数字._-，2-64）">
+              <input id="resourceNameInput" class="input-sm" placeholder="名称">
+            </div>
+            <div class="row-3">
+              <input id="resourceSourceInput" class="input-sm" placeholder="来源（必填）">
+              <input id="resourceUrlInput" class="input-sm" placeholder="来源 URL（可选）">
+              <input id="resourceLicenseInput" class="input-sm" placeholder="许可（必填）">
+            </div>
+            <textarea id="resourceContentInput" rows="6" placeholder="资源内容（JSON）。明文凭据会被导入验证拒绝。"></textarea>
+            <button id="resourceImportButton" class="btn primary sm" type="button">导入</button>
+          </div>
+        </details>
+      </div>
       <details id="project-blackboard" class="collapse">
         <summary>项目黑板 <span class="text-dim">工作记忆</span></summary>
         <div class="collapse-body"><button id="copyBoard" class="btn ghost sm">复制</button><pre id="blackboardText" class="code-block"></pre></div>
@@ -465,6 +567,6 @@
 </div>
 <div id="detailBackdrop" class="detail-backdrop" hidden></div>
 <div id="toast" class="toast"></div>
-<script type="module" src="/frontend/app.js?v=9.0"></script>
+<script type="module" src="/frontend/app.js?v=10.0"></script>
 </body>
 </html>

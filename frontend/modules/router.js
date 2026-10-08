@@ -1,5 +1,5 @@
 export const ROUTES = new Set([
-  "projects", "overview", "findings", "directions", "assets", "runs", "settings",
+  "projects", "overview", "findings", "directions", "plans", "assets", "runs", "settings",
 ]);
 
 const LEGACY = {

@@ -1,3 +1,35 @@
+// 角色目录（与后端 role_registry 双契约对齐：七角色 + 迁移期旧角色）。
+// index.html 的职责下拉、卡片标签与校验提示共用这一份，避免多处漂移。
+export const ROLE_OPTIONS = [
+  { value: "planner", label: "规划（planner）", legacy: false },
+  { value: "orchestrator", label: "编排（orchestrator）", legacy: false },
+  { value: "recon", label: "侦察（recon）", legacy: false },
+  { value: "crack", label: "口令验证（crack）", legacy: false },
+  { value: "poc", label: "组件验证（poc）", legacy: false },
+  { value: "operator", label: "综合执行（operator）", legacy: false },
+  { value: "reviewer", label: "复核（reviewer）", legacy: false },
+  { value: "reason", label: "推理（reason，旧）", legacy: true },
+  { value: "metacog", label: "盲点（metacog，旧）", legacy: true },
+  { value: "executor", label: "执行（executor，旧）", legacy: true },
+  { value: "waf_analyst", label: "WAF（waf_analyst，旧）", legacy: true },
+  { value: "profile_mapper", label: "画像服务（profile_mapper，旧）", legacy: true },
+];
+
+export const SEVEN_ROLES = ROLE_OPTIONS.filter(option => !option.legacy).map(option => option.value);
+
+// 保存前角色规范化：接受 pentester 别名与未知前后缀，其他保持原值
+// （未知角色由服务端 role_registry 拒绝，前端不静默映射回 executor）。
+export function normalizeRoleValue(value) {
+  const raw = String(value || "").trim();
+  if (raw === "pentester") return "executor";
+  return raw;
+}
+
+export function isLegacyRole(value) {
+  const normalized = normalizeRoleValue(value);
+  return ROLE_OPTIONS.some(option => option.value === normalized && option.legacy);
+}
+
 export function parseWorkerCommand(text) {
   const trimmed = String(text || "").trim();
   if (!trimmed) return { value: [], error: null };
@@ -25,6 +57,9 @@ export function validateMemberData(member, allMembers) {
     problems.push({ errorId: "eName", controlId: "mName", message: "名称必填", label: "名称" });
   } else if (allMembers.filter(item => String(item.name || "").trim() === name).length > 1) {
     problems.push({ errorId: "eName", controlId: "mName", message: "名称不能与其他角色重复", label: "名称" });
+  }
+  if (!normalizeRoleValue(member.role)) {
+    problems.push({ errorId: null, controlId: "mRole", message: "职责必填（七角色或迁移期旧角色）", label: "职责" });
   }
   const type = member.type || member.backend || "codex";
   const model = String(member.model || "").trim();
@@ -67,8 +102,18 @@ export function validateMemberData(member, allMembers) {
 export function normalizeMemberForSave(member) {
   const normalized = { ...member };
   normalized.type = normalized.type || normalized.backend || "codex";
+  normalized.role = normalizeRoleValue(normalized.role);
   delete normalized.backend;
   return normalized;
+}
+
+// 迁移期提示（不阻塞保存）：旧六角色仍可运行，但新项目默认七角色。
+export function roleAdvisories(member) {
+  const advisories = [];
+  if (isLegacyRole(member.role)) {
+    advisories.push(`${normalizeRoleValue(member.role)} 是迁移期旧角色；旧项目可继续运行，新项目建议使用七角色并在设置页执行团队迁移`);
+  }
+  return advisories;
 }
 
 export function stripMemberTransientFields(member) {

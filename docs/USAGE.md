@@ -779,6 +779,22 @@ python3 sorne approve-gate vendor-name \
 | POST | `/api/automation/cancel` | 取消运行 |
 | POST | `/api/gate/approve` | 批准门禁 |
 | POST | `/api/hints` | 写入 Hint |
+| GET | `/api/team/health?vendor=...` | 七角色卡（职责/模型/运行时/能力/技能/当前任务/健康状态） |
+| GET | `/api/plan?vendor=...` | 计划图、任务依赖、方法卡、工具调用与结果关联 |
+| GET | `/api/tools/health?vendor=...` | 引擎适配器可用性、工具目录与技能卡状态 |
+| GET | `/api/skills/routing?vendor=...&features=a&features=b` | 技能路由解释（为什么命中/为什么缺口） |
+| GET | `/api/analysis?vendor=...` | 独立研判配置、排队任务与版本化分析记录 |
+| POST | `/api/analysis/config` | 分析器启停与模型覆盖（analysis_config.json） |
+| POST | `/api/analysis/reanalyze` | 以原记录输入入队重分析（旧版本保留） |
+| POST | `/api/analysis/followup` | 登记研判建议采纳状态 |
+| GET | `/api/resources?vendor=...` | 资源仓库（五类分类管理） |
+| POST | `/api/resources/import` | 导入/升级资源（来源与许可必填，拒绝明文凭据） |
+| POST | `/api/resources/enabled` | 启用/停用资源 |
+| POST | `/api/resources/rollback` | 资源回滚到上一版本 |
+| GET | `/api/run/tools?vendor=...` | 当前运行的工具调用统计（进度） |
+| GET | `/api/findings/chain?vendor=...&finding_id=...` | 发现详情证据链（六段） |
+| GET | `/api/team/migration?vendor=...` | 团队迁移预览（dry-run，不写文件） |
+| POST | `/api/team/migration` | `action=execute` 执行迁移 / `action=rollback` 回退 |
 
 Token Header：
 
@@ -1086,3 +1102,98 @@ metrics               查看覆盖率和可靠性指标
 dashboard             生成离线状态快照
 serve                 启动 HTTP 控制平面
 ```
+
+## 32. 七角色研究台（P4 控制台）
+
+### 32.1 七角色卡（团队与设置页）
+
+设置页顶部展示七张角色卡，每张包含七类信息：职责、模型、运行时、能力、
+技能、当前任务和健康状态。健康状态共七种，全部由真实数据推导：
+
+| 状态 | 含义 |
+|---|---|
+| ready | 有可认领的开放方向 |
+| running | 本运行中该角色有排队/执行中任务 |
+| waiting_dependency | 可认领方向的依赖未满足；crack 在无口令/认证服务候选时同样显示"等待匹配服务"，不会伪造调用证明上场 |
+| no_matching_task | 当前没有匹配该角色能力的开放任务 |
+| capability_missing | 角色核心引擎不可用（如未预取 nuclei 镜像时 poc 显示缺口与原因） |
+| blocked | 最近任务失败（展示失败原因） |
+| disabled | 团队未配置该角色成员 |
+
+能力计数为"白名单 ∩ 已实现能力"；缺口列出未实现项。技能标签显示版本与
+可用状态（工具缺口时标黄）。失败按真实原因展示（引擎缺口/网关拒绝/
+审批要求），不会统一显示成"AI 出错"。
+
+### 32.2 计划视图（导航"计划"页）
+
+- 上表：planner `submit_plan` 生成的版本化计划图（策略、提出者、任务数）。
+- 下表：每个任务方向，含依赖（父方向及状态）、委派角色、绑定工具。
+- 右侧详情：任务依赖、方法卡（任务注册时固定的版本与内容哈希）、
+  工具调用审计（tool_call_id、状态、耗时、输出摘要）与结果事实；
+  点击结果可跳转到发现页对应记录。
+
+### 32.3 运行视图增强（运行页）
+
+- 角色分工：七角色在本运行中的参与情况（执行中/本轮完成/空闲）。
+- 工具进度：本运行每个工具的调用、成功、失败次数与最近活动。
+- 阻塞与取消原因：失败任务错误、角色能力缺口、停止/取消事件的原因。
+
+### 32.4 发现详情证据链（发现页）
+
+漏洞详情新增"证据链"折叠区，把六段证据连成一条线：
+请求/响应（proof_refs，可就地展开文件内容）→ 引擎/工具原始命中
+（方向关联的工具调用审计）→ 独立 AI 研判（分析记录版本、模型、结论、
+建议）→ reviewer 复核（证据充分性、补证据项）→ Guardian 判定
+（certified 与降级理由）→ 人工结论（裁决动作与理由）。
+缺失段如实标注"缺失"，不伪造占位记录。
+
+### 32.5 独立研判面板（设置页）
+
+- 三个分析器（POC/目录/JS）各一张卡：启用状态、描述、模型（显式覆盖或
+  继承 planner/reviewer）、prompt 与 schema 版本。
+- 启停开关写入 `analysis_config.json`（`analyzers.<kind>.enabled`），
+  只影响入队，不影响取消、恢复、证据校验与授权范围检查。
+- 记录表：版本、状态、模型、结论、建议数；每行提供"重分析"入口——
+  以原记录输入生成 version+1 新记录，旧记录保留可追溯。
+- 本产品不提供也不显示"剩余 AI 弹药/每日次数/Token 配额"。
+
+### 32.6 工具与技能（设置页）
+
+- 引擎能力表：适配器、可用性、使用角色。缺口显示具体原因
+  （如"镜像 projectdiscovery/nuclei:latest 不在本地"）。
+- 工具目录：35 项注册能力的实现/可用/模型可见状态与角色白名单。
+- 技能卡表：版本、角色白名单、状态（工具缺口标黄）。
+- 技能路由解释：输入特征（如 `shiro`、`fastjson`）与可选角色后，
+  显示每张卡的命中/缺口与理由——路由命中只代表方法适用，
+  不代表漏洞成立。
+
+### 32.7 资源仓库（设置页）
+
+五类资源（指纹规则、JS 线索规则、服务字典、POC 模板、技能文档）的
+列表与启停；导入表单要求资源 ID、名称、来源与许可必填，内容为 JSON，
+导入验证拒绝结构错误与明文凭据形状（含 JSON 键值形状的
+password/api_key/authorization/cookie）。同 ID 导入生成新版本，
+可回滚到上一版本；当前版本保留在历史中。
+
+### 32.8 旧项目团队迁移（设置页）
+
+检测到旧六角色（reason/metacog/executor/waf_analyst/profile_mapper）
+成员时显示迁移面板：
+
+1. 预览（dry-run）：旧成员 → 新角色映射、复制哪些配置、专属 Prompt
+   复制还是归档、需要人工适配的项（密钥不随迁移复制，需在新成员名下
+   重新登记；只读沙箱的执行类目标按新角色默认值设置）。
+2. 执行：写入七角色团队配置（已存在的新角色成员原样保留），原配置与
+   全部映射决策归档到 `projects/<vendor>/team_migration/<时间戳>/`。
+3. 幂等：已迁移的团队重复执行返回 no-op，不再归档。
+4. 回退：从归档恢复团队配置文件；数据库与迁移期间产生的新证据保持
+   原样，不删除任何记录。重复回退被拒绝。
+5. 运行中的旧 Run 不热切换：存在 running/paused/stopping 运行时，
+   执行与回退都会被拒绝；完成/停止后下次 Run 使用新团队。
+
+默认映射：reason→planner（复制模型配置与专属 Prompt）、
+metacog→planner（反事实/盲区并入规划阶段，Prompt 归档）、
+executor→operator（主要）/recon/crack/poc（一对多，Prompt 归档）、
+waf_analyst→operator＋planner 重规划、profile_mapper→recon
+（画像服务已内置）、reviewer→reviewer（同职责域，Prompt 复制）。
+orchestrator 优先继承 reason 的兼容后端。

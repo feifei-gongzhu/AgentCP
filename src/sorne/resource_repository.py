@@ -39,11 +39,13 @@ FILES_DIR = ("resources", "files")
 # 导入校验拒绝的明文凭据形状（不把密钥/Cookie 当资源内容入库）。
 _FORBIDDEN_PATTERNS = tuple(
     re.compile(pattern, re.IGNORECASE) for pattern in (
-        r"api[_-]?key\s*[:=]\s*['\"][A-Za-z0-9_\-]{16,}['\"]",
-        r"authorization\s*[:=]\s*['\"]?(bearer|basic)\s+[A-Za-z0-9._+/=\-]{8,}",
-        r"cookie\s*[:=]\s*['\"]?[A-Za-z0-9_%\-]{4,}=[^;'\"]{8,}",
+        # 键名后允许一个可选的闭合引号：JSON 键值形状（"password": "..."）
+        # 与文本形状（password=...）都要命中（P4 导入界面实测发现前者漏检）。
+        r"api[_-]?key['\"]?\s*[:=]\s*['\"]?[A-Za-z0-9_\-]{16,}['\"]?",
+        r"authorization['\"]?\s*[:=]\s*['\"]?(bearer|basic)\s+[A-Za-z0-9._+/=\-]{8,}",
+        r"cookie['\"]?\s*[:=]\s*['\"]?[A-Za-z0-9_%\-]{4,}=[^;'\"]{8,}",
         r"-----BEGIN [A-Z ]*PRIVATE KEY-----",
-        r"password\s*[:=]\s*['\"][^'\"]{6,}['\"]",
+        r"password['\"]?\s*[:=]\s*['\"]?[^'\"}{]{6,}['\"]?(?=[,}\]]|$)",
     )
 )
 
