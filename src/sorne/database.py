@@ -2199,7 +2199,12 @@ class ControlDatabase:
         error: str | None = None,
         retryable: bool = True,
     ) -> str:
-        """终态写回；非本次租约持有者不得写（迟到 fencing）。"""
+        """终态写回；非本次租约持有者不得写（迟到 fencing）。
+
+        写回条件只认 ``worker_id`` 当前持有者：Run 停止/批量取消会把
+        ``worker_id`` 置空，此后任何迟到结果（包括原持有者）都被拒绝，
+        已取消任务不得被写回复活（§7A.3"旧 Run 迟到分析不激活"）。
+        """
         if status not in {"completed", "failed", "cancelled", "queued"}:
             raise ValueError(f"非法分析任务终态: {status}")
         now = _now()
@@ -2219,11 +2224,16 @@ class ControlDatabase:
                 """
                 UPDATE analysis_jobs SET status=?,result_record_id=?,error=?,worker_id=NULL,
                     lease_expires_at=NULL,updated_at=?
-                WHERE id=? AND (worker_id=? OR status IN ('queued','cancelled'))
+                WHERE id=? AND worker_id=?
                 """,
                 (final_status, record_id, error, now, job_id, worker_id),
             )
             if updated.rowcount != 1:
+                self._event(db, row["run_id"], None, "analysis_late_write_rejected", {
+                    "analysis_job_id": job_id,
+                    "worker_id": worker_id,
+                    "attempted_status": status,
+                })
                 return "fenced"
             self._event(db, row["run_id"], None, "analysis_job_finished", {
                 "analysis_job_id": job_id,

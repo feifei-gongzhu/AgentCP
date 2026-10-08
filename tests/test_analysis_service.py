@@ -254,6 +254,32 @@ def test_run_stop_cancels_analysis_jobs(
     assert database.list_analysis_jobs("R1")[0]["status"] == "cancelled"
 
 
+def test_cancelled_analysis_job_cannot_be_resurrected_by_late_write(
+    project: ProjectStore, database: ControlDatabase,
+) -> None:
+    """Run 停止批量取消后，迟到写回（含原租约持有者）不得复活已取消任务。
+
+    压力测试（test_stress_concurrency 取消风暴）发现的缺陷回归：
+    finish_analysis_job 旧 WHERE 允许 ``status IN ('queued','cancelled')``
+    命中，已取消任务可被写回为 completed——违反 §7A.3“旧 Run 迟到分析
+    不激活”与该方法自身的租约 fencing 契约。
+    """
+    database.enqueue_analysis_job("poc", {"k": 1}, "hash-late", run_id="R1")
+    job = database.claim_analysis_job("an-1")
+    assert job is not None
+    # Run 停止：租约持有者在途时任务被批量取消（worker_id 置空）。
+    assert database.cancel_analysis_jobs_for_run("R1", "run stopped") == 1
+    # 原持有者的迟到结果被拒绝，任务保持 cancelled。
+    assert database.finish_analysis_job(
+        str(job["id"]), "an-1", status="completed", record_id="AN-late",
+    ) == "fenced"
+    assert database.get_analysis_job(str(job["id"]))["status"] == "cancelled"
+    assert database.list_analysis_records(analyzer_kind="poc") == []
+    assert database.event_count("analysis_late_write_rejected") == 1
+    # 新 Worker 也不能把已取消任务当作可认领工作。
+    assert database.claim_analysis_job("an-2") is None
+
+
 def test_team_member_cannot_impersonate_analysis(project: ProjectStore) -> None:
     """§13.1-17：研判记录不能由七角色的一段附加输出冒充。"""
     from src.sorne.worker import WorkerError, apply_worker_output
